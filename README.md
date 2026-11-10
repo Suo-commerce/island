@@ -6,13 +6,18 @@ that can only be tightened, and replicated for verification. Flare is its
 personal console. Both live in this one Cargo workspace.
 
 The specification is [`docs/spec.md`](docs/spec.md). The repo is at build
-step 3 of its "Build order":
+step 4 of its "Build order":
 
 - `island-core` holds the record formats, with golden vectors in
   `crates/island-core/tests/golden/`.
 - `island-env` holds the clock, randomness and storage.
 - `island-log` holds the appender, the reader and replay.
 - `island-cli` starts, verifies and reads a log.
+- `island-model` is the reference model: what the write path must answer,
+  written to be read.
+- `island-harness` runs generated cases through the real appender on
+  simulated storage, with the model beside it, and checks its oracles
+  after every operation.
 
 Grants (step 5) and the gate (step 6) are not checked yet: the appender
 takes any signed, correctly counted submission on the right stream. The
@@ -50,8 +55,14 @@ Island server, with the same commands; run both before a push:
 ```sh
 just check              # format, Clippy with the bans, dependency rules
 just test               # unit and component tests
-just SEEDS=500 harness  # the seeded harness (from build step 4)
+just harness            # archived failures, then 10,000 seeds, optimized
+just SEEDS=500 harness  # the same with another number of seeds
 ```
+
+`just test` includes a short harness run (256 seeds). Each seed is one
+generated case, run twice with the two traces compared byte for byte. A
+failing case is shrunk and written to `harness/seeds/`; commit it with the
+fix.
 
 A log for development, under `.island/` (ignored by git):
 

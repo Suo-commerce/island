@@ -33,9 +33,10 @@ deps:
 test:
     cargo test --workspace --all-features --locked
 
-# The seeded harness (generators and oracles arrive with build step 4).
+# The seeded harness, optimized: archived failures first, then SEEDS new seeds.
 harness:
-    ISLAND_HARNESS_SEEDS={{SEEDS}} cargo test -p island-harness --release --locked
+    ISLAND_HARNESS_SEEDS={{SEEDS}} cargo test -p island-harness --release --locked --test harness -- archived_seeds_pass
+    ISLAND_HARNESS_SEEDS={{SEEDS}} cargo test -p island-harness --release --locked --test harness
 
 # Genesis: start a new log with entries 0 and 1. Key files come from `island-cli keygen`.
 init:

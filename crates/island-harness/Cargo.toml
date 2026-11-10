@@ -12,3 +12,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+island-core = { workspace = true }
+island-env = { workspace = true }
+island-log = { workspace = true }
+island-model = { workspace = true }
+proptest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
