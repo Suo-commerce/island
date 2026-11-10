@@ -16,7 +16,7 @@ a flare-* crate may not use a new island-* crate until it is listed in
 FLARE_MAY_USE.  The check reads the dependencies each crate declares, which
 includes optional and target-specific ones.
 
-Run by `just deps` and CI.  Exit code 1 lists every violation.
+Run by `just deps`.  Exit code 1 lists every violation.
 """
 
 import json

@@ -1,4 +1,5 @@
-# Island workspace tasks.  CI runs `just check` and `just test`.
+# Island workspace tasks.  There is no hosted CI: `just check test` is the
+# gate, run on a laptop or on the Island server before a push.
 
 # Seeds per harness run: `just SEEDS=500 harness`.
 SEEDS := "10000"
@@ -12,7 +13,7 @@ APPENDER_KEY := ".island/appender.key"
 default:
     @just --list
 
-# Everything CI checks before the tests: format, Clippy with the bans, dependency rules.
+# Everything to check before the tests: format, Clippy with the bans, dependency rules.
 check: fmt lint deps
 
 # Formatting, check only.

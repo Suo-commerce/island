@@ -3,7 +3,7 @@
 //!
 //! `golden/verse.txt` is the contract. These tests rebuild the same values
 //! from the inputs below and require every byte to match, so any change to
-//! the encoding, a domain string or the signing turns CI red. An
+//! the encoding, a domain string or the signing fails the tests. An
 //! implementation in another language can check itself against the same
 //! file.
 //!

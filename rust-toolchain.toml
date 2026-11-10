@@ -1,5 +1,5 @@
 # The toolchain the repo is formatted and checked with, the same one Taso
-# pins.  Pinned so that a new stable rustfmt or clippy cannot turn main red
+# pins.  Pinned so that a new stable rustfmt or clippy cannot fail `just check`
 # with no change in the code; moved by hand, with the code fixed in the
 # same commit.
 [toolchain]

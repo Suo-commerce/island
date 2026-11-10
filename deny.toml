@@ -1,6 +1,6 @@
 # cargo deny: licences, advisories and sources of every crate in
-# Cargo.lock, and the crates Island must never link.  `just deps` and CI
-# run `cargo deny check`.
+# Cargo.lock, and the crates Island must never link.  `just deps` runs
+# `cargo deny check`.
 #
 # The dependency direction inside the workspace (island never depends on
 # flare, and so on) is checked by scripts/check-deps.py, which `just deps`
@@ -18,7 +18,7 @@ unsound = "all"
 ignore = []
 
 [licenses]
-# A new dependency with a licence not listed here fails CI until it is
+# A new dependency with a licence not listed here fails `just deps` until it is
 # judged and added.  Taso's deny.toml is the list to start from.
 allow = [
     "Apache-2.0",

@@ -29,7 +29,7 @@ other crates are still empty libraries.
 | `clippy.toml` | The determinism bans |
 | `scripts/check-deps.py`, `deny.toml` | The dependency rules; licences, advisories and sources |
 
-## Rules CI enforces
+## Rules `just check` enforces
 
 - No `island-*` crate depends on a `flare-*` crate.
 - `flare-*` crates reach Island only through `island-core`, `island-log` and
@@ -43,6 +43,9 @@ other crates are still empty libraries.
 Needs [just](https://github.com/casey/just) and
 [cargo-deny](https://github.com/EmbarkStudios/cargo-deny); the Rust
 toolchain is pinned in `rust-toolchain.toml`.
+
+There is no hosted CI. The checks and tests run on a laptop or on the
+Island server, with the same commands; run both before a push:
 
 ```sh
 just check              # format, Clippy with the bans, dependency rules
