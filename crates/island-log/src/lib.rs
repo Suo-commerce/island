@@ -5,13 +5,11 @@
 //! - [`chain`]: what makes records a valid log, and the state they replay
 //!   to. Pure.
 //! - [`appender`]: the write path, over `island-env`'s clock and storage.
-//! - [`genesis`]: the two submissions that start a log.
+//! - [`genesis`]: the submissions that start a log.
 //! - [`read`]: a log file's bytes to verified records. Pure; this and
 //!   [`chain`] are the part Flare links.
 //!
-//! Build steps 3 and 5 of docs/spec.md. The gate (step 6) is not checked
-//! yet: until then the appender takes any signed, correctly counted
-//! submission that a grant covers.
+//! Build steps 3, 5 and 6 of docs/spec.md.
 
 #![warn(missing_docs)]
 
@@ -25,7 +23,7 @@ use std::fmt;
 use island_core::{DecodeError, PublicKey, Record};
 
 pub use appender::{Ack, Appender, OpenError, Recovery, Rejected};
-pub use chain::{Chain, Fault, Head, ReplayError, replay};
+pub use chain::{Chain, Fault, Head, ReplayError, VerdictFault, replay};
 pub use frame::FrameError;
 pub use island_auth::Denied;
 

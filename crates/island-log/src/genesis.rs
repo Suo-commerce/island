@@ -1,7 +1,8 @@
-//! The two submissions that start a log (docs/spec.md, "Genesis").
+//! The submissions that start a log (docs/spec.md, "Genesis").
 //!
-//! Both are signed by the root key. Entry 0 declares it; entry 1 holds the
-//! initial grants:
+//! All are signed by the root key. Entry 0 declares it; entry 2 is the
+//! first policy, an ordinary root-signed write; entry 1 holds the initial
+//! grants:
 //!
 //! - the root capability: `policy`, `grant` and `revoke` entries on the
 //!   `policy` and `authority` streams, which is all the root key is ever
@@ -11,7 +12,12 @@
 
 use std::collections::BTreeSet;
 
-use island_core::{Body, Bootstrap, Genesis, Grant, Kind, PublicKey, StreamId, Submission};
+use island_core::{
+    Body, Bootstrap, Genesis, Grant, Invariant, Kind, Policy, PublicKey, StreamId, Submission,
+};
+
+/// The text bound of the first policy, in bytes.
+pub const FIRST_VERSE_TEXT_MAX: u32 = 4096;
 
 /// Entry 0: the root key declares itself. Counter 1 of the root key.
 pub fn genesis(root: PublicKey) -> Submission {
@@ -45,6 +51,26 @@ pub fn bootstrap(root: PublicKey, appender: PublicKey) -> Submission {
                     scope: streams(&[StreamId::GATE]),
                     rights: [Kind::Verdict].into(),
                     narrows: None,
+                },
+            ],
+        }),
+    }
+}
+
+/// Entry 2: the first policy, `VerseNamesEvidence` and
+/// `VerseTextMax { bytes: 4096 }`. Counter 3 of the root key. `evaluator`
+/// is the git commit of the build that judges.
+pub fn first_policy(root: PublicKey, evaluator: &str) -> Submission {
+    Submission {
+        stream: StreamId::from(StreamId::POLICY),
+        writer: root,
+        counter: 3,
+        body: Body::Policy(Policy {
+            evaluator: evaluator.to_owned(),
+            invariants: vec![
+                Invariant::VerseNamesEvidence,
+                Invariant::VerseTextMax {
+                    bytes: FIRST_VERSE_TEXT_MAX,
                 },
             ],
         }),

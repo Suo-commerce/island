@@ -38,6 +38,6 @@ harness:
     ISLAND_HARNESS_SEEDS={{SEEDS}} cargo test -p island-harness --release --locked --test harness -- archived_seeds_pass
     ISLAND_HARNESS_SEEDS={{SEEDS}} cargo test -p island-harness --release --locked --test harness
 
-# Genesis: start a new log with entries 0 and 1. Key files come from `island-cli keygen`.
+# Genesis: start a new log with entries 0, 1 and 2 (the first policy). Key files come from `island-cli keygen`.
 init:
     cargo run --quiet --locked -p island-cli -- init --log {{LOG}} --root-key {{ROOT_KEY}} --appender-key {{APPENDER_KEY}}

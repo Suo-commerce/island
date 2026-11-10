@@ -7,7 +7,9 @@
 //! 2. the writer's counter: the next number goes on, an exact resend gets
 //!    its first answer again, anything else is refused;
 //! 3. a grant in force that lets the writer write it (`island-auth`);
-//! 4. *(the gate: build step 6)*;
+//! 4. the gate (`island-gate`): if it refuses, a `verdict` entry carrying
+//!    the whole submission is appended instead, and the writer's counter
+//!    advances either way;
 //! 5. position: `seq`, `at`, `policy`, `prev`;
 //! 6. hash and sign;
 //! 7. `append`, then `sync`;
@@ -26,12 +28,12 @@ use std::io;
 
 use island_auth::Denied;
 use island_core::{
-    Answer, DecodeError, Entry, Hash, PublicKey, Record, Refusal, Signature, SigningKey,
-    Submission, public_key,
+    Answer, Body, DecodeError, Entry, Hash, PublicKey, Record, Refusal, Signature, SigningKey,
+    StreamId, Submission, Verdict, public_key, sign_hash,
 };
 use island_env::{Clock, Storage};
 
-use crate::chain::{Chain, Fault, ReplayError};
+use crate::chain::{Chain, Fault, ReplayError, Step};
 use crate::frame::{self, FrameError};
 use crate::{LogError, decode_records};
 
@@ -44,8 +46,9 @@ pub struct Ack {
     pub hash: Hash,
 }
 
-/// A submission is not in the log. Except for [`Rejected::Refused`], no
-/// entry was written and the writer's counter did not move.
+/// A submission is not in the log as an entry of its own. Except for
+/// [`Rejected::Refused`], nothing was written and the writer's counter did
+/// not move.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rejected {
     /// The appender has stopped after a storage failure. Open the log
@@ -73,8 +76,9 @@ pub enum Rejected {
         /// The counter.
         counter: u64,
     },
-    /// An exact resend of a submission the gate refused: the original
-    /// refusal, with its `verdict` entry.
+    /// The gate refused it. A `verdict` entry records the refusal and the
+    /// writer's counter has advanced; an exact resend gets this same
+    /// answer and adds nothing.
     Refused {
         /// The verdict entry's position.
         seq: u64,
@@ -86,6 +90,9 @@ pub enum Rejected {
     /// Authority does not allow the write: no grant covers it, or the
     /// grant or revoke it carries is not allowed.
     Denied(Denied),
+    /// A `verdict` submitted from outside. Only the appender's own gate
+    /// writes them.
+    VerdictFromOutside,
     /// The record would not be a valid next entry.
     Invalid(Fault),
     /// The record is larger than a frame may hold.
@@ -117,6 +124,7 @@ impl fmt::Display for Rejected {
                 )
             }
             Self::Denied(denied) => write!(f, "not authorized: {denied}"),
+            Self::VerdictFromOutside => f.write_str("only the appender writes verdict entries"),
             Self::Invalid(fault) => write!(f, "not a valid next entry: {fault}"),
             Self::TooLarge => f.write_str("the record is too large"),
             Self::Storage(kind) => write!(f, "storage failed ({kind}); the appender has stopped"),
@@ -306,29 +314,71 @@ impl<S: Storage, C: Clock> Appender<S, C> {
             });
         }
 
-        // 3 is part of the check below, so that replay makes it too.
-        // 4. The gate joins here.
+        // A verdict comes from the appender's own gate, never from outside.
+        if matches!(submission.body, Body::Verdict(_)) && self.chain.next_seq() >= 2 {
+            return Err(Rejected::VerdictFromOutside);
+        }
 
-        // 5. Position. `at` never goes back, whatever the clock does.
+        // 3 to 6. Position, hash and sign, then the check replay will make:
+        // it holds the grant check and the gate.
+        let record = self.seal(submission.clone(), sig_writer);
+        match self.chain.check(&record) {
+            Ok(step) => self.store(&record, step),
+            // 4. The gate refuses: the verdict is appended instead, carrying
+            // the whole submission, and that is the writer's answer.
+            Err(Fault::Gate(reason)) => {
+                let me = self.public_key();
+                let verdict = Submission {
+                    stream: StreamId::from(StreamId::GATE),
+                    writer: me,
+                    counter: self.chain.next_counter(&me).ok_or(Rejected::Invalid(
+                        Fault::Counter {
+                            expected: None,
+                            found: 0,
+                        },
+                    ))?,
+                    body: Body::Verdict(Verdict {
+                        rejected: Box::new(submission),
+                        sig_writer,
+                        reason,
+                    }),
+                };
+                let signature = sign_hash(&self.key, &verdict.hash());
+                let record = self.seal(verdict, signature);
+                let step = self.chain.check(&record).map_err(Rejected::Invalid)?;
+                let ack = self.store(&record, step)?;
+                Err(Rejected::Refused {
+                    seq: ack.seq,
+                    hash: ack.hash,
+                    reason,
+                })
+            }
+            Err(Fault::Denied(denied)) => Err(Rejected::Denied(denied)),
+            Err(fault) => Err(Rejected::Invalid(fault)),
+        }
+    }
+
+    /// 5 and 6. Give a submission the next position, then hash and sign.
+    /// `at` never goes back, whatever the clock does.
+    fn seal(&self, submission: Submission, sig_writer: Signature) -> Record {
         let now = self.clock.now_micros();
-        let entry = Entry {
-            seq: self.chain.next_seq(),
-            at: self.chain.head().map_or(now, |head| now.max(head.at)),
-            policy: self.chain.policy_seq(),
-            prev: self.chain.prev(),
-            submission,
-            sig_writer,
-        };
+        Record::seal(
+            Entry {
+                seq: self.chain.next_seq(),
+                at: self.chain.head().map_or(now, |head| now.max(head.at)),
+                policy: self.chain.policy_seq(),
+                prev: self.chain.prev(),
+                submission,
+                sig_writer,
+            },
+            &self.key,
+        )
+    }
 
-        // 6. Hash and sign, then the same check replay will make.
-        let record = Record::seal(entry, &self.key);
-        let step = self.chain.check(&record).map_err(|fault| match fault {
-            Fault::Denied(denied) => Rejected::Denied(denied),
-            fault => Rejected::Invalid(fault),
-        })?;
+    /// 7 and 8. Make a checked record durable, or stop; then take it into
+    /// the state and acknowledge.
+    fn store(&mut self, record: &Record, step: Step) -> Result<Ack, Rejected> {
         let framed = frame::frame(&record.encode()).ok_or(Rejected::TooLarge)?;
-
-        // 7. Durable, or stop.
         if let Err(error) = self
             .storage
             .append(&framed)
@@ -337,13 +387,10 @@ impl<S: Storage, C: Clock> Appender<S, C> {
             self.stopped = true;
             return Err(Rejected::Storage(error.kind()));
         }
-
-        // 8. Acknowledge.
-        let ack = Ack {
+        self.chain.advance(record, step);
+        Ok(Ack {
             seq: record.entry.seq,
             hash: record.hash,
-        };
-        self.chain.advance(&record, step);
-        Ok(ack)
+        })
     }
 }

@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use common::{appender_key, pin, records, root, seal, verse, writer};
 use island_core::{
     Answer, Body, Bootstrap, Genesis, Grant, Invariant, Kind, Policy, Preference, PublicKey,
-    Record, Refusal, SigningKey, StreamId, Submission, Verdict, public_key,
+    Record, SigningKey, StreamId, Submission, public_key,
 };
 use island_log::{Chain, Fault, ReplayError, genesis, replay};
 
@@ -493,24 +493,6 @@ fn a_writer_counts_one_two_three() {
             }
         )
     );
-}
-
-#[test]
-fn a_verdict_is_refused_until_the_gate_can_rejudge_it() {
-    let log = records(1);
-    let rejected = verse(&writer(), 2, "x");
-    let submission = Submission {
-        stream: StreamId::from(StreamId::GATE),
-        writer: public_key(&appender_key()),
-        counter: 1,
-        body: Body::Verdict(Verdict {
-            sig_writer: common::sign(&rejected, &writer()),
-            rejected: Box::new(rejected),
-            reason: Refusal::Invariant(Invariant::VerseNamesEvidence),
-        }),
-    };
-    let record = next(&log, submission, &appender_key(), |_| {});
-    assert_eq!(fault(&with(log, record)), at(3, Fault::VerdictWithoutGate));
 }
 
 #[test]

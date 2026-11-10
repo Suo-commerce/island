@@ -10,19 +10,22 @@
 //! Checked here, for every record: position (`seq`, `prev`, `at`), the
 //! hash, both signatures, the genesis and bootstrap rules, the stream each
 //! kind belongs to, the writer's counter, the grant that lets the writer
-//! write it (`island-auth`), and the `policy` field.
+//! write it (`island-auth`), the gate (`island-gate`), and the `policy`
+//! field.
 //!
-//! Not checked yet: the gate (build step 6). Until it exists a `verdict`
-//! entry cannot be re-judged, so replay refuses one instead of
-//! half-checking it.
+//! The gate cuts both ways. An ordinary entry must be one the gate
+//! accepts under the policy in force. A `verdict` entry must carry a
+//! submission that would have been an entry but for the gate, and the gate
+//! must refuse it now for the reason recorded then.
 
 use std::fmt;
 
 use island_auth::{BootstrapError, Denied};
 use island_core::{
-    Answer, Body, Hash, Kind, Last, PublicKey, Record, Role, Signature, State, StreamId,
-    VerifyError, state_hash, verify_hash,
+    Answer, Body, Hash, Kind, Last, PublicKey, Record, Refusal, Role, Signature, State, StreamId,
+    Submission, VerifyError, state_hash, verify_hash,
 };
+use island_gate::judge;
 
 /// Why a record may not follow the records before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,7 +63,8 @@ pub enum Fault {
     BootstrapRoot,
     /// Authority does not allow the write.
     Denied(Denied),
-    /// A `genesis` or `bootstrap` entry after entries 0 and 1.
+    /// A `genesis` or `bootstrap` after entries 0 and 1, or a verdict
+    /// where only an ordinary submission can stand.
     Misplaced {
         /// Its kind.
         kind: Kind,
@@ -86,9 +90,32 @@ pub enum Fault {
         /// The entry's `policy`.
         found: u64,
     },
-    /// A `verdict` entry, which cannot be re-judged before the gate exists
-    /// (build step 6).
-    VerdictWithoutGate,
+    /// The appender's key wrote something other than a verdict. That key
+    /// orders and records refusals; it submits nothing else.
+    AppenderWrites,
+    /// The gate refuses this write under the policy in force. It belongs
+    /// in a `verdict` entry, not in the log as it stands.
+    Gate(Refusal),
+    /// A `verdict` entry that does not hold up.
+    Verdict(VerdictFault),
+}
+
+/// Why a `verdict` entry does not hold up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerdictFault {
+    /// The refused submission is not signed by its writer.
+    Signature,
+    /// The refused submission would have been refused without an entry:
+    /// its counter, its stream or its grant is wrong. A verdict records
+    /// only what the gate refused.
+    NoEntry(Box<Fault>),
+    /// Judged again, the gate does not give the refusal recorded.
+    Rejudged {
+        /// The refusal in the entry.
+        recorded: Refusal,
+        /// What the gate says now; `None` if it accepts.
+        now: Option<Refusal>,
+    },
 }
 
 impl fmt::Display for Fault {
@@ -116,7 +143,7 @@ impl fmt::Display for Fault {
                  by root with the right to write grants and revokes on the authority stream",
             ),
             Self::Denied(denied) => denied.fmt(f),
-            Self::Misplaced { kind } => write!(f, "a {kind:?} entry is valid only at the start"),
+            Self::Misplaced { kind } => write!(f, "a {kind:?} entry does not belong here"),
             Self::Stream { kind, stream } => write!(
                 f,
                 "a {kind:?} entry does not belong on stream {:?}",
@@ -139,9 +166,22 @@ impl fmt::Display for Fault {
                     "policy is {found}, but the policy in force is {expected}"
                 )
             }
-            Self::VerdictWithoutGate => {
-                f.write_str("a verdict entry cannot be re-judged before the gate exists")
+            Self::AppenderWrites => {
+                f.write_str("the appender's key writes verdicts and nothing else")
             }
+            Self::Gate(refusal) => write!(f, "the gate refuses it: {refusal:?}"),
+            Self::Verdict(VerdictFault::Signature) => {
+                f.write_str("the verdict's refused submission is not signed by its writer")
+            }
+            Self::Verdict(VerdictFault::NoEntry(fault)) => write!(
+                f,
+                "the verdict's refused submission would have left no entry: {fault}"
+            ),
+            Self::Verdict(VerdictFault::Rejudged { recorded, now }) => write!(
+                f,
+                "the verdict records {recorded:?}, but judged again the gate says {}",
+                now.map_or("it is acceptable".to_owned(), |now| format!("{now:?}"))
+            ),
         }
     }
 }
@@ -292,8 +332,7 @@ impl Chain {
             Err(VerifyError::BadAppenderSignature) => return Err(Fault::AppenderSignature),
         }
 
-        // Genesis, bootstrap, and nothing like them later.
-        let kind = submission.kind();
+        // Genesis and bootstrap: the first two entries.
         let mut appender = self.appender;
         match (seq, &submission.body) {
             (0, Body::Genesis(genesis)) => {
@@ -328,32 +367,37 @@ impl Chain {
                     .map(|(grant, _)| grant.holder);
             }
             (1, _) => return Err(Fault::NotBootstrap),
-            (_, Body::Genesis(_) | Body::Bootstrap(_)) => return Err(Fault::Misplaced { kind }),
-            (_, Body::Verdict(_)) => return Err(Fault::VerdictWithoutGate),
             _ => {}
         }
 
-        // The stream each kind belongs to.
-        if !belongs(kind, &submission.stream) {
-            return Err(Fault::Stream {
-                kind,
-                stream: submission.stream.clone(),
-            });
-        }
-
-        // The writer's counter: exactly its next number.
-        let expected = self.next_counter(&submission.writer);
-        if expected != Some(submission.counter) {
-            return Err(Fault::Counter {
-                expected,
-                found: submission.counter,
-            });
-        }
-
-        // The grant that lets the writer write this. The first two entries
-        // come before any grant and have their rules above.
-        if seq >= 2 {
-            island_auth::authorize(&self.state, submission).map_err(Fault::Denied)?;
+        match &submission.body {
+            // The first two entries come before any grant and any policy;
+            // their rules are above.
+            _ if seq < 2 => self.placed(submission)?,
+            // A verdict: the appender's record of a refusal. It must hold
+            // the right to write it, and the refusal must hold up.
+            Body::Verdict(verdict) => {
+                self.placed(submission)?;
+                island_auth::authorize(&self.state, submission).map_err(Fault::Denied)?;
+                let rejected = &*verdict.rejected;
+                rejected
+                    .verify(&verdict.sig_writer)
+                    .map_err(|_| Fault::Verdict(VerdictFault::Signature))?;
+                self.admit(rejected)
+                    .map_err(|fault| Fault::Verdict(VerdictFault::NoEntry(Box::new(fault))))?;
+                let now = judge(&self.state, &self.state.policy, rejected).err();
+                if now != Some(verdict.reason) {
+                    return Err(Fault::Verdict(VerdictFault::Rejudged {
+                        recorded: verdict.reason,
+                        now,
+                    }));
+                }
+            }
+            // Anything else: authority lets it in, and the gate accepts it.
+            _ => {
+                self.admit(submission)?;
+                judge(&self.state, &self.state.policy, submission).map_err(Fault::Gate)?;
+            }
         }
 
         // The policy the entry says it was judged under.
@@ -390,6 +434,41 @@ impl Chain {
         })
     }
 
+    /// The stream the kind belongs to, and the writer's counter: exactly
+    /// its next number.
+    fn placed(&self, submission: &Submission) -> Result<(), Fault> {
+        let kind = submission.kind();
+        if !belongs(kind, &submission.stream) {
+            return Err(Fault::Stream {
+                kind,
+                stream: submission.stream.clone(),
+            });
+        }
+        let expected = self.next_counter(&submission.writer);
+        if expected != Some(submission.counter) {
+            return Err(Fault::Counter {
+                expected,
+                found: submission.counter,
+            });
+        }
+        Ok(())
+    }
+
+    /// Everything short of the gate that a submission must pass to become
+    /// an entry after the first two: its kind, its writer, its stream, its
+    /// counter and its grant. What fails here leaves no entry at all.
+    fn admit(&self, submission: &Submission) -> Result<(), Fault> {
+        let kind = submission.kind();
+        if matches!(kind, Kind::Genesis | Kind::Bootstrap | Kind::Verdict) {
+            return Err(Fault::Misplaced { kind });
+        }
+        if self.appender == Some(submission.writer) {
+            return Err(Fault::AppenderWrites);
+        }
+        self.placed(submission)?;
+        island_auth::authorize(&self.state, submission).map_err(Fault::Denied)
+    }
+
     /// Take a checked record into the chain. `step` must come from
     /// [`Chain::check`] on this chain and this record.
     pub fn advance(&mut self, record: &Record, step: Step) {
@@ -415,6 +494,23 @@ impl Chain {
                 },
             },
         );
+
+        // A refused submission still used its writer's counter. The answer
+        // it got is this verdict.
+        if let Body::Verdict(verdict) = &submission.body {
+            self.state.writers.insert(
+                verdict.rejected.writer,
+                Last {
+                    counter: verdict.rejected.counter,
+                    sub_hash: verdict.rejected.hash(),
+                    answer: Answer::Refused {
+                        seq,
+                        hash: step.head.hash,
+                        reason: verdict.reason,
+                    },
+                },
+            );
+        }
 
         if let Body::Policy(policy) = &submission.body {
             self.state.policy = policy.clone();

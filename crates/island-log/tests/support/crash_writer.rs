@@ -1,18 +1,20 @@
-//! Test support for `tests/crash.rs`: append verses to a real log file as
-//! fast as possible, printing one line per acknowledgement, until killed.
+//! Test support for `tests/crash.rs`: submit verses to a real log file as
+//! fast as possible, printing one line per answer, until killed. Every
+//! third verse names no evidence, which the log's policy refuses.
 //!
 //! `island-log-crash-writer <log file> <root public key, hex>`
 //!
 //! Prints `open <records> <dropped bytes>` once, then `ack <seq> <hash>`
-//! after each acknowledged entry. A line is printed only after `submit`
-//! returned, so every printed ack names a durable entry.
+//! after each acknowledged entry and `refused <seq> <hash>` after each
+//! refusal, naming the verdict entry. A line is printed only after
+//! `submit` returned, so every printed line names a durable entry.
 
 use std::io::Write;
 use std::process::ExitCode;
 
 use island_core::{Body, Evidence, PublicKey, SigningKey, StreamId, Submission, Verse, public_key};
 use island_env::{FileStorage, SystemClock};
-use island_log::Appender;
+use island_log::{Appender, Rejected};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -61,17 +63,24 @@ fn run() -> Result<(), String> {
             stream: StreamId::from("crash"),
             writer: public_key(&writer),
             counter,
-            body: Body::Verse(Verse::new(
-                Evidence::Measurement,
-                format!("verse {counter} of a writer that will be killed"),
-                vec![[counter as u8; 32]],
-            )),
+            body: Body::Verse(Verse {
+                evidence: if counter.is_multiple_of(3) {
+                    u8::MAX
+                } else {
+                    Evidence::Measurement.as_u8()
+                },
+                text: format!("verse {counter} of a writer that will be killed"),
+                refs: vec![[counter as u8; 32]],
+            }),
         };
         let signature = submission.sign(&writer).ok_or("the writer signs")?;
-        let ack = appender
-            .submit(submission, signature)
-            .map_err(|error| format!("submit {counter}: {error}"))?;
-        say(format!("ack {} {}", ack.seq, hex(&ack.hash)))?;
+        match appender.submit(submission, signature) {
+            Ok(ack) => say(format!("ack {} {}", ack.seq, hex(&ack.hash)))?,
+            Err(Rejected::Refused { seq, hash, .. }) => {
+                say(format!("refused {seq} {}", hex(&hash)))?;
+            }
+            Err(error) => return Err(format!("submit {counter}: {error}")),
+        }
     }
 }
 

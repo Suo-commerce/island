@@ -8,19 +8,25 @@
 //!    signatures, checked here from `island-core` alone, without the log's
 //!    own replay.
 //! 2. Replaying what is stored gives exactly the state the appender judges
-//!    from.
-//! 3. The model agrees on every accept, retry and refusal, and on the
-//!    state. (The gate's part joins with build step 6.)
+//!    from, and replay judges every verdict's refused submission again and
+//!    requires the same refusal.
+//! 3. The model agrees on every accept, retry and refusal, on every gate
+//!    refusal and its reason, on every verdict entry byte for byte, and on
+//!    the state.
 //! 4. No acknowledged entry is ever missing or changed; nothing is
 //!    acknowledged before it is durable; after a crash the log holds what
 //!    the model holds, plus at most the one submission that was in flight.
 //! 5. Nothing outside a writer's grants was ever accepted: for every
 //!    stored entry, a grant issued earlier and not ended earlier covers
-//!    its writer, stream and kind. Worked out here from the stored
-//!    entries, without `island-auth` and without the model.
-//! 7. An exact resend returns the first answer and adds nothing.
-//!
-//! Oracle 6 (stronger means subset) joins with build step 6.
+//!    its writer, stream and kind; the same for the submission a verdict
+//!    holds. Worked out here from the stored entries, without
+//!    `island-auth` and without the model.
+//! 6. Stronger means subset: of the policies that were in force in a case,
+//!    each strengthens every one before it, and no write the case
+//!    generated is accepted by a later one and refused by an earlier one.
+//!    (`ratchet.rs` checks the same on generated pairs of any policies.)
+//! 7. An exact resend returns the first answer and adds nothing: the
+//!    acknowledgement, or the refusal.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -33,14 +39,14 @@ use island_core::{
 use island_log::{Ack, Appender, Chain, Denied, Fault, Rejected, frame};
 use island_model::{Guard, Model, Outcome, Why};
 
-use crate::ops::{Appenders, Op, STREAMS, Sign, Twist, WRITERS, What, Write};
+use crate::ops::{Appenders, KEYS, Op, STREAMS, Sign, Twist, What, Write};
 use crate::sim::{SimClock, SimStorage};
 
 /// An oracle that does not hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failure {
     /// Which oracle: `1-chain`, `2-replay`, `3-model`, `4-durability`,
-    /// `5-grants`, `7-retry` or `determinism`.
+    /// `5-grants`, `6-ratchet`, `7-retry` or `determinism`.
     pub oracle: &'static str,
     /// The index of the operation after which it broke.
     pub step: usize,
@@ -73,8 +79,9 @@ pub struct Report {
 type Check = Result<(), Failure>;
 
 fn key(writer: u8) -> SigningKey {
-    match writer % WRITERS {
+    match writer % KEYS {
         3 => SigningKey::from_bytes(&[0x52; 32]),
+        4 => appender_key(),
         index => SigningKey::from_bytes(&[0x10 + index; 32]),
     }
 }
@@ -122,6 +129,21 @@ struct Verified {
     /// Oracle 5's own reading of the stored entries: every grant issued,
     /// and whether a later entry ended it.
     issued: Vec<(GrantId, Grant, bool)>,
+    /// Oracle 6's reading of them: every policy that has been in force,
+    /// oldest first, starting with the empty one before any entry.
+    policies: Vec<Policy>,
+    /// How many policies and how many writes oracle 6 has already set
+    /// against each other.
+    ratcheted: (usize, usize),
+}
+
+impl Verified {
+    fn new() -> Self {
+        Self {
+            policies: vec![Policy::default()],
+            ..Self::default()
+        }
+    }
 }
 
 struct World {
@@ -129,10 +151,14 @@ struct World {
     clock: SimClock,
     appender: Appender<SimStorage, SimClock>,
     model: Model,
-    /// Per writer: the submissions that are in the log, with signatures.
+    /// Per writer: the submissions that are in the log, with signatures:
+    /// as entries, or held in the verdicts that refused them.
     sent: BTreeMap<PublicKey, Vec<(Submission, Signature)>>,
-    /// Every acknowledged entry: position to hash.
+    /// Every entry a writer was answered with: position to hash.
     acked: BTreeMap<u64, Hash>,
+    /// Every verse and policy the case has generated, whatever became of
+    /// it: the writes oracle 6 judges under each policy.
+    writes: Vec<Submission>,
     verified: Verified,
     /// Oracle 2's own replay of the stored records.
     shadow: Chain,
@@ -160,7 +186,8 @@ pub fn run(ops: &[Op]) -> Result<Report, Failure> {
         model: Model::new(pin(), public_key(&appender_key())),
         sent: BTreeMap::new(),
         acked: BTreeMap::new(),
-        verified: Verified::default(),
+        writes: Vec::new(),
+        verified: Verified::new(),
         shadow: Chain::new(pin()),
         crash_keep: 0,
         step: 0,
@@ -173,7 +200,7 @@ pub fn run(ops: &[Op]) -> Result<Report, Failure> {
     }
     // Once more from nothing, in case the incremental checks hid anything.
     world.step = ops.len();
-    world.verified = Verified::default();
+    world.verified = Verified::new();
     world.shadow = Chain::new(pin());
     world.check()?;
     Ok(world.report)
@@ -296,6 +323,36 @@ impl World {
                         .filter(|bit| invariants & (1 << bit) != 0)
                         .map(|bit| all[bit])
                         .collect(),
+                })
+            }
+            What::Tighten { add, lower_by } => {
+                // The policy in force, with its text bound lowered and the
+                // missing invariants of `add` appended.
+                let lower = u32::from(*lower_by);
+                let mut invariants: Vec<Invariant> = self
+                    .model
+                    .policy()
+                    .map(|(_, policy)| policy.invariants.clone())
+                    .unwrap_or_default();
+                for invariant in &mut invariants {
+                    if let Invariant::VerseTextMax { bytes } = invariant {
+                        *bytes = bytes.saturating_sub(lower);
+                    }
+                }
+                let more = [
+                    Invariant::VerseNamesEvidence,
+                    Invariant::VerseTextMax { bytes: 8 + lower },
+                    Invariant::ArtefactHasRef,
+                ];
+                for (bit, invariant) in more.into_iter().enumerate() {
+                    let held = invariants.iter().any(|held| held.tag() == invariant.tag());
+                    if add & (1 << bit) != 0 && !held {
+                        invariants.push(invariant);
+                    }
+                }
+                Body::Policy(Policy {
+                    evaluator: format!("sim-{}", write.salt),
+                    invariants,
                 })
             }
             What::Grant {
@@ -446,6 +503,9 @@ impl World {
         let expected = self.model.judge(&submission, &signature);
         let before = self.appender.chain().clone();
         let len = self.storage.len();
+        if matches!(submission.body, Body::Verse(_) | Body::Policy(_)) {
+            self.writes.push(submission.clone());
+        }
 
         let result = self.appender.submit(submission.clone(), signature);
         let fired = self.storage.take_fired();
@@ -466,7 +526,7 @@ impl World {
                     format!("storage failed but the appender answered {result:?}"),
                 ));
             }
-            if !matches!(expected, Outcome::Accepted { .. }) {
+            if !matches!(expected, Outcome::Accepted { .. } | Outcome::Verdict { .. }) {
                 return Err(self.fail(
                     "3-model",
                     format!("the appender wrote a submission the model answers {expected:?}"),
@@ -499,6 +559,16 @@ impl World {
                     Body::Grant(grant) if grant.narrows.is_some() => self.hit("grant:narrowed"),
                     Body::Grant(_) => self.hit("grant:new"),
                     Body::Revoke(_) => self.hit("grant:revoked"),
+                    Body::Policy(policy) => match self.model.policy() {
+                        None => self.hit("policy:first"),
+                        Some((_, old)) if old.invariants == policy.invariants => {
+                            self.hit("policy:restated");
+                        }
+                        Some(_) => self.hit("policy:tightened"),
+                    },
+                    Body::Verse(_) if self.model.policy().is_some() => {
+                        self.hit("verse:passed-the-gate");
+                    }
                     _ => {}
                 }
                 if self.storage.synced_len() != self.storage.len() {
@@ -537,6 +607,58 @@ impl World {
                     ));
                 }
             }
+            // The gate refused it: a verdict took the position, and the
+            // writer's counter is used.
+            (Outcome::Verdict { seq, reason }, Err(refused)) => {
+                self.hit(match reason {
+                    Refusal::Invariant(Invariant::VerseNamesEvidence) => {
+                        "verdict:VerseNamesEvidence"
+                    }
+                    Refusal::Invariant(Invariant::VerseTextMax { .. }) => "verdict:VerseTextMax",
+                    Refusal::Invariant(Invariant::ArtefactHasRef) => "verdict:ArtefactHasRef",
+                    Refusal::WeakerPolicy => "verdict:WeakerPolicy",
+                });
+                let Rejected::Refused { hash, .. } = refused else {
+                    return Err(self.fail("3-model", format!("{refused:?} for a gate refusal")));
+                };
+                if self.storage.synced_len() != self.storage.len() {
+                    return Err(self.fail("4-durability", "refused before the verdict was synced"));
+                }
+                self.model.submit(&submission, &signature);
+                self.acked.insert(seq, hash);
+                self.sent
+                    .entry(submission.writer)
+                    .or_default()
+                    .push((submission.clone(), signature));
+
+                // Oracle 7, for refusals: the same submission again gets
+                // the same refusal and adds nothing.
+                let after = self.appender.chain().clone();
+                let len = self.storage.len();
+                let again = self.appender.submit(submission, signature);
+                if again != Err(refused.clone())
+                    || self.storage.len() != len
+                    || self.appender.chain() != &after
+                {
+                    return Err(self.fail(
+                        "7-retry",
+                        format!("a resend right after the refusal answered {again:?}"),
+                    ));
+                }
+            }
+            (Outcome::VerdictRetry { seq, .. }, Err(Rejected::Refused { hash, .. })) => {
+                self.hit("verdict-retry");
+                let first = self.acked.get(&seq).copied();
+                if first != Some(hash)
+                    || self.storage.len() != len
+                    || self.appender.chain() != &before
+                {
+                    return Err(self.fail(
+                        "7-retry",
+                        format!("a resend refused at entry {seq} was answered with verdict {}; first answer {first:?}", short(&hash)),
+                    ));
+                }
+            }
             (Outcome::Refused(why), _) => {
                 self.hit(format!("refused:{why:?}"));
                 if self.storage.len() != len || self.appender.chain() != &before {
@@ -559,6 +681,15 @@ impl World {
             Err(Rejected::CounterOld { .. }) => Why::CounterOld,
             Err(Rejected::CounterGap { .. }) => Why::CounterGap,
             Err(Rejected::CounterConflict { .. }) => Why::CounterConflict,
+            Err(Rejected::Refused { seq, reason, .. }) => {
+                let (seq, reason) = (*seq, *reason);
+                return Ok(if seq == next_seq {
+                    Outcome::Verdict { seq, reason }
+                } else {
+                    Outcome::VerdictRetry { seq, reason }
+                });
+            }
+            Err(Rejected::VerdictFromOutside) => Why::Verdict,
             Err(Rejected::Denied(denied)) => match denied {
                 Denied::NoGrant => Why::NoGrant,
                 Denied::UnknownGrant(_) => Why::UnknownGrant,
@@ -578,7 +709,7 @@ impl World {
                 // bootstrap names: it names another appender.
                 Fault::AppenderSignature => Why::WrongAppender,
                 Fault::Misplaced { .. } => Why::Misplaced,
-                Fault::VerdictWithoutGate => Why::Verdict,
+                Fault::AppenderWrites => Why::AppenderWrites,
                 Fault::Stream { .. } => Why::Stream,
                 // Position, hash, counter and policy are the appender's own
                 // to get right; a fault there is its bug.
@@ -621,21 +752,26 @@ impl World {
         ));
 
         // Everything is verified again from nothing.
-        self.verified = Verified::default();
+        self.verified = Verified::new();
         self.shadow = Chain::new(pin());
 
         // The log holds what the model holds, or that plus the one
-        // submission that was in flight.
+        // submission that was in flight: as an entry, or in its verdict.
         let stored = self.appender.chain().next_seq();
         let modelled = self.model.log().len() as u64;
         match in_flight {
             Some((submission, signature)) if stored == modelled + 1 => {
-                let landed = self.model.submit(&submission, &signature);
-                if landed != (Outcome::Accepted { seq: modelled }) {
-                    return Err(self.fail(
-                        "4-durability",
-                        format!("an entry landed that the model answers {landed:?}"),
-                    ));
+                match self.model.submit(&submission, &signature) {
+                    Outcome::Accepted { seq } if seq == modelled => self.hit("fault:landed"),
+                    Outcome::Verdict { seq, .. } if seq == modelled => {
+                        self.hit("fault:verdict-landed");
+                    }
+                    landed => {
+                        return Err(self.fail(
+                            "4-durability",
+                            format!("an entry landed that the model answers {landed:?}"),
+                        ));
+                    }
                 }
                 // Durable now, though its writer never heard so.
                 let hash = self.appender.chain().head().map(|head| head.hash);
@@ -644,7 +780,6 @@ impl World {
                     .entry(submission.writer)
                     .or_default()
                     .push((submission, signature));
-                self.hit("fault:landed");
             }
             Some(_) if stored == modelled => self.hit("fault:lost"),
             None if stored == modelled => {}
@@ -763,7 +898,17 @@ impl World {
                 ));
             }
         }
-        let writers: BTreeSet<PublicKey> = self.model.log().iter().map(|s| s.writer).collect();
+        // A writer is known for its entries, or for a submission a verdict
+        // holds.
+        let writers: BTreeSet<PublicKey> = self
+            .model
+            .log()
+            .iter()
+            .flat_map(|entry| match &entry.body {
+                Body::Verdict(verdict) => vec![entry.writer, verdict.rejected.writer],
+                _ => vec![entry.writer],
+            })
+            .collect();
         if writers.len() != state.writers.len() {
             return Err(self.fail("3-model", "the state knows other writers than the model"));
         }
@@ -817,22 +962,31 @@ impl World {
         for record in &added {
             let seq = record.entry.seq;
             let submission = &record.entry.submission;
-            let covered = self.verified.issued.iter().any(|(_, grant, live)| {
-                *live
-                    && grant.holder == submission.writer
-                    && grant.scope.contains(&submission.stream)
-                    && grant.rights.contains(&submission.kind())
-            });
-            if seq >= 2 && !covered {
-                return Err(self.fail(
-                    "5-grants",
-                    format!(
-                        "entry {seq}: no grant in force lets {} write {:?} to {:?}",
-                        short(&submission.writer),
-                        submission.kind(),
-                        String::from_utf8_lossy(submission.stream.as_bytes())
-                    ),
-                ));
+            // The entry's own writer, and for a verdict also the writer of
+            // the submission it refused: the gate judges only what
+            // authority let in.
+            let mut held = vec![submission];
+            if let Body::Verdict(verdict) = &submission.body {
+                held.push(&verdict.rejected);
+            }
+            for submission in held {
+                let covered = self.verified.issued.iter().any(|(_, grant, live)| {
+                    *live
+                        && grant.holder == submission.writer
+                        && grant.scope.contains(&submission.stream)
+                        && grant.rights.contains(&submission.kind())
+                });
+                if seq >= 2 && !covered {
+                    return Err(self.fail(
+                        "5-grants",
+                        format!(
+                            "entry {seq}: no grant in force lets {} write {:?} to {:?}",
+                            short(&submission.writer),
+                            submission.kind(),
+                            String::from_utf8_lossy(submission.stream.as_bytes())
+                        ),
+                    ));
+                }
             }
             let end = |issued: &mut Vec<(GrantId, Grant, bool)>, id: GrantId| {
                 if let Some(grant) = issued.iter_mut().find(|(issued, _, _)| *issued == id) {
@@ -854,9 +1008,42 @@ impl World {
                     self.verified.issued.push((id, grant.clone(), true));
                 }
                 Body::Revoke(revoke) => end(&mut self.verified.issued, revoke.grant),
+                Body::Policy(policy) => self.verified.policies.push(policy.clone()),
                 _ => {}
             }
         }
+
+        // 6: stronger means subset. Every policy that came into force
+        // strengthens every one before it, and nothing this case generated
+        // is accepted by a later policy and refused by an earlier one.
+        let accepts =
+            |policy: &Policy, write: &Submission| island_gate::judge(state, policy, write).is_ok();
+        let (policies, writes) = self.verified.ratcheted;
+        for (later, new) in self.verified.policies.iter().enumerate() {
+            let before = &self.verified.policies[..later];
+            if later >= policies
+                && let Some(earlier) = before
+                    .iter()
+                    .position(|old| !island_gate::strengthens(old, new))
+            {
+                return Err(self.fail(
+                    "6-ratchet",
+                    format!("policy {later} of this log came into force without strengthening policy {earlier}: {new:?}"),
+                ));
+            }
+            for (index, write) in self.writes.iter().enumerate() {
+                if (later < policies && index < writes) || !accepts(new, write) {
+                    continue;
+                }
+                if let Some(earlier) = before.iter().position(|old| !accepts(old, write)) {
+                    return Err(self.fail(
+                        "6-ratchet",
+                        format!("policy {later} of this log accepts a write that policy {earlier} refuses: {:?}", write.body),
+                    ));
+                }
+            }
+        }
+        self.verified.ratcheted = (self.verified.policies.len(), self.writes.len());
 
         // 4: every acknowledged entry is there, unchanged.
         for (seq, hash) in &self.acked {

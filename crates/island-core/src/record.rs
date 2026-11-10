@@ -390,14 +390,15 @@ impl Canonical for Preference {
 
 /// Why the gate refused a submission.
 ///
-/// One variant so far; a policy that does not strengthen the one in force
-/// joins with build step 6, on the next free tag. Authority's refusals
-/// leave no entry and are not listed here.
+/// Authority's refusals leave no entry and are not listed here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// Tag 0. This invariant, as it stood in the policy in force, does not
     /// hold for the write.
     Invariant(Invariant),
+    /// Tag 1. A `policy` entry that does not strengthen the policy in
+    /// force: it drops an invariant or loosens a parameter.
+    WeakerPolicy,
 }
 
 impl Canonical for Refusal {
@@ -406,6 +407,9 @@ impl Canonical for Refusal {
             Self::Invariant(invariant) => {
                 out.tag(0);
                 invariant.canon(out);
+            }
+            Self::WeakerPolicy => {
+                out.tag(1);
             }
         }
     }

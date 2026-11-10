@@ -1,6 +1,6 @@
 //! How entries and state are printed.
 
-use island_core::{Answer, Body, Evidence, Grant, Invariant, Record, Role, StreamId};
+use island_core::{Answer, Body, Evidence, Grant, Invariant, Record, Refusal, Role, StreamId};
 use island_log::Chain;
 
 use crate::keys::hex;
@@ -55,11 +55,20 @@ fn invariant(invariant: &Invariant) -> String {
     }
 }
 
-fn invariants(list: &[Invariant]) -> String {
+/// A policy's invariants on one line.
+pub fn invariants(list: &[Invariant]) -> String {
     if list.is_empty() {
         return "none".to_owned();
     }
     list.iter().map(invariant).collect::<Vec<_>>().join(", ")
+}
+
+/// Why the gate refused.
+pub fn refusal(reason: &Refusal) -> String {
+    match reason {
+        Refusal::Invariant(broken) => format!("it breaks {}", invariant(broken)),
+        Refusal::WeakerPolicy => "the policy would be weaker than the one in force".to_owned(),
+    }
 }
 
 /// What a grant allows: `verse preference on island flare`.
@@ -143,10 +152,11 @@ fn body(body: &Body) -> String {
         }
         Body::Preference(preference) => format!("{:?} = {:?}", preference.key, preference.value),
         Body::Verdict(verdict) => format!(
-            "refused {:?} from {}: {:?}",
-            verdict.rejected.kind(),
+            "refused {} from {}, submission {}: {}",
+            format!("{:?}", verdict.rejected.kind()).to_lowercase(),
             short(&verdict.rejected.writer),
-            verdict.reason
+            short(&verdict.rejected.hash()),
+            refusal(&verdict.reason)
         ),
         Body::Genesis(genesis) => format!("root {}", hex(&genesis.root)),
         Body::Bootstrap(bootstrap) => bootstrap
@@ -211,6 +221,22 @@ pub fn state(chain: &Chain) -> String {
         ));
     }
     out
+}
+
+/// What a log holds of the things worth counting: verdicts, and requests
+/// to override one. The second is the measure of how often the gate is
+/// asked to step aside.
+pub fn counts(records: &[Record]) -> String {
+    let bodies = || records.iter().map(|record| &record.entry.submission.body);
+    let verdicts = bodies()
+        .filter(|body| matches!(body, Body::Verdict(_)))
+        .count();
+    let requests = bodies()
+        .filter(|body| {
+            matches!(body, Body::Preference(preference) if preference.key == crate::OVERRIDE_REQUEST)
+        })
+        .count();
+    format!("verdicts           {verdicts}\noverride requests  {requests}\n")
 }
 
 #[cfg(test)]

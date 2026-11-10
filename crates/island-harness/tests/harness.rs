@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use island_harness::ratchet::{self, Held};
 use island_harness::{add_coverage, archive, check, generate, run_seed, seeds};
 
 /// Every archived failure passes. Run before the seeds by `just harness`.
@@ -104,12 +105,51 @@ fn the_generators_reach_every_outcome() {
         "refused:Misplaced",
         "refused:Verdict",
         "refused:Stream",
+        "refused:AppenderWrites",
+        "policy:first",
+        "policy:tightened",
+        "verse:passed-the-gate",
+        "verdict:VerseNamesEvidence",
+        "verdict:VerseTextMax",
+        "verdict:ArtefactHasRef",
+        "verdict:WeakerPolicy",
+        "verdict-retry",
+        "fault:verdict-landed",
     ];
     let missing: Vec<&str> = required
         .into_iter()
         .filter(|label| !coverage.contains_key(*label))
         .collect();
     assert!(missing.is_empty(), "never reached: {missing:?}");
+}
+
+/// Oracle 6 on generated pairs of any two policies, ten pairs a seed:
+/// wherever `strengthens(old, new)` holds, the new policy accepts nothing
+/// the old one refuses.
+#[test]
+fn stronger_means_subset_on_generated_pairs() {
+    let mut count = BTreeMap::new();
+    for seed in 0..seeds() * 10 {
+        let pair = ratchet::generate(seed);
+        assert_eq!(
+            pair,
+            ratchet::generate(seed),
+            "pair {seed} is not the same twice"
+        );
+        match ratchet::check(&pair) {
+            Ok(held) => *count.entry(format!("{held:?}")).or_insert(0u64) += 1,
+            Err(broken) => panic!("pair {seed} breaks oracle 6-ratchet: {broken}"),
+        }
+    }
+    println!("{count:#?}");
+    // Both sides of `strengthens` were reached, and the loosenings among
+    // the pairs were real ones.
+    for held in [Held::Stronger, Held::NotStronger, Held::Loosens] {
+        assert!(
+            count.contains_key(&format!("{held:?}")),
+            "never reached: {held:?}"
+        );
+    }
 }
 
 #[test]

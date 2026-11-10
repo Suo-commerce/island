@@ -4,8 +4,8 @@
 //! The model is a list of the submissions that are in the log, and one
 //! function, [`Model::judge`], that says what must happen to the next one.
 //! Everything is worked out from the list each time: a writer's counter is
-//! how many entries it has in the list, a retry is "the same as that
-//! writer's last entry". There is no cached state to get out of step.
+//! how many of its submissions the list holds, a retry is "the same as the
+//! last of them". There is no cached state to get out of step.
 //!
 //! It shares no code with `island-log`. It uses `island-core` for the
 //! types and for checking a signature; hashes, positions in time, files
@@ -13,14 +13,18 @@
 //! submissions through the model and the real appender and fails on any
 //! difference.
 //!
-//! Covered so far: the writer's signature, the counter and retries, the
-//! genesis and bootstrap rules, which kind belongs on which stream, and
-//! grants: who may write what, narrowing, revoking, and the two protected
-//! grants. The gate joins with build step 6.
+//! Covered: the writer's signature, the counter and retries, the genesis
+//! and bootstrap rules, which kind belongs on which stream, grants (who
+//! may write what, narrowing, revoking, the two protected grants), and the
+//! gate: the three invariants, the policy ratchet, and the verdict entry a
+//! refusal leaves.
 
 #![warn(missing_docs)]
 
-use island_core::{Body, Grant, GrantId, Kind, Policy, PublicKey, Signature, StreamId, Submission};
+use island_core::{
+    Body, Grant, GrantId, Invariant, Kind, Policy, PublicKey, Refusal, Signature, StreamId,
+    Submission, Verdict, Verse,
+};
 
 /// What must happen to a submission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +39,22 @@ pub enum Outcome {
     Retry {
         /// The position of the entry it repeats.
         seq: u64,
+    },
+    /// The gate refuses it. A verdict holding it becomes the entry at
+    /// `seq`, written by the appender, and its writer's counter is used.
+    Verdict {
+        /// The position the verdict takes.
+        seq: u64,
+        /// What the gate refuses it for.
+        reason: Refusal,
+    },
+    /// It is an exact resend of its writer's latest submission, which the
+    /// gate refused; the verdict is at `seq`. Nothing is added.
+    VerdictRetry {
+        /// The position of the verdict.
+        seq: u64,
+        /// What the gate refused it for.
+        reason: Refusal,
     },
     /// It is refused and nothing is added.
     Refused(Why),
@@ -79,9 +99,10 @@ pub enum Why {
     WrongAppender,
     /// A genesis or bootstrap after the first two entries.
     Misplaced,
-    /// A verdict from outside: only the appender writes them, and not
-    /// before the gate exists.
+    /// A verdict from outside: only the appender's own gate writes them.
     Verdict,
+    /// The appender's key writing anything but a verdict.
+    AppenderWrites,
     /// The kind does not belong on that stream.
     Stream,
 }
@@ -135,9 +156,10 @@ impl Model {
         &self.log
     }
 
-    /// How many entries `writer` has: its latest counter.
+    /// How many of `writer`'s submissions the log holds: its latest
+    /// counter. One the gate refused counts; it is held in its verdict.
     pub fn counter_of(&self, writer: &PublicKey) -> u64 {
-        self.entries_of(writer).count() as u64
+        self.answered(writer).count() as u64
     }
 
     /// How many entries a stream holds, and the position of its newest.
@@ -215,14 +237,40 @@ impl Model {
         }
     }
 
-    /// `writer`'s entries, oldest first, with their positions.
-    fn entries_of<'a>(
+    /// `writer`'s submissions that are in the log, oldest first: its
+    /// entries, and the ones the gate refused, which their verdicts hold.
+    /// Each comes with the position of the entry that holds it, and the
+    /// refusal if there was one.
+    fn answered<'a>(
         &'a self,
         writer: &'a PublicKey,
-    ) -> impl Iterator<Item = (u64, &'a Submission)> {
+    ) -> impl Iterator<Item = (u64, &'a Submission, Option<Refusal>)> {
         (0u64..)
             .zip(&self.log)
-            .filter(move |(_, entry)| &entry.writer == writer)
+            .filter_map(move |(seq, entry)| match &entry.body {
+                _ if &entry.writer == writer => Some((seq, entry, None)),
+                Body::Verdict(verdict) if &verdict.rejected.writer == writer => {
+                    Some((seq, &*verdict.rejected, Some(verdict.reason)))
+                }
+                _ => None,
+            })
+    }
+
+    /// What the gate refuses `submission` for, if anything: a verse must
+    /// keep every invariant of the policy in force, and a policy must be
+    /// no weaker than it.
+    fn gate(&self, submission: &Submission) -> Option<Refusal> {
+        let nothing = Policy::default();
+        let in_force = self.policy().map_or(&nothing, |(_, policy)| policy);
+        match &submission.body {
+            Body::Verse(verse) => in_force
+                .invariants
+                .iter()
+                .find(|invariant| breaks(verse, invariant))
+                .map(|invariant| Refusal::Invariant(*invariant)),
+            Body::Policy(new) => weakens(in_force, new).then_some(Refusal::WeakerPolicy),
+            _ => None,
+        }
     }
 
     /// What must happen to `submission`, signed with `sig_writer`. Changes
@@ -233,19 +281,17 @@ impl Model {
             return Outcome::Refused(Why::BadSignature);
         }
 
-        // 2. The counter. A writer's entries carry 1, 2, 3, ... so its
-        //    latest counter is how many entries it has.
+        // 2. The counter. A writer's submissions carry 1, 2, 3, ... so its
+        //    latest counter is how many of them the log holds.
         let used = self.counter_of(&submission.writer);
         if submission.counter != used + 1 {
-            let latest = self.entries_of(&submission.writer).last();
+            let latest = self.answered(&submission.writer).last();
             return match latest {
-                Some((seq, entry)) if submission.counter == used => {
-                    if entry == submission {
-                        Outcome::Retry { seq }
-                    } else {
-                        Outcome::Refused(Why::CounterConflict)
-                    }
-                }
+                Some((seq, sent, refusal)) if submission.counter == used => match refusal {
+                    _ if sent != submission => Outcome::Refused(Why::CounterConflict),
+                    None => Outcome::Retry { seq },
+                    Some(reason) => Outcome::VerdictRetry { seq, reason },
+                },
                 _ if submission.counter > used + 1 => Outcome::Refused(Why::CounterGap),
                 _ => Outcome::Refused(Why::CounterOld),
             };
@@ -299,6 +345,11 @@ impl Model {
                 return Outcome::Refused(Why::Misplaced);
             }
             (_, Body::Verdict(_)) => return Outcome::Refused(Why::Verdict),
+            // The appender's key orders and records refusals. It writes
+            // nothing else, whatever grants name it.
+            _ if seq >= 2 && submission.writer == self.appender => {
+                return Outcome::Refused(Why::AppenderWrites);
+            }
             _ => {}
         }
 
@@ -319,7 +370,12 @@ impl Model {
             return Outcome::Refused(Why::WrongAppender);
         }
 
-        Outcome::Accepted { seq }
+        // 7. The gate. What it refuses still takes the position: as a
+        //    verdict.
+        match self.gate(submission) {
+            Some(reason) if seq >= 2 => Outcome::Verdict { seq, reason },
+            _ => Outcome::Accepted { seq },
+        }
     }
 
     /// Whether authority lets `submission` in: a grant in force covers
@@ -380,14 +436,49 @@ impl Model {
         Ok(())
     }
 
-    /// Judge a submission and, if it is accepted, add it to the log.
+    /// Judge a submission and add what the answer adds to the log: the
+    /// submission if it is accepted, a verdict holding it if the gate
+    /// refuses it, and otherwise nothing.
     pub fn submit(&mut self, submission: &Submission, sig_writer: &Signature) -> Outcome {
         let outcome = self.judge(submission, sig_writer);
-        if matches!(outcome, Outcome::Accepted { .. }) {
-            self.log.push(submission.clone());
+        match outcome {
+            Outcome::Accepted { .. } => self.log.push(submission.clone()),
+            Outcome::Verdict { reason, .. } => self.log.push(Submission {
+                stream: StreamId::from("gate"),
+                writer: self.appender,
+                counter: self.counter_of(&self.appender) + 1,
+                body: Body::Verdict(Verdict {
+                    rejected: Box::new(submission.clone()),
+                    sig_writer: *sig_writer,
+                    reason,
+                }),
+            }),
+            _ => {}
         }
         outcome
     }
+}
+
+/// Whether a verse breaks an invariant.
+fn breaks(verse: &Verse, invariant: &Invariant) -> bool {
+    // The evidence kinds are bytes 0 to 3; an artefact is 1.
+    match invariant {
+        Invariant::VerseNamesEvidence => verse.evidence > 3,
+        Invariant::VerseTextMax { bytes } => verse.text.len() as u64 > u64::from(*bytes),
+        Invariant::ArtefactHasRef => verse.evidence == 1 && verse.refs.is_empty(),
+    }
+}
+
+/// Whether `new` gives up anything `old` requires: an invariant that is
+/// gone, or a text bound that is gone or higher.
+fn weakens(old: &Policy, new: &Policy) -> bool {
+    old.invariants.iter().any(|required| match required {
+        Invariant::VerseTextMax { bytes: old_bound } => !new
+            .invariants
+            .iter()
+            .any(|kept| matches!(kept, Invariant::VerseTextMax { bytes } if bytes <= old_bound)),
+        other => !new.invariants.contains(other),
+    })
 }
 
 /// Whether a grant lets its holder write grants and revokes on the
@@ -859,6 +950,206 @@ mod tests {
                 &root()
             ),
             Outcome::Refused(Why::NoGrant)
+        );
+    }
+
+    fn policy(counter: u64, invariants: &[Invariant]) -> Submission {
+        let body = Body::Policy(Policy {
+            evaluator: "test".to_owned(),
+            invariants: invariants.to_vec(),
+        });
+        by_root(counter, "policy", body)
+    }
+
+    /// A verse by `key(1)` with any evidence byte and any number of refs.
+    fn raw(counter: u64, evidence: u8, text: &str, refs: usize) -> Submission {
+        let mut submission = verse(&key(1), counter, text);
+        submission.body = Body::Verse(Verse {
+            evidence,
+            text: text.to_owned(),
+            refs: vec![[9; 32]; refs],
+        });
+        submission
+    }
+
+    const NAMES: Invariant = Invariant::VerseNamesEvidence;
+    const HAS_REF: Invariant = Invariant::ArtefactHasRef;
+
+    const fn max(bytes: u32) -> Invariant {
+        Invariant::VerseTextMax { bytes }
+    }
+
+    #[test]
+    fn the_gate_refuses_with_a_verdict_that_uses_the_counter() {
+        let mut model = started();
+        let writer = key(1);
+        // Before any policy, nothing is refused.
+        assert_eq!(
+            submit(&mut model, &raw(1, 200, "anything", 0), &writer),
+            Outcome::Accepted { seq: 2 }
+        );
+        assert_eq!(
+            submit(&mut model, &policy(3, &[NAMES, max(10), HAS_REF]), &root()),
+            Outcome::Accepted { seq: 3 }
+        );
+
+        // Each invariant refuses what it names; the first broken one is
+        // the reason.
+        let cases = [
+            (raw(2, 4, "x", 0), Refusal::Invariant(NAMES)),
+            (raw(3, 0, "eleven char", 0), Refusal::Invariant(max(10))),
+            (raw(4, 1, "x", 0), Refusal::Invariant(HAS_REF)),
+            (raw(5, 9, "eleven char", 0), Refusal::Invariant(NAMES)),
+        ];
+        for ((refused, reason), seq) in cases.iter().zip(4u64..) {
+            assert_eq!(
+                submit(&mut model, refused, &writer),
+                Outcome::Verdict {
+                    seq,
+                    reason: *reason
+                }
+            );
+        }
+        assert_eq!(
+            submit(&mut model, &raw(6, 1, "ten chars!", 1), &writer),
+            Outcome::Accepted { seq: 8 }
+        );
+
+        // The verdict is the appender's entry on the gate stream, holding
+        // the whole submission; both counters moved.
+        let entry = &model.log()[4];
+        assert_eq!(entry.stream, StreamId::from("gate"));
+        assert_eq!((entry.writer, entry.counter), (appender(), 1));
+        let Body::Verdict(verdict) = &entry.body else {
+            panic!("entry 4 is not a verdict");
+        };
+        assert_eq!(*verdict.rejected, cases[0].0);
+        assert_eq!(verdict.rejected.verify(&verdict.sig_writer), Ok(()));
+        assert_eq!(model.counter_of(&appender()), 4);
+        assert_eq!(model.counter_of(&public_key(&writer)), 6);
+        assert_eq!(model.stream(&StreamId::from("gate")), Some((4, 7)));
+        assert_eq!(model.stream(&StreamId::from("island")), Some((2, 8)));
+    }
+
+    #[test]
+    fn a_refused_submission_resent_gets_its_refusal_again() {
+        let mut model = started();
+        let writer = key(1);
+        submit(&mut model, &policy(3, &[NAMES]), &root());
+        let refused = raw(1, 4, "x", 0);
+        let reason = Refusal::Invariant(NAMES);
+        assert_eq!(
+            submit(&mut model, &refused, &writer),
+            Outcome::Verdict { seq: 3, reason }
+        );
+        assert_eq!(
+            submit(&mut model, &refused, &writer),
+            Outcome::VerdictRetry { seq: 3, reason }
+        );
+        assert_eq!(
+            submit(&mut model, &raw(1, 0, "x", 0), &writer),
+            Outcome::Refused(Why::CounterConflict)
+        );
+        assert_eq!(model.log().len(), 4);
+        // Once the writer has moved on, the refused one is an old counter.
+        assert_eq!(
+            submit(&mut model, &raw(2, 0, "x", 0), &writer),
+            Outcome::Accepted { seq: 4 }
+        );
+        assert_eq!(
+            submit(&mut model, &refused, &writer),
+            Outcome::Refused(Why::CounterOld)
+        );
+    }
+
+    #[test]
+    fn a_policy_only_tightens() {
+        let mut model = started();
+        assert_eq!(
+            submit(&mut model, &policy(3, &[NAMES, max(100)]), &root()),
+            Outcome::Accepted { seq: 2 }
+        );
+        // Dropping an invariant, raising the bound, dropping the bound.
+        let weaker = [&[max(100)][..], &[NAMES, max(101)], &[NAMES], &[]];
+        for (invariants, counter) in weaker.into_iter().zip(4u64..) {
+            assert_eq!(
+                submit(&mut model, &policy(counter, invariants), &root()),
+                Outcome::Verdict {
+                    seq: counter - 1,
+                    reason: Refusal::WeakerPolicy
+                },
+                "{invariants:?}"
+            );
+        }
+        assert_eq!(model.policy().map(|(seq, _)| seq), Some(2));
+        // The same again, a lower bound, one more invariant: all allowed,
+        // in any order.
+        for (invariants, counter) in [
+            &[NAMES, max(100)][..],
+            &[max(40), NAMES],
+            &[HAS_REF, NAMES, max(40)],
+        ]
+        .into_iter()
+        .zip(8u64..)
+        {
+            assert_eq!(
+                submit(&mut model, &policy(counter, invariants), &root()),
+                Outcome::Accepted { seq: counter - 1 },
+                "{invariants:?}"
+            );
+        }
+        assert_eq!(model.policy().map(|(seq, _)| seq), Some(9));
+    }
+
+    #[test]
+    fn the_appender_key_writes_nothing_itself() {
+        let appender_key = key(0x41);
+        let mut model = Model::new(pin(), appender());
+        submit(&mut model, &genesis(), &root());
+        // Even with a grant to write verses.
+        let grants = vec![
+            root_capability(),
+            verdict(appender()),
+            grant(appender(), &["island"], &[Kind::Verse]),
+            grant(public_key(&key(1)), &["island"], &[Kind::Verse]),
+        ];
+        submit(&mut model, &bootstrap(grants), &root());
+        assert_eq!(
+            submit(&mut model, &verse(&appender_key, 1, "a"), &appender_key),
+            Outcome::Refused(Why::AppenderWrites)
+        );
+
+        // A verdict from outside is refused, whoever signs it.
+        submit(&mut model, &policy(3, &[NAMES]), &root());
+        let rejected = raw(1, 4, "x", 0);
+        for outsider in [key(1), key(0x41)] {
+            let forged = Submission {
+                stream: StreamId::from("gate"),
+                writer: public_key(&outsider),
+                counter: 1,
+                body: Body::Verdict(Verdict {
+                    sig_writer: sign_hash(&key(1), &rejected.hash()),
+                    rejected: Box::new(rejected.clone()),
+                    reason: Refusal::Invariant(NAMES),
+                }),
+            };
+            assert_eq!(
+                submit(&mut model, &forged, &outsider),
+                Outcome::Refused(Why::Verdict)
+            );
+        }
+        // The real one, and a resend of the appender's own submission.
+        assert_eq!(
+            submit(&mut model, &rejected, &key(1)),
+            Outcome::Verdict {
+                seq: 3,
+                reason: Refusal::Invariant(NAMES)
+            }
+        );
+        let own = model.log()[3].clone();
+        assert_eq!(
+            submit(&mut model, &own, &appender_key),
+            Outcome::Retry { seq: 3 }
         );
     }
 }

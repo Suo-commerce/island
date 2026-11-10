@@ -3,7 +3,7 @@
 //! An operation is plain data: small numbers that the world (see
 //! `world.rs`) turns into submissions against the state it is in. A
 //! counter is an offset from the writer's next number, a writer is an
-//! index into four fixed keys, a stream an index into six fixed names. So
+//! index into five fixed keys, a stream an index into six fixed names. So
 //! every operation means something in every state, the generator needs no
 //! knowledge of what should happen, and a case can be written to a file
 //! and read back exactly.
@@ -18,6 +18,13 @@ pub const WRITERS: u8 = 4;
 
 /// The root key's writer index.
 pub const ROOT: u8 = 3;
+
+/// The appender's own key, used as a writer from outside: index 4, one
+/// past [`WRITERS`], so that it turns up only where a generator asks.
+pub const APPENDER: u8 = 4;
+
+/// How many keys a writer index can name.
+pub const KEYS: u8 = 5;
 
 /// The streams an operation can name, by index.
 pub const STREAMS: [&str; 6] = ["island", "flare", "plan", "policy", "authority", "gate"];
@@ -38,12 +45,13 @@ pub const RIGHTS: [&str; 6] = [
 pub enum Op {
     /// A writer submits something.
     Write(Write),
-    /// A writer sends its latest accepted submission again, byte for byte.
+    /// A writer sends its latest submission that is in the log again, byte
+    /// for byte: an entry, or one the gate refused.
     Resend {
         /// Which writer.
         writer: u8,
     },
-    /// A writer sends an older accepted submission again: a replay.
+    /// A writer sends an older one of those again: a replay.
     ReplayOld {
         /// Which writer.
         writer: u8,
@@ -81,7 +89,7 @@ pub enum Op {
 /// A submission, described relative to the state it meets.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Write {
-    /// Which writer (index, modulo [`WRITERS`]).
+    /// Which writer (index, modulo [`KEYS`]).
     pub writer: u8,
     /// The counter, as an offset from the writer's next number: 0 is the
     /// right one, negative is old, positive skips ahead.
@@ -110,12 +118,23 @@ pub enum What {
     },
     /// A preference.
     Preference,
-    /// A policy entry.
+    /// A policy entry, whatever the policy in force.
     Policy {
         /// Which invariants, as a bit mask over the three tags.
         invariants: u8,
         /// The `VerseTextMax` bound, if that bit is set.
         max: u16,
+    },
+    /// A policy entry made from the policy in force: everything it holds,
+    /// its text bound lowered, and more invariants added. Always at least
+    /// as strong.
+    Tighten {
+        /// Which invariants to add if they are missing, as a bit mask
+        /// over the three tags.
+        add: u8,
+        /// How far to lower the text bound; the bound itself, if this adds
+        /// one.
+        lower_by: u16,
     },
     /// A new grant.
     Grant {
@@ -156,7 +175,7 @@ pub enum What {
         /// How many root capabilities it holds (modulo 3). One is right.
         roots: u8,
     },
-    /// A verdict, which only the appender may write, and not yet.
+    /// A verdict from outside. Only the appender's own gate writes them.
     Verdict,
 }
 
@@ -239,6 +258,22 @@ pub fn start() -> [Op; 2] {
     ]
 }
 
+/// A first policy: the invariants in `invariants`, with a text bound that
+/// the generated verses fall on both sides of.
+pub fn first_policy(invariants: u8) -> Op {
+    Op::Write(Write {
+        writer: ROOT,
+        counter: 0,
+        salt: 0,
+        stream: 3, // policy
+        what: What::Policy {
+            invariants,
+            max: 24,
+        },
+        sign: Sign::Good,
+    })
+}
+
 /// The grants a properly started case gives its three writers, so that
 /// they differ in what they may do: writer 0 may write verses and
 /// preferences on both projects and the plan, writer 1 only verses on
@@ -268,7 +303,7 @@ pub fn first_grants() -> [Op; 2] {
 fn home(what: &What) -> u8 {
     match what {
         What::Verse { .. } | What::Preference => 0,
-        What::Policy { .. } => 3,
+        What::Policy { .. } | What::Tighten { .. } => 3,
         What::Grant { .. }
         | What::Narrow { .. }
         | What::Revoke { .. }
@@ -299,10 +334,20 @@ fn twist() -> impl Strategy<Value = Twist> {
 
 fn what() -> impl Strategy<Value = What> {
     prop_oneof![
-        10 => (0u8..6, 0u8..40, 0u8..3)
+        // A verse: mostly naming a kind of evidence, of a length on either
+        // side of the bounds the policies set.
+        10 => (
+            prop_oneof![6 => 0u8..4, 1 => 4u8..=255],
+            0u8..40,
+            0u8..3,
+        )
             .prop_map(|(evidence, len, refs)| What::Verse { evidence, len, refs }),
         2 => Just(What::Preference),
-        2 => (0u8..8, 0u16..5000).prop_map(|(invariants, max)| What::Policy { invariants, max }),
+        // Any policy: against the one in force, most of these loosen.
+        1 => (0u8..8, prop_oneof![3 => 0u16..64, 1 => 0u16..5000])
+            .prop_map(|(invariants, max)| What::Policy { invariants, max }),
+        2 => (0u8..8, prop_oneof![1 => Just(0u16), 2 => 0u16..12])
+            .prop_map(|(add, lower_by)| What::Tighten { add, lower_by }),
         // A new grant: mostly rights a grant may carry, sometimes any.
         2 => (
             0..WRITERS,
@@ -328,7 +373,8 @@ fn what() -> impl Strategy<Value = What> {
 
 fn write() -> impl Strategy<Value = Write> {
     (
-        0..WRITERS,
+        // Now and then the appender's own key, from outside.
+        prop_oneof![24 => 0..WRITERS, 1 => Just(APPENDER)],
         // What only root may write is mostly written by root.
         prop::bool::weighted(0.8),
         prop_oneof![8 => Just(0i8), 2 => -3i8..=3],
@@ -361,8 +407,8 @@ fn write() -> impl Strategy<Value = Write> {
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         14 => write().prop_map(Op::Write),
-        1 => (0..WRITERS).prop_map(|writer| Op::Resend { writer }),
-        1 => (0..WRITERS, 0u8..3).prop_map(|(writer, back)| Op::ReplayOld { writer, back }),
+        1 => (0..KEYS).prop_map(|writer| Op::Resend { writer }),
+        1 => (0..KEYS, 0u8..3).prop_map(|(writer, back)| Op::ReplayOld { writer, back }),
         1 => (1u32..5_000_000).prop_map(|micros| Op::Tick { micros }),
         1 => (1u32..5_000_000).prop_map(|micros| Op::ClockBack { micros }),
         1 => (0u16..600).prop_map(|keep| Op::FailSync { keep }),
@@ -378,8 +424,18 @@ fn beginning() -> impl Strategy<Value = Vec<Op>> {
     let [genesis, bootstrap] = start();
     let mut granted = vec![genesis.clone(), bootstrap.clone()];
     granted.extend(first_grants());
+    let with_policy = |invariants| {
+        let mut ops = granted.clone();
+        ops.push(first_policy(invariants));
+        ops
+    };
     prop_oneof![
-        14 => Just(granted),
+        // Writers with grants, and a first policy in force: the slice's
+        // own, or all three invariants.
+        7 => Just(with_policy(0b011)),
+        4 => Just(with_policy(0b111)),
+        // Writers with grants and no policy yet: nothing is refused.
+        3 => Just(granted),
         // Started, but nobody has been granted anything yet.
         2 => Just(vec![genesis.clone(), bootstrap]),
         2 => Just(vec![genesis.clone()]),

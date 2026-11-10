@@ -5,6 +5,7 @@
 //!   hand, a seeded generator.
 //! - [`ops`]: the operations a case is made of, and their generators.
 //! - [`world`]: one case, and the oracles checked after every operation.
+//! - [`ratchet`]: oracle 6 on generated pairs of any two policies.
 //! - [`archive`]: every case that ever failed, kept and re-run.
 //!
 //! A seed is a number. [`generate`] turns it into a case, the same case
@@ -17,6 +18,7 @@
 
 pub mod archive;
 pub mod ops;
+pub mod ratchet;
 pub mod sim;
 pub mod world;
 
@@ -41,7 +43,8 @@ pub fn seeds() -> u64 {
         .unwrap_or(DEFAULT_SEEDS)
 }
 
-fn tree(seed: u64) -> impl ValueTree<Value = Vec<Op>> {
+/// A proptest runner whose every choice follows from `seed`.
+fn runner(seed: u64) -> TestRunner {
     // The seed, spread over the 32 bytes ChaCha takes.
     let mut bytes = [0u8; 32];
     for (index, chunk) in bytes.chunks_mut(8).enumerate() {
@@ -50,9 +53,12 @@ fn tree(seed: u64) -> impl ValueTree<Value = Vec<Op>> {
         );
     }
     let rng = TestRng::from_seed(RngAlgorithm::ChaCha, &bytes);
-    let mut runner = TestRunner::new_with_rng(Config::default(), rng);
+    TestRunner::new_with_rng(Config::default(), rng)
+}
+
+fn tree(seed: u64) -> impl ValueTree<Value = Vec<Op>> {
     ops::case()
-        .new_tree(&mut runner)
+        .new_tree(&mut runner(seed))
         .expect("the case strategy never rejects")
 }
 

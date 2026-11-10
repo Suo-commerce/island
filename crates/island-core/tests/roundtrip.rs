@@ -95,13 +95,20 @@ fn signature() -> impl Strategy<Value = [u8; 64]> {
     vec(any::<u8>(), 64).prop_map(|bytes| bytes.try_into().expect("64 bytes"))
 }
 
+fn refusal() -> impl Strategy<Value = Refusal> {
+    prop_oneof![
+        invariant().prop_map(Refusal::Invariant),
+        Just(Refusal::WeakerPolicy),
+    ]
+}
+
 fn verdict() -> impl Strategy<Value = Body> {
-    (submission_with(plain_body()), signature(), invariant()).prop_map(
-        |(rejected, sig_writer, invariant)| {
+    (submission_with(plain_body()), signature(), refusal()).prop_map(
+        |(rejected, sig_writer, reason)| {
             Body::Verdict(Verdict {
                 rejected: Box::new(rejected),
                 sig_writer,
-                reason: Refusal::Invariant(invariant),
+                reason,
             })
         },
     )

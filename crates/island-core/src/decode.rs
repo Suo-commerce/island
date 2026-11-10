@@ -269,6 +269,7 @@ impl<'a> Reader<'a> {
     pub fn refusal(&mut self) -> R<Refusal> {
         Ok(match self.tag()? {
             (_, 0) => Refusal::Invariant(self.invariant()?),
+            (_, 1) => Refusal::WeakerPolicy,
             (at, tag) => {
                 return Err(DecodeError::BadTag {
                     at,

@@ -468,6 +468,9 @@ dependencies = [
 [[package]]
 name = "island-gate"
 version = "0.0.0"
+dependencies = [
+ "island-core",
+]
 
 [[package]]
 name = "island-harness"
@@ -475,6 +478,7 @@ version = "0.0.0"
 dependencies = [
  "island-core",
  "island-env",
+ "island-gate",
  "island-log",
  "island-model",
  "proptest",
@@ -490,6 +494,7 @@ dependencies = [
  "island-auth",
  "island-core",
  "island-env",
+ "island-gate",
  "tempfile",
 ]
 

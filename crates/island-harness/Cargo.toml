@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 island-core = { workspace = true }
 island-env = { workspace = true }
+island-gate = { workspace = true }
 island-log = { workspace = true }
 island-model = { workspace = true }
 proptest = { workspace = true }

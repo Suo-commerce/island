@@ -118,10 +118,11 @@ impl RootSigner {
                         submission.verify(&signature).map_err(|_| {
                             Stop::Failed(format!(
                                 "a signature does not verify for hash {} under root key {}.\n\
-                                 Either the log has moved on since the hash was printed (run \
-                                 again without --signature), or it was signed with another \
-                                 key, or not as plain ed25519 over the 32 bytes (in OpenBao \
-                                 Transit, leave `prehashed` off).",
+                                 Either the log has moved on since the hash was printed, or \
+                                 island-cli was built again from another commit (a policy \
+                                 names its build): run again without --signature. Or it was \
+                                 signed with another key, or not as plain ed25519 over the 32 \
+                                 bytes (in OpenBao Transit, leave `prehashed` off).",
                                 hex(&submission.hash()),
                                 hex(&root)
                             ))
