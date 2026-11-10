@@ -6,8 +6,10 @@ that can only be tightened, and replicated for verification. Flare is its
 personal console. Both live in this one Cargo workspace.
 
 The specification is [`docs/spec.md`](docs/spec.md). The repo is at build
-step 1 of its "Build order": every crate is an empty library, and the rules
-that keep the two halves apart are already enforced.
+step 2 of its "Build order": `island-core` holds the record formats, with
+golden vectors in `crates/island-core/tests/golden/`; every other crate is
+still an empty library, and the rules that keep the two halves apart are
+enforced.
 
 ## Layout
 

@@ -20,7 +20,11 @@ ignore = []
 [licenses]
 # A new dependency with a licence not listed here fails CI until it is
 # judged and added.  Taso's deny.toml is the list to start from.
-allow = ["Apache-2.0"]
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",   # ed25519-dalek, curve25519-dalek, subtle
+    "Unicode-3.0",    # unicode-ident (Unicode data tables), build-time only
+]
 confidence-threshold = 0.8
 
 [bans]
@@ -37,3 +41,5 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# taso-core, pinned to a commit in Cargo.toml.
+allow-git = ["https://github.com/Suo-commerce/taso"]

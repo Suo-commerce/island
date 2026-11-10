@@ -29,6 +29,14 @@ flare-link = { path = "crates/flare-link" }
 flare-server = { path = "crates/flare-server" }
 flare-tui = { path = "crates/flare-tui" }
 
+# taso-core gives the canonical encoding (docs/spec.md, "Record formats").
+# Pinned to a commit of Taso main; moved by hand, with the golden vectors
+# re-checked in the same commit.
+taso-core = { git = "https://github.com/Suo-commerce/taso", rev = "0e7fed6866c72ff7a3aa5b3ceb759418157a3964" }
+blake3 = "1.8"
+ed25519-dalek = "3"
+proptest = "1.12"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
