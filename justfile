@@ -3,6 +3,11 @@
 # Seeds per harness run: `just SEEDS=500 harness`.
 SEEDS := "10000"
 
+# Where `just init` starts a log: `just LOG=/var/lib/island/island.log init`.
+LOG := ".island/island.log"
+ROOT_KEY := ".island/root.key"
+APPENDER_KEY := ".island/appender.key"
+
 # List the recipes.
 default:
     @just --list
@@ -31,7 +36,6 @@ test:
 harness:
     ISLAND_HARNESS_SEEDS={{SEEDS}} cargo test -p island-harness --release --locked
 
-# Genesis: writes entries 0 and 1 (arrives with island-cli in build step 3).
+# Genesis: start a new log with entries 0 and 1. Key files come from `island-cli keygen`.
 init:
-    @echo "just init: island-cli init arrives with build step 3 (docs/spec.md, Build order)" >&2
-    @exit 1
+    cargo run --quiet --locked -p island-cli -- init --log {{LOG}} --root-key {{ROOT_KEY}} --appender-key {{APPENDER_KEY}}

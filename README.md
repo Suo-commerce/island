@@ -6,10 +6,17 @@ that can only be tightened, and replicated for verification. Flare is its
 personal console. Both live in this one Cargo workspace.
 
 The specification is [`docs/spec.md`](docs/spec.md). The repo is at build
-step 2 of its "Build order": `island-core` holds the record formats, with
-golden vectors in `crates/island-core/tests/golden/`; every other crate is
-still an empty library, and the rules that keep the two halves apart are
-enforced.
+step 3 of its "Build order":
+
+- `island-core` holds the record formats, with golden vectors in
+  `crates/island-core/tests/golden/`.
+- `island-env` holds the clock, randomness and storage.
+- `island-log` holds the appender, the reader and replay.
+- `island-cli` starts, verifies and reads a log.
+
+Grants (step 5) and the gate (step 6) are not checked yet: the appender
+takes any signed, correctly counted submission on the right stream. The
+other crates are still empty libraries.
 
 ## Layout
 
@@ -42,5 +49,18 @@ just check              # format, Clippy with the bans, dependency rules
 just test               # unit and component tests
 just SEEDS=500 harness  # the seeded harness (from build step 4)
 ```
+
+A log for development, under `.island/` (ignored by git):
+
+```sh
+mkdir .island
+cargo run -p island-cli -- keygen .island/root.key
+cargo run -p island-cli -- keygen .island/appender.key
+just init               # entries 0 and 1; prints the root key to pin
+cargo run -p island-cli -- verify --log .island/island.log --root <root key>
+```
+
+Key files are for development and for the appender. The root key belongs
+in AgentVault; signing from there arrives with build step 5.
 
 Changes to Taso go to the Taso repo as pull requests, never as a fork here.

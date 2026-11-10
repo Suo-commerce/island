@@ -24,6 +24,7 @@ allow = [
     "Apache-2.0",
     "BSD-3-Clause",   # ed25519-dalek, curve25519-dalek, subtle
     "Unicode-3.0",    # unicode-ident (Unicode data tables), build-time only
+    "MIT",            # strsim, via clap
 ]
 confidence-threshold = 0.8
 
@@ -35,6 +36,12 @@ deny = [
     # Island never links the Warden.  It speaks to Wardens only through the
     # Field protocol, as any sender would.
     { crate = "taso-warden" },
+]
+
+# Known duplicates, each with its reason; any other duplicate still warns.
+skip = [
+    # Build-time only: curve25519-dalek-derive is on syn 2, clap_derive on syn 3.
+    { crate = "syn@2", reason = "proc-macro dependency of curve25519-dalek-derive" },
 ]
 
 [sources]

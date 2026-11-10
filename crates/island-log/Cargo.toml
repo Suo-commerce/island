@@ -12,3 +12,16 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+island-core = { workspace = true }
+island-env = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+# Test support, not a tool: the process `tests/crash.rs` kills with
+# SIGKILL while it appends to a real file.
+[[bin]]
+name = "island-log-crash-writer"
+path = "tests/support/crash_writer.rs"
+test = false
+doc = false

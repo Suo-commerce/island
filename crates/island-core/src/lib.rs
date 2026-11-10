@@ -19,6 +19,7 @@ pub mod decode;
 pub mod hash;
 pub mod record;
 pub mod sign;
+pub mod state;
 
 pub use decode::{DecodeError, Reader};
 pub use hash::{ENTRY_DOMAIN, SUBMISSION_DOMAIN, entry_hash, sub_hash};
@@ -27,3 +28,4 @@ pub use record::{
     PublicKey, Record, Refusal, Revoke, Signature, StreamId, Submission, Verdict, Verse,
 };
 pub use sign::{BadSignature, SigningKey, VerifyError, public_key, sign_hash, verify_hash};
+pub use state::{Answer, Last, STATE_DOMAIN, State, StreamState, state_hash};

@@ -36,6 +36,9 @@ taso-core = { git = "https://github.com/Suo-commerce/taso", rev = "0e7fed6866c72
 blake3 = "1.8"
 ed25519-dalek = "3"
 proptest = "1.12"
+getrandom = { version = "0.3", features = ["std"] }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3.27"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -46,3 +49,9 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 disallowed_methods = "deny"
 disallowed_types = "deny"
+
+# Dependencies are optimized even in debug and test builds: unoptimized
+# ed25519 and BLAKE3 make every signed record cost milliseconds. The
+# workspace's own crates stay unoptimized.
+[profile.dev.package."*"]
+opt-level = 2

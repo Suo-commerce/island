@@ -232,8 +232,9 @@ impl Canonical for Invariant {
 }
 
 /// The body of a `policy` entry: the invariants in force from this entry
-/// on, and the build that judges them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// on, and the build that judges them. The default is the empty policy in
+/// force before the first `policy` entry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Policy {
     /// The git commit of the build that judges.
     pub evaluator: String,
