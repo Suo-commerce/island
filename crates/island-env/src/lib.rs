@@ -2,7 +2,8 @@
 //! workspace is not allowed to reach for on its own.
 //!
 //! [`Clock`], [`Rng`] and [`Storage`] are the three ways the outside world
-//! gets into Island. The appender takes them as values, so the harness can
+//! gets into Island; [`keyfile`] reads and writes the files keys live in,
+//! and [`spawn`] is the one place a thread is started. The appender takes them as values, so the harness can
 //! put a simulated clock, a seeded generator and a storage that fails on
 //! command in their place and run the same code twice with the same
 //! result. The production implementations are here too: this is the one
@@ -10,6 +11,8 @@
 //! `clippy.toml`).
 
 #![warn(missing_docs)]
+
+pub mod keyfile;
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -152,6 +155,21 @@ impl Storage for FileStorage {
         self.file.set_len(len)?;
         self.file.sync_all()
     }
+}
+
+// ── Threads ─────────────────────────────────────────────────────────
+
+/// Start a named thread.
+///
+/// The rest of the workspace may not start threads on its own: where one
+/// is needed, it is asked for here, by name, so every thread a process
+/// runs can be found by reading its calls to this function. The appender
+/// gets exactly one.
+pub fn spawn<T: Send + 'static>(
+    name: &str,
+    run: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<std::thread::JoinHandle<T>> {
+    std::thread::Builder::new().name(name.to_owned()).spawn(run)
 }
 
 #[cfg(test)]

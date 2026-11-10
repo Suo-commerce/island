@@ -11,4 +11,20 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The calls to a broker. Without it the crate only builds, signs and
+# decodes, and pulls in no network or async code.
+net = ["dep:rmcp", "dep:reqwest", "dep:tokio"]
+
 [dependencies]
+island-core = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+rmcp = { workspace = true, optional = true, features = ["client", "transport-streamable-http-client-reqwest"] }
+reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["time"] }
+
+[dev-dependencies]
+proptest = { workspace = true }

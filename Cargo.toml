@@ -17,7 +17,7 @@ publish = false
 island-auth = { path = "crates/island-auth" }
 island-broker = { path = "crates/island-broker" }
 island-cli = { path = "crates/island-cli" }
-island-client = { path = "crates/island-client" }
+island-client = { path = "crates/island-client" }  # its `net` feature holds the calls to a broker
 island-core = { path = "crates/island-core" }
 island-env = { path = "crates/island-env" }
 island-gate = { path = "crates/island-gate" }
@@ -41,7 +41,17 @@ clap = { version = "4", features = ["derive"] }
 tempfile = "3.27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = "0.22"
+base64 = "0.23"
+
+# The broker's network face (docs/spec.md, "Interfaces"). rmcp is the MCP
+# SDK; each crate turns on the sides and transports it uses. reqwest comes
+# without TLS: the broker is reached over the tailnet or on loopback.
+rmcp = { version = "3.9", default-features = false }
+schemars = "1"
+tokio = "1.54"
+tokio-util = "0.7"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

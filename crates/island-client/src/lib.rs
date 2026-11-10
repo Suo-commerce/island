@@ -1,3 +1,24 @@
-//! Island client: builds and signs submissions, decodes records. Used by Flare and coding-session tools.
+//! Island client: what a writer needs on its own side of the broker
+//! (docs/spec.md, "Interfaces").
 //!
-//! Empty until build step 7.
+//! - [`Writer`] builds and signs submissions. The key never leaves it.
+//! - [`wire`] is the broker's wire format, and [`codec`] goes between it
+//!   and Island's own types. The broker uses the same two modules, so the
+//!   format has one implementation.
+//! - [`Broker`] (feature `net`) calls a broker: its MCP tools, `/log` and
+//!   `/head`.
+//!
+//! Flare and the coding-session tools both build on this crate.
+
+#![warn(missing_docs)]
+
+#[cfg(feature = "net")]
+pub mod broker;
+pub mod codec;
+pub mod wire;
+mod writer;
+
+#[cfg(feature = "net")]
+pub use broker::{Broker, Error};
+pub use codec::Malformed;
+pub use writer::{Signed, Writer};

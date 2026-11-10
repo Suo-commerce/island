@@ -6,11 +6,11 @@ that can only be tightened, and replicated for verification. Flare is its
 personal console. Both live in this one Cargo workspace.
 
 The specification is [`docs/spec.md`](docs/spec.md). The repo is at build
-step 6 of its "Build order":
+step 7 of its "Build order":
 
 - `island-core` holds the record formats, with golden vectors in
   `crates/island-core/tests/golden/`.
-- `island-env` holds the clock, randomness and storage.
+- `island-env` holds the clock, randomness, storage and key files.
 - `island-auth` holds authority: grants, narrowing, revoking, and the two
   protected grants every log starts with.
 - `island-gate` holds the gate: `judge`, the three invariants, and
@@ -18,16 +18,24 @@ step 6 of its "Build order":
 - `island-log` holds the appender, the reader and replay. A write the gate
   refuses leaves a `verdict` entry holding the whole submission, and replay
   judges every one of them again.
-- `island-cli` starts, verifies and reads a log, and writes to it: grants,
-  revokes and policies as root, verses and override requests as any key.
+- `island-broker` serves one log: the MCP tools `append`, `read_stream`
+  and `my_capabilities` at `/mcp`, and `GET /log` and `GET /head` for
+  replicas. One thread owns the appender and answers every request in
+  order.
+- `island-client` is the other side: it builds and signs submissions,
+  holds the wire format (pinned in `crates/island-client/tests/golden/`),
+  and calls a broker.
+- `island-cli` starts, verifies and reads a log, and writes to it, either
+  in the file directly or through a broker. Its `mcp` command is the
+  helper a coding session writes verses through.
 - `island-model` is the reference model: what the write path must answer,
   written to be read.
 - `island-harness` runs generated cases through the real appender on
   simulated storage, with the model beside it, and checks its seven
   oracles after every operation.
 
-The broker and its client (step 7) come next; until then the CLI appends
-to the log file directly. The other crates are still empty libraries.
+Flare (steps 8 and 9) comes next. The `flare-*` crates are still empty
+libraries.
 
 ## Layout
 
@@ -143,6 +151,89 @@ REFUSED=$(cargo run -q -p island-cli -- tail --log $LOG --root $ROOT -n 100 \
 cargo run -q -p island-cli -- override $AS_DAILY $REFUSED "the evidence is in the text"
 cargo run -q -p island-cli -- replay --log $LOG --root $ROOT
 ```
+
+### Running the broker
+
+The broker serves one log and holds its lock, so while it runs every
+write goes through it, root's too. It listens on loopback unless told
+otherwise, and answers only to the names it is given: a web page cannot
+reach it through a name of its own.
+
+```sh
+just broker
+```
+
+In another terminal, the same commands as above with `--broker` in place
+of `--log` and `--appender-key`. They pull the log and verify it from
+genesis against the root key before they use it:
+
+```sh
+BROKER=http://127.0.0.1:4747
+ROOT=$(cargo run -q -p island-cli -- public .island/root.key)
+VIA_DAILY="--broker $BROKER --root $ROOT --key .island/daily.key"
+cargo run -q -p island-cli -- verse $VIA_DAILY --stream island \
+    --evidence decision --text "written through the broker"
+cargo run -q -p island-cli -- grants --broker $BROKER --root $ROOT
+cargo run -q -p island-cli -- tail --broker $BROKER --root $ROOT
+curl -s $BROKER/head
+```
+
+A `policy` written through a broker names the broker's build as its
+evaluator, since that is the build that judges. To reach the broker by
+another name than loopback, on the tailnet for example, start it with
+`--listen` and one `--allow-host` per name (`cargo run -p island-broker --
+--help`). Stop it with Ctrl-C; a restart loses nothing, and clients carry
+on without connecting anew.
+
+### Verses from a coding session
+
+A coding session writes verses through a helper, `island-cli mcp`. The
+helper holds one writer key and gives the session three tools:
+`append_verse`, `read_stream` and `my_capabilities`. The session never
+sees the key and needs no way to the broker itself, so the helper runs
+outside the session's sandbox. Each installation gets its own key and its
+own grant, so the log shows where a verse came from and one installation
+can be revoked alone.
+
+A key and a grant for the installation, and the programs built once:
+
+```sh
+just build
+cargo run -q -p island-cli -- keygen .island/opencode.key
+SESSION=$(cargo run -q -p island-cli -- public .island/opencode.key)
+ROOT=$(cargo run -q -p island-cli -- public .island/root.key)
+cargo run -q -p island-cli -- grant --broker http://127.0.0.1:4747 \
+    --root-key .island/root.key --holder $SESSION --scope island --rights verse
+```
+
+Then one of two ways to load the helper. If the harness can start a
+program outside its sandbox, let it start the helper (MCP over standard
+input and output):
+
+```sh
+HELPER="$PWD/target/release/island-cli mcp --broker http://127.0.0.1:4747 --key $PWD/.island/opencode.key --root $ROOT"
+opencode mcp add island -- $HELPER
+claude mcp add --scope user island -- $HELPER
+```
+
+If the harness itself runs inside the sandbox, start the helper beside
+it and give the harness its address (MCP over HTTP). The helper answers
+on loopback only, unless it is given `--allow-host` names:
+
+```sh
+target/release/island-cli mcp --broker http://127.0.0.1:4747 \
+    --key .island/opencode.key --root $ROOT --listen 127.0.0.1:4748
+```
+
+```sh
+opencode mcp add island --url http://127.0.0.1:4748/mcp
+claude mcp add --scope user --transport http island http://127.0.0.1:4748/mcp
+```
+
+Whoever can reach the helper's address can write verses with its key, so
+keep it on loopback or inside the sandbox's own network. If the broker
+does not answer, the helper says so; a verse sent again after a lost
+answer is never written twice.
 
 ### Signing as root without a key file
 

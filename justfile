@@ -9,6 +9,9 @@ LOG := ".island/island.log"
 ROOT_KEY := ".island/root.key"
 APPENDER_KEY := ".island/appender.key"
 
+# Where `just broker` listens.
+LISTEN := "127.0.0.1:4747"
+
 # List the recipes.
 default:
     @just --list
@@ -41,3 +44,11 @@ harness:
 # Genesis: start a new log with entries 0, 1 and 2 (the first policy). Key files come from `island-cli keygen`.
 init:
     cargo run --quiet --locked -p island-cli -- init --log {{LOG}} --root-key {{ROOT_KEY}} --appender-key {{APPENDER_KEY}}
+
+# Build the programs, optimized: target/release/island-cli and target/release/island-broker.
+build:
+    cargo build --release --locked -p island-cli -p island-broker
+
+# Serve the log: the MCP tools at /mcp, GET /log and GET /head. Stop it with Ctrl-C.
+broker:
+    cargo run --quiet --locked -p island-broker -- --log {{LOG}} --appender-key {{APPENDER_KEY}} --root $(cargo run --quiet --locked -p island-cli -- public {{ROOT_KEY}}) --listen {{LISTEN}}

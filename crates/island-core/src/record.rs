@@ -573,6 +573,14 @@ pub struct Record {
     pub sig_appender: Signature,
 }
 
+impl Submission {
+    /// The submission's canonical bytes: what its hash is taken over, and
+    /// what travels to the broker.
+    pub fn encode(&self) -> Vec<u8> {
+        self.canon_bytes()
+    }
+}
+
 impl Record {
     /// The record's bytes.
     pub fn encode(&self) -> Vec<u8> {

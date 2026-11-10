@@ -207,6 +207,9 @@ pub struct Appender<S, C> {
     key: SigningKey,
     chain: Chain,
     stopped: bool,
+    /// The record the running `submit_keeping` call has stored, if any.
+    kept: Option<Record>,
+    keeping: bool,
 }
 
 impl<S: Storage, C: Clock> Appender<S, C> {
@@ -216,11 +219,23 @@ impl<S: Storage, C: Clock> Appender<S, C> {
     /// `pin` is the root public key. An empty store becomes a new log
     /// that accepts only a genesis declaring it.
     pub fn open(
-        mut storage: S,
+        storage: S,
         clock: C,
         key: SigningKey,
         pin: PublicKey,
     ) -> Result<(Self, Recovery), OpenError> {
+        let (appender, _, recovery) = Self::open_with_records(storage, clock, key, pin)?;
+        Ok((appender, recovery))
+    }
+
+    /// [`Appender::open`], also handing back every record the log holds,
+    /// for a caller that serves them to readers.
+    pub fn open_with_records(
+        mut storage: S,
+        clock: C,
+        key: SigningKey,
+        pin: PublicKey,
+    ) -> Result<(Self, Vec<Record>, Recovery), OpenError> {
         let bytes = storage.read()?;
         let scan = frame::scan(&bytes)?;
         let records = decode_records(&scan)?;
@@ -253,9 +268,26 @@ impl<S: Storage, C: Clock> Appender<S, C> {
                 key,
                 chain,
                 stopped: false,
+                kept: None,
+                keeping: false,
             },
+            records,
             recovery,
         ))
+    }
+
+    /// [`Appender::submit`], also handing back the record the submission
+    /// added to the log, if it added one: the entry itself, or the verdict
+    /// of a gate refusal. A retry adds nothing.
+    pub fn submit_keeping(
+        &mut self,
+        submission: Submission,
+        sig_writer: Signature,
+    ) -> (Result<Ack, Rejected>, Option<Record>) {
+        self.keeping = true;
+        let answer = self.submit(submission, sig_writer);
+        self.keeping = false;
+        (answer, self.kept.take())
     }
 
     /// The chain as of the last acknowledged entry.
@@ -388,6 +420,9 @@ impl<S: Storage, C: Clock> Appender<S, C> {
             return Err(Rejected::Storage(error.kind()));
         }
         self.chain.advance(record, step);
+        if self.keeping {
+            self.kept = Some(record.clone());
+        }
         Ok(Ack {
             seq: record.entry.seq,
             hash: record.hash,

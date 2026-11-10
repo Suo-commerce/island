@@ -1,0 +1,91 @@
+{
+  "/head: output": {
+    "build": "f9634932b6a9079d9d5c2f5acc4f65f0f8a14d03",
+    "hash": "b8T0JDLJ9XE2VbxMBC7GpTnrJXwROk1AGEo973INAiA=",
+    "seq": 7,
+    "wire": 1
+  },
+  "/log: query": {
+    "after": 6,
+    "limit": 500
+  },
+  "append: accepted": {
+    "hash": "b8T0JDLJ9XE2VbxMBC7GpTnrJXwROk1AGEo973INAiA=",
+    "seq": 7
+  },
+  "append: input": {
+    "sig_writer": "vhsYsijUyX8EOBy4qztNgFNJ6uCImUc1j/DNGVHXch4xrKacUnZzM/VXhYMoQaSCAV9l3qsfv31mrByuCAR7BA==",
+    "submission": "BgAAAAAAAABpc2xhbmTQSrIydCu0qzoTaL1GFeTm0CJKtxoBa6+FIKMyyXeHNwMAAAAAAAAAAwEZAAAAAAAAAHRoZSB3aXJlIGZvcm1hdCBpcyBwaW5uZWQBAAAAAAAAAKurq6urq6urq6urq6urq6urq6urq6urq6urq6urq6ur"
+  },
+  "append: refused by the gate": {
+    "refused": {
+      "code": "gate",
+      "reason": "refused by the gate: it breaks VerseNamesEvidence",
+      "verdict": {
+        "hash": "iIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg=",
+        "seq": 8
+      }
+    }
+  },
+  "append: refused for its counter": {
+    "refused": {
+      "code": "counter-gap",
+      "next_counter": 4,
+      "reason": "counter 9 skips ahead; the next is 4"
+    }
+  },
+  "my_capabilities: input": {
+    "writer": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="
+  },
+  "my_capabilities: output": {
+    "grants": [
+      {
+        "id": "3.0",
+        "replaced_by": "9.0",
+        "rights": [
+          "verse",
+          "preference"
+        ],
+        "scope": [
+          "island",
+          "plan"
+        ]
+      },
+      {
+        "id": "9.0",
+        "narrows": "3.0",
+        "revoked_at": 12,
+        "rights": [
+          "verse"
+        ],
+        "scope": [
+          "island"
+        ]
+      },
+      {
+        "id": "14.0",
+        "rights": [
+          "verse"
+        ],
+        "scope": [
+          "flare"
+        ]
+      }
+    ],
+    "next_counter": 4
+  },
+  "read_stream and /log: output": {
+    "more": true,
+    "records": [
+      "BwAAAAAAAAAAEBVYuV4GAAIAAAAAAAAAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAGAAAAAAAAAGlzbGFuZNBKsjJ0K7SrOhNovUYV5ObQIkq3GgFrr4UgozLJd4c3AwAAAAAAAAADARkAAAAAAAAAdGhlIHdpcmUgZm9ybWF0IGlzIHBpbm5lZAEAAAAAAAAAq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6u+GxiyKNTJfwQ4HLirO02AU0nq4IiZRzWP8M0ZUddyHjGsppxSdnMz9VeFgyhBpIIBX2Xeqx+/fWasHK4IBHsEb8T0JDLJ9XE2VbxMBC7GpTnrJXwROk1AGEo973INAiA9UNnNpGOhV+JDF/cfQksxAD3ZusS0g3slPRLkZiqQKlRD+a/AeUgYszZJxbi/H7lV3IvkhpnrbAhNZrhFP/YB"
+    ]
+  },
+  "read_stream: input": {
+    "after": 6,
+    "limit": 50,
+    "stream": "island"
+  },
+  "read_stream: input, from the start": {
+    "stream": "island"
+  }
+}

@@ -12,3 +12,20 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+island-client = { workspace = true }
+island-core = { workspace = true }
+island-env = { workspace = true }
+island-log = { workspace = true }
+rmcp = { workspace = true, features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "signal", "sync", "macros"] }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+island-client = { workspace = true, features = ["net"] }
+tempfile = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }

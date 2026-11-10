@@ -1,6 +1,6 @@
 [package]
 name = "island-cli"
-description = "Island command line: init (genesis), verify, replay, tail, grants, override."
+description = "Island command line: start, read and write a log, directly or through a broker; and the MCP helper for coding sessions."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,23 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+island-client = { workspace = true, features = ["net"] }
 island-core = { workspace = true }
 island-env = { workspace = true }
 island-log = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
+rmcp = { workspace = true, features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "sync", "time", "macros", "signal", "io-std"] }
+tokio-util = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
+island-broker = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "process"] }
+rmcp = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+reqwest = { workspace = true }

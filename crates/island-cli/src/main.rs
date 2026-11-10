@@ -1,22 +1,28 @@
-//! Island command line (docs/spec.md, build steps 3, 5 and 6).
+//! Island command line (docs/spec.md, build steps 3, 5, 6 and 7).
 //!
 //! - `keygen`, `public` and `init` start a log.
 //! - `grant`, `revoke` and `policy` write root-signed entries to it.
 //! - `verse` and `override` write as an ordinary key.
 //! - `verify`, `replay`, `tail` and `grants` read one. They never change
-//!   the file, and print nothing from a log they could not verify from
-//!   genesis against the pinned root key.
+//!   it, and print nothing from a log they could not verify from genesis
+//!   against the pinned root key.
+//! - `mcp` serves a coding session the tools to write verses with one
+//!   key, which stays outside the session's sandbox (see `helper`).
 //!
-//! Until the broker exists (build step 7), the writing commands append to
-//! the log file directly, holding its lock; they need the appender key.
+//! Every command but `init` finds the log in one of two places (see
+//! `via`): `--log` is the file itself, which a writing command locks and
+//! appends to with the appender key; `--broker` is a running broker,
+//! which holds that lock, so while one runs every write goes through it.
 //!
 //! Exit codes: 0 done; 1 failed, which includes a write the gate refused
 //! (its verdict is then in the log); 3 nothing written yet, sign the
 //! printed hash and run the command again (see `signer`).
 
+mod helper;
 mod keys;
 mod show;
 mod signer;
+mod via;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -28,10 +34,11 @@ use island_core::{
     Revoke, SigningKey, StreamId, Submission, Verse, public_key,
 };
 use island_env::{FileStorage, OsRng, SystemClock};
-use island_log::{Ack, Appender, Log, Rejected, genesis};
+use island_log::{Ack, Appender, genesis};
 
 use keys::hex;
 use signer::RootArgs;
+use via::{ReadFrom, Via, WriteTo, read};
 
 /// The git commit this build was made from: what a `policy` entry records
 /// as its `evaluator`. See `build.rs`.
@@ -39,9 +46,6 @@ const BUILD: &str = env!("ISLAND_BUILD_COMMIT");
 
 /// The key of the `preference` entry that asks for an override.
 pub const OVERRIDE_REQUEST: &str = "override-request";
-
-/// The log as the writing commands hold it: open, locked and replayed.
-type Open = Appender<FileStorage, SystemClock>;
 
 /// Why a command stopped without doing its work.
 pub enum Stop {
@@ -102,12 +106,8 @@ enum Command {
     /// Grant a key the right to write some kinds to some streams, or
     /// narrow a grant it holds.
     Grant {
-        /// The log file.
-        #[arg(long)]
-        log: PathBuf,
-        /// The appender key file.
-        #[arg(long)]
-        appender_key: PathBuf,
+        #[command(flatten)]
+        to: WriteTo,
         /// The public key that receives the grant, in hex.
         #[arg(long, value_parser = keys::parse_public_key)]
         holder: PublicKey,
@@ -127,12 +127,8 @@ enum Command {
     },
     /// End a grant. It stops covering writes from the next entry on.
     Revoke {
-        /// The log file.
-        #[arg(long)]
-        log: PathBuf,
-        /// The appender key file.
-        #[arg(long)]
-        appender_key: PathBuf,
+        #[command(flatten)]
+        to: WriteTo,
         /// The grant to end, as entry.index.
         #[arg(long)]
         grant: GrantId,
@@ -143,12 +139,8 @@ enum Command {
     /// with the changes given here, judged by this build. One that would
     /// be weaker is refused by the gate, and the refusal is recorded.
     Policy {
-        /// The log file.
-        #[arg(long)]
-        log: PathBuf,
-        /// The appender key file.
-        #[arg(long)]
-        appender_key: PathBuf,
+        #[command(flatten)]
+        to: WriteTo,
         /// Set the longest verse text allowed, in bytes.
         #[arg(long, value_name = "BYTES")]
         verse_text_max: Option<u32>,
@@ -161,8 +153,7 @@ enum Command {
         #[command(flatten)]
         root: RootArgs,
     },
-    /// Write a verse. A tool for trying the log out until the broker and
-    /// its client exist (build step 7).
+    /// Write a verse.
     Verse {
         #[command(flatten)]
         writer: WriterArgs,
@@ -192,11 +183,38 @@ enum Command {
         /// Why it should have been accepted.
         why: String,
     },
+    /// Serve MCP tools that write verses with one key, for a coding
+    /// session. The key stays with this process, outside the session's
+    /// sandbox; the session can ask for a verse and cannot read the key.
+    /// Speaks MCP on standard input and output, or with --listen on a
+    /// local address.
+    Mcp {
+        /// The broker to write through, for example
+        /// http://127.0.0.1:4747.
+        #[arg(long, value_name = "URL")]
+        broker: String,
+        /// The key file of this installation's writer key.
+        #[arg(long)]
+        key: PathBuf,
+        /// The pinned root public key, in hex. What the session reads is
+        /// verified against it.
+        #[arg(long, value_parser = keys::parse_public_key)]
+        root: PublicKey,
+        /// Serve on this address and port instead of standard input and
+        /// output, for a session that cannot start this program itself:
+        /// for example 127.0.0.1:4748.
+        #[arg(long, value_name = "ADDRESS")]
+        listen: Option<String>,
+        /// With --listen: a host name the session reaches this by,
+        /// besides loopback and the address listened on. May be given
+        /// more than once.
+        #[arg(long, value_name = "HOST", requires = "listen")]
+        allow_host: Vec<String>,
+    },
     /// List every grant a verified log has held, with its id.
     Grants {
-        /// The log file.
-        #[arg(long)]
-        log: PathBuf,
+        #[command(flatten)]
+        from: ReadFrom,
         /// The pinned root public key, in hex.
         #[arg(long, value_parser = keys::parse_public_key)]
         root: PublicKey,
@@ -204,27 +222,24 @@ enum Command {
     /// Check a log from genesis: chain, hashes, signatures, counters,
     /// grants, the gate, and every verdict judged again.
     Verify {
-        /// The log file.
-        #[arg(long)]
-        log: PathBuf,
+        #[command(flatten)]
+        from: ReadFrom,
         /// The pinned root public key, in hex.
         #[arg(long, value_parser = keys::parse_public_key)]
         root: PublicKey,
     },
     /// Replay a log from genesis and print the state it arrives at.
     Replay {
-        /// The log file.
-        #[arg(long)]
-        log: PathBuf,
+        #[command(flatten)]
+        from: ReadFrom,
         /// The pinned root public key, in hex.
         #[arg(long, value_parser = keys::parse_public_key)]
         root: PublicKey,
     },
     /// Print the newest entries of a verified log.
     Tail {
-        /// The log file.
-        #[arg(long)]
-        log: PathBuf,
+        #[command(flatten)]
+        from: ReadFrom,
         /// The pinned root public key, in hex.
         #[arg(long, value_parser = keys::parse_public_key)]
         root: PublicKey,
@@ -237,12 +252,8 @@ enum Command {
 /// The log and the key of an ordinary writer.
 #[derive(clap::Args)]
 struct WriterArgs {
-    /// The log file.
-    #[arg(long)]
-    log: PathBuf,
-    /// The appender key file.
-    #[arg(long)]
-    appender_key: PathBuf,
+    #[command(flatten)]
+    to: WriteTo,
     /// The pinned root public key, in hex.
     #[arg(long, value_parser = keys::parse_public_key)]
     root: PublicKey,
@@ -325,8 +336,7 @@ fn run(command: Command) -> Result<(), Stop> {
             root,
         } => init(&log, &appender_key, &root),
         Command::Grant {
-            log,
-            appender_key,
+            to,
             holder,
             scope,
             rights,
@@ -342,33 +352,27 @@ fn run(command: Command) -> Result<(), Stop> {
                 rights: BTreeSet::from_iter(rights),
                 narrows,
             };
-            let ack = write_as_root(&log, &appender_key, &root, |_| Ok(Body::Grant(grant)))?;
+            let ack = write_as_root(&to, &root, |_| Ok(Body::Grant(grant)))?;
             println!("entry {}  grant {}", ack.seq, GrantId::new(ack.seq, 0));
             Ok(())
         }
-        Command::Revoke {
-            log,
-            appender_key,
-            grant,
-            root,
-        } => {
+        Command::Revoke { to, grant, root } => {
             let revoke = Body::Revoke(Revoke { grant });
-            let ack = write_as_root(&log, &appender_key, &root, |_| Ok(revoke))?;
+            let ack = write_as_root(&to, &root, |_| Ok(revoke))?;
             println!("entry {}  revoked grant {grant}", ack.seq);
             Ok(())
         }
         Command::Policy {
-            log,
-            appender_key,
+            to,
             verse_text_max,
             verse_names_evidence,
             artefact_has_ref,
             root,
         } => {
-            let mut shown = String::new();
-            let ack = write_as_root(&log, &appender_key, &root, |open| {
+            let (mut shown, mut evaluator) = (String::new(), String::new());
+            let ack = write_as_root(&to, &root, |via| {
                 // The policy in force, with what was asked for.
-                let mut invariants = open.chain().state().policy.invariants.clone();
+                let mut invariants = via.chain().state().policy.invariants.clone();
                 if let Some(bytes) = verse_text_max {
                     invariants.retain(|held| !matches!(held, Invariant::VerseTextMax { .. }));
                     invariants.push(Invariant::VerseTextMax { bytes });
@@ -384,13 +388,15 @@ fn run(command: Command) -> Result<(), Stop> {
                 }
                 invariants.sort_by_key(Invariant::tag);
                 shown = show::invariants(&invariants);
+                // The build that judges: this one, or the broker's.
+                evaluator = via.evaluator().to_owned();
                 Ok(Body::Policy(Policy {
-                    evaluator: BUILD.to_owned(),
+                    evaluator: evaluator.clone(),
                     invariants,
                 }))
             })?;
             println!("entry {}  policy in force: {shown}", ack.seq);
-            println!("evaluator  {BUILD}");
+            println!("evaluator  {evaluator}");
             Ok(())
         }
         Command::Verse {
@@ -416,7 +422,7 @@ fn run(command: Command) -> Result<(), Stop> {
         } => {
             // Verdicts never leave a log, so the one found here is still
             // there when the request is written.
-            let verified = read(&writer.log, writer.root)?;
+            let verified = read(&writer.to.for_reading(), writer.root)?;
             let named = hex(&refused_submission(&verified.records, &submission)?);
             let request = Body::Preference(Preference {
                 key: OVERRIDE_REQUEST.to_owned(),
@@ -430,12 +436,23 @@ fn run(command: Command) -> Result<(), Stop> {
             println!("nothing is let through; the request is counted (see `replay`)");
             Ok(())
         }
-        Command::Grants { log, root } => {
-            print!("{}", show::grants(&read(&log, root)?.chain));
+        Command::Mcp {
+            broker,
+            key,
+            root,
+            listen,
+            allow_host,
+        } => {
+            let key = keys::load(&key)?;
+            helper::run(&broker, key, root, listen.as_deref(), allow_host)?;
             Ok(())
         }
-        Command::Verify { log, root } => {
-            let verified = read(&log, root)?;
+        Command::Grants { from, root } => {
+            print!("{}", show::grants(&read(&from, root)?.chain));
+            Ok(())
+        }
+        Command::Verify { from, root } => {
+            let verified = read(&from, root)?;
             let Some(head) = verified.chain.head() else {
                 println!("ok: an empty log");
                 return Ok(());
@@ -452,15 +469,19 @@ fn run(command: Command) -> Result<(), Stop> {
             }
             Ok(())
         }
-        Command::Replay { log, root } => {
-            let verified = read(&log, root)?;
+        Command::Replay { from, root } => {
+            let verified = read(&from, root)?;
             println!("{} entries replayed from genesis", verified.records.len());
             print!("{}", show::state(&verified.chain));
             print!("{}", show::counts(&verified.records));
             Ok(())
         }
-        Command::Tail { log, root, entries } => {
-            let verified = read(&log, root)?;
+        Command::Tail {
+            from,
+            root,
+            entries,
+        } => {
+            let verified = read(&from, root)?;
             let skip = verified.records.len().saturating_sub(entries);
             for record in &verified.records[skip..] {
                 println!("{}", show::entry(record));
@@ -468,20 +489,6 @@ fn run(command: Command) -> Result<(), Stop> {
             Ok(())
         }
     }
-}
-
-/// Read and verify a log file. A torn tail is reported on stderr.
-fn read(path: &Path, root: PublicKey) -> Result<Log, String> {
-    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let log =
-        island_log::read(&bytes, root).map_err(|error| format!("{}: {error}", path.display()))?;
-    if log.torn > 0 {
-        eprintln!(
-            "island-cli: note: {} bytes of an unfinished last record are not part of the log",
-            log.torn
-        );
-    }
-    Ok(log)
 }
 
 fn init(log: &Path, appender_key: &Path, root: &RootArgs) -> Result<(), Stop> {
@@ -520,35 +527,6 @@ fn init(log: &Path, appender_key: &Path, root: &RootArgs) -> Result<(), Stop> {
     Ok(())
 }
 
-/// Open a log for writing: locked, replayed from genesis against `pin`.
-fn open(log: &Path, appender_key: &Path, pin: PublicKey) -> Result<Open, String> {
-    let appender = keys::load(appender_key)?;
-    let storage = FileStorage::open(log).map_err(|error| format!("{}: {error}", log.display()))?;
-    let (appender, recovery) = Appender::open(storage, SystemClock, appender, pin)
-        .map_err(|error| format!("{}: {error}", log.display()))?;
-    if recovery.dropped > 0 {
-        eprintln!(
-            "island-cli: note: dropped {} bytes of an unfinished last record",
-            recovery.dropped
-        );
-    }
-    Ok(appender)
-}
-
-/// What a writer is told when its submission did not become an entry. A
-/// gate refusal names the verdict, and the hash an override request needs.
-fn rejected(submission: &Submission, error: &Rejected) -> String {
-    match error {
-        Rejected::Refused { seq, reason, .. } => format!(
-            "refused by the gate: {}\n\
-             verdict at entry {seq}; the refused submission is {}",
-            show::refusal(reason),
-            hex(&submission.hash())
-        ),
-        other => other.to_string(),
-    }
-}
-
 /// The hash of the refused submission `name` stands for: the whole hash,
 /// or the first digits of it. A verdict in the log must hold it.
 fn refused_submission(records: &[Record], name: &str) -> Result<Hash, String> {
@@ -579,25 +557,24 @@ fn refused_submission(records: &[Record], name: &str) -> Result<Hash, String> {
 /// Append one entry written by the root key, on the stream its kind
 /// belongs to.
 ///
-/// The log is opened and locked first, so `body` can be made from the
+/// The log is opened and verified first, so `body` can be made from the
 /// state it meets, and the root's counter in the submission is the one
 /// the log expects. If the hash has yet to be signed by hand, this stops
 /// before writing anything.
 fn write_as_root(
-    log: &Path,
-    appender_key: &Path,
+    to: &WriteTo,
     root: &RootArgs,
-    body: impl FnOnce(&Open) -> Result<Body, String>,
+    body: impl FnOnce(&Via) -> Result<Body, String>,
 ) -> Result<Ack, Stop> {
     let signer = root.signer()?;
     let pin = signer.public();
-    let mut appender = open(log, appender_key, pin)?;
+    let mut via = Via::open(to, pin)?;
 
-    let counter = appender
+    let counter = via
         .chain()
         .next_counter(&pin)
         .ok_or("the root key has no counter left")?;
-    let body = body(&appender)?;
+    let body = body(&via)?;
     let stream = match body {
         Body::Policy(_) => StreamId::POLICY,
         _ => StreamId::AUTHORITY,
@@ -612,18 +589,18 @@ fn write_as_root(
         .sign(std::slice::from_ref(&submission))?
         .pop()
         .ok_or("no signature")?;
-    Ok(appender
-        .submit(submission.clone(), signature)
-        .map_err(|error| rejected(&submission, &error))?)
+    let answer = via.submit(submission, signature);
+    via.close();
+    Ok(answer?)
 }
 
 /// Append one entry written by an ordinary key, signed with its key file.
 fn write_as_key(writer: &WriterArgs, stream: StreamId, body: Body) -> Result<Ack, Stop> {
     let key: SigningKey = keys::load(&writer.key)?;
     let public = public_key(&key);
-    let mut appender = open(&writer.log, &writer.appender_key, writer.root)?;
+    let mut via = Via::open(&writer.to, writer.root)?;
 
-    let counter = appender
+    let counter = via
         .chain()
         .next_counter(&public)
         .ok_or("the key has no counter left")?;
@@ -634,7 +611,7 @@ fn write_as_key(writer: &WriterArgs, stream: StreamId, body: Body) -> Result<Ack
         body,
     };
     let signature = submission.sign(&key).ok_or("the key does not sign")?;
-    Ok(appender
-        .submit(submission.clone(), signature)
-        .map_err(|error| rejected(&submission, &error))?)
+    let answer = via.submit(submission, signature);
+    via.close();
+    Ok(answer?)
 }
