@@ -251,10 +251,61 @@ impl Canonical for Policy {
 
 // ── Authority ───────────────────────────────────────────────────────
 
+/// The id of a grant: the entry that holds it, and its place in that
+/// entry.
+///
+/// A `grant` entry holds one grant, at index 0. The bootstrap entry holds
+/// several, so its grants are `1.0`, `1.1`, and so on. Written and parsed
+/// as `entry.index`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GrantId {
+    /// The `seq` of the entry that holds the grant.
+    pub entry: u64,
+    /// Its position among that entry's grants.
+    pub index: u32,
+}
+
+impl GrantId {
+    /// The grant at `index` of entry `entry`.
+    pub const fn new(entry: u64, index: u32) -> Self {
+        Self { entry, index }
+    }
+}
+
+impl std::fmt::Display for GrantId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.entry, self.index)
+    }
+}
+
+impl std::str::FromStr for GrantId {
+    type Err = &'static str;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        const ERROR: &str = "a grant id is written entry.index, for example 17.0";
+        let (entry, index) = text.split_once('.').ok_or(ERROR)?;
+        let plain = |digits: &str| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+        if !plain(entry) || !plain(index) {
+            return Err(ERROR);
+        }
+        Ok(Self {
+            entry: entry.parse().map_err(|_| ERROR)?,
+            index: index.parse().map_err(|_| ERROR)?,
+        })
+    }
+}
+
+impl Canonical for GrantId {
+    fn canon(&self, out: &mut Canon) {
+        out.u64(self.entry);
+        out.u32(self.index);
+    }
+}
+
 /// Authority for one key: which kinds it may write to which streams.
 ///
-/// As the body of a `grant` entry, the grant's id is the `seq` of that
-/// entry. The same struct lists the initial grants in [`Bootstrap`].
+/// The body of a `grant` entry, and the element of the list of initial
+/// grants in [`Bootstrap`]. Its id is a [`GrantId`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grant {
     /// The key that holds the grant.
@@ -263,9 +314,9 @@ pub struct Grant {
     pub scope: BTreeSet<StreamId>,
     /// The kinds it may write there.
     pub rights: BTreeSet<Kind>,
-    /// The id of the grant this one replaces in place, if any. Scope and
-    /// rights must then be subsets of that grant's.
-    pub narrows: Option<u64>,
+    /// The grant this one replaces, if any. The holder must then be the
+    /// same, and scope and rights subsets of that grant's.
+    pub narrows: Option<GrantId>,
 }
 
 impl Canonical for Grant {
@@ -280,13 +331,13 @@ impl Canonical for Grant {
 /// The body of a `revoke` entry. Effective from that entry's `seq`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Revoke {
-    /// The id of the grant that ends.
-    pub grant: u64,
+    /// The grant that ends.
+    pub grant: GrantId,
 }
 
 impl Canonical for Revoke {
     fn canon(&self, out: &mut Canon) {
-        out.u64(self.grant);
+        self.grant.canon(out);
     }
 }
 
@@ -339,8 +390,9 @@ impl Canonical for Preference {
 
 /// Why the gate refused a submission.
 ///
-/// One variant so far; the refusals that belong to authority and to policy
-/// strengthening join with build steps 5 and 6, each on the next free tag.
+/// One variant so far; a policy that does not strengthen the one in force
+/// joins with build step 6, on the next free tag. Authority's refusals
+/// leave no entry and are not listed here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// Tag 0. This invariant, as it stood in the policy in force, does not

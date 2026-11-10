@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use island_core::{
-    Body, Bootstrap, DecodeError, Entry, Genesis, Grant, Invariant, Kind, Policy, Preference,
-    Record, Refusal, Revoke, StreamId, Submission, Verdict, Verse,
+    Body, Bootstrap, DecodeError, Entry, Genesis, Grant, GrantId, Invariant, Kind, Policy,
+    Preference, Record, Refusal, Revoke, StreamId, Submission, Verdict, Verse,
 };
 use proptest::collection::{btree_set, vec};
 use proptest::prelude::*;
@@ -36,12 +36,16 @@ fn invariant() -> impl Strategy<Value = Invariant> {
     ]
 }
 
+fn grant_id() -> impl Strategy<Value = GrantId> {
+    (any::<u64>(), any::<u32>()).prop_map(|(entry, index)| GrantId { entry, index })
+}
+
 fn grant() -> impl Strategy<Value = Grant> {
     (
         any::<[u8; 32]>(),
         btree_set(stream_id(), 0..5),
         btree_set(kind(), 0..5),
-        any::<Option<u64>>(),
+        prop::option::of(grant_id()),
     )
         .prop_map(|(holder, scope, rights, narrows)| Grant {
             holder,
@@ -61,7 +65,7 @@ fn plain_body() -> impl Strategy<Value = Body> {
             })
         }),
         grant().prop_map(Body::Grant),
-        any::<u64>().prop_map(|grant| Body::Revoke(Revoke { grant })),
+        grant_id().prop_map(|grant| Body::Revoke(Revoke { grant })),
         // Any evidence byte, named or not: an unnamed one must still decode.
         (any::<u8>(), ".{0,40}", vec(any::<[u8; 32]>(), 0..4)).prop_map(
             |(evidence, text, refs)| Body::Verse(Verse {
@@ -210,7 +214,10 @@ const KIND_AT: usize = 8 + 6 + 32 + 8;
 
 #[test]
 fn reserved_and_unknown_kinds_are_refused() {
-    let mut bytes = verse_submission(Body::Revoke(Revoke { grant: 1 })).canon_bytes();
+    let mut bytes = verse_submission(Body::Revoke(Revoke {
+        grant: GrantId::new(1, 0),
+    }))
+    .canon_bytes();
     for tag in [6, 7, 10, 255] {
         bytes[KIND_AT] = tag;
         assert_eq!(
@@ -291,7 +298,9 @@ fn a_set_encodes_in_the_order_of_its_elements_encodings() {
 #[test]
 fn a_verdict_inside_a_verdict_is_refused() {
     let inner = verse_submission(Body::Verdict(Verdict {
-        rejected: Box::new(verse_submission(Body::Revoke(Revoke { grant: 1 }))),
+        rejected: Box::new(verse_submission(Body::Revoke(Revoke {
+            grant: GrantId::new(1, 0),
+        }))),
         sig_writer: [1; 64],
         reason: Refusal::Invariant(Invariant::VerseNamesEvidence),
     }));
@@ -339,4 +348,20 @@ fn text_must_be_utf8() {
         Submission::decode(&bytes),
         Err(DecodeError::BadUtf8 { at: text_at })
     );
+}
+
+#[test]
+fn a_grant_id_is_written_and_parsed_as_entry_dot_index() {
+    let id = GrantId::new(17, 2);
+    assert_eq!(id.to_string(), "17.2");
+    assert_eq!("17.2".parse(), Ok(id));
+    assert_eq!("1.0".parse(), Ok(GrantId::new(1, 0)));
+    for bad in [
+        "17", "17.", ".0", "17.0.1", "a.0", "17.x", "+1.0", " 1.0", "-1.0",
+    ] {
+        assert!(bad.parse::<GrantId>().is_err(), "{bad:?} parsed");
+    }
+    // Ids sort by entry, then by index.
+    assert!(GrantId::new(1, 1) < GrantId::new(2, 0));
+    assert!(GrantId::new(1, 0) < GrantId::new(1, 1));
 }

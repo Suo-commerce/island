@@ -9,17 +9,19 @@
 //!
 //! Checked here, for every record: position (`seq`, `prev`, `at`), the
 //! hash, both signatures, the genesis and bootstrap rules, the stream each
-//! kind belongs to, the writer's counter, and the `policy` field.
+//! kind belongs to, the writer's counter, the grant that lets the writer
+//! write it (`island-auth`), and the `policy` field.
 //!
-//! Not checked yet: grants (build step 5) and the gate (build step 6).
-//! Until the gate exists a `verdict` entry cannot be re-judged, so replay
-//! refuses one instead of half-checking it.
+//! Not checked yet: the gate (build step 6). Until it exists a `verdict`
+//! entry cannot be re-judged, so replay refuses one instead of
+//! half-checking it.
 
 use std::fmt;
 
+use island_auth::{BootstrapError, Denied};
 use island_core::{
-    Answer, Body, Hash, Kind, Last, PublicKey, Record, Signature, State, StreamId, VerifyError,
-    state_hash, verify_hash,
+    Answer, Body, Hash, Kind, Last, PublicKey, Record, Role, Signature, State, StreamId,
+    VerifyError, state_hash, verify_hash,
 };
 
 /// Why a record may not follow the records before it.
@@ -52,6 +54,12 @@ pub enum Fault {
     /// The bootstrap entry does not name exactly one appender: one grant
     /// with the `verdict` right, held by a key other than root.
     BootstrapAppender,
+    /// The bootstrap entry does not hold exactly one root capability: one
+    /// grant held by root with the right to write grants and revokes on
+    /// the authority stream.
+    BootstrapRoot,
+    /// Authority does not allow the write.
+    Denied(Denied),
     /// A `genesis` or `bootstrap` entry after entries 0 and 1.
     Misplaced {
         /// Its kind.
@@ -103,6 +111,11 @@ impl fmt::Display for Fault {
                 "the bootstrap entry must name exactly one appender: \
                  one grant with the verdict right, held by a key other than root",
             ),
+            Self::BootstrapRoot => f.write_str(
+                "the bootstrap entry must hold exactly one root capability: one grant held \
+                 by root with the right to write grants and revokes on the authority stream",
+            ),
+            Self::Denied(denied) => denied.fmt(f),
             Self::Misplaced { kind } => write!(f, "a {kind:?} entry is valid only at the start"),
             Self::Stream { kind, stream } => write!(
                 f,
@@ -296,15 +309,23 @@ impl Chain {
                 if submission.writer != self.pin {
                     return Err(Fault::NotBootstrap);
                 }
-                let mut holders = bootstrap
+                let roles =
+                    island_auth::bootstrap(&bootstrap.grants, &self.pin).map_err(|error| {
+                        match error {
+                            BootstrapError::Appender => Fault::BootstrapAppender,
+                            BootstrapError::Root => Fault::BootstrapRoot,
+                            BootstrapError::Ungrantable(kind) => {
+                                Fault::Denied(Denied::Ungrantable(kind))
+                            }
+                        }
+                    })?;
+                // The appender is the holder of the one grant with that role.
+                appender = bootstrap
                     .grants
                     .iter()
-                    .filter(|grant| grant.rights.contains(&Kind::Verdict))
-                    .map(|grant| grant.holder);
-                match (holders.next(), holders.next()) {
-                    (Some(holder), None) if holder != self.pin => appender = Some(holder),
-                    _ => return Err(Fault::BootstrapAppender),
-                }
+                    .zip(roles)
+                    .find(|(_, role)| *role == Role::Appender)
+                    .map(|(grant, _)| grant.holder);
             }
             (1, _) => return Err(Fault::NotBootstrap),
             (_, Body::Genesis(_) | Body::Bootstrap(_)) => return Err(Fault::Misplaced { kind }),
@@ -327,6 +348,12 @@ impl Chain {
                 expected,
                 found: submission.counter,
             });
+        }
+
+        // The grant that lets the writer write this. The first two entries
+        // come before any grant and have their rules above.
+        if seq >= 2 {
+            island_auth::authorize(&self.state, submission).map_err(Fault::Denied)?;
         }
 
         // The policy the entry says it was judged under.
@@ -393,6 +420,7 @@ impl Chain {
             self.state.policy = policy.clone();
             self.policy_seq = seq;
         }
+        island_auth::apply(&mut self.state, seq, submission);
 
         self.head = Some(step.head);
         self.appender = step.appender;

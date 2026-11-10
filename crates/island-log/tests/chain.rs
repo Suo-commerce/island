@@ -353,6 +353,40 @@ fn the_bootstrap_must_name_exactly_one_appender_that_is_not_root() {
 }
 
 #[test]
+fn the_bootstrap_must_hold_exactly_one_root_capability() {
+    let log = records(0);
+    let appender = verdict_grant(public_key(&appender_key()));
+    let root_grant = |scope: &[&str], rights: &[Kind]| Grant {
+        holder: pin(),
+        scope: scope.iter().map(|name| StreamId::from(*name)).collect(),
+        rights: rights.iter().copied().collect(),
+        narrows: None,
+    };
+    let capability = root_grant(&["authority", "policy"], &[Kind::Grant, Kind::Revoke]);
+    for grants in [
+        // None at all, or two.
+        vec![appender.clone()],
+        vec![capability.clone(), capability.clone(), appender.clone()],
+        // Root without the right to revoke, or without the authority stream.
+        vec![root_grant(&["authority"], &[Kind::Grant]), appender.clone()],
+        vec![
+            root_grant(&["policy"], &[Kind::Grant, Kind::Revoke]),
+            appender.clone(),
+        ],
+    ] {
+        assert_eq!(
+            fault(&second(&log, bootstrap_with(grants), &root())),
+            at(1, Fault::BootstrapRoot)
+        );
+    }
+    replay(
+        pin(),
+        &second(&log, bootstrap_with(vec![capability, appender]), &root()),
+    )
+    .expect("one root capability and one appender");
+}
+
+#[test]
 fn a_genesis_or_bootstrap_later_in_the_log_is_refused() {
     let log = records(1);
     let mut again = genesis::genesis(pin());
@@ -421,11 +455,13 @@ fn each_kind_belongs_on_its_stream() {
         on("island", verse_body),
         on("island", preference.clone()),
         on("plan", preference),
-        on("policy", policy_body),
     ] {
         let record = next(&log, submission, &writer(), |_| {});
         replay(pin(), &with(log.clone(), record)).expect("belongs");
     }
+    // A policy entry belongs on the policy stream; root holds that right.
+    let record = next(&log, policy(3, vec![]), &root(), |_| {});
+    replay(pin(), &with(log, record)).expect("belongs");
 }
 
 #[test]

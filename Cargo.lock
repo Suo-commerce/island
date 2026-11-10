@@ -65,6 +65,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bit-set"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -417,6 +423,9 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 [[package]]
 name = "island-auth"
 version = "0.0.0"
+dependencies = [
+ "island-core",
+]
 
 [[package]]
 name = "island-broker"
@@ -426,6 +435,7 @@ version = "0.0.0"
 name = "island-cli"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "clap",
  "island-core",
  "island-env",
@@ -477,6 +487,7 @@ dependencies = [
 name = "island-log"
 version = "0.0.0"
 dependencies = [
+ "island-auth",
  "island-core",
  "island-env",
  "tempfile",

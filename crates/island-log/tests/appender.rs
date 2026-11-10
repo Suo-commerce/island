@@ -301,11 +301,7 @@ fn a_crash_at_any_byte_recovers_to_the_complete_records() {
             submit(&mut reopened, genesis::genesis(pin()), &root());
         }
         if reopened.chain().next_seq() == 1 {
-            submit(
-                &mut reopened,
-                genesis::bootstrap(pin(), public_key(&appender_key())),
-                &root(),
-            );
+            submit(&mut reopened, common::bootstrap(), &root());
         }
         let landed = reopened
             .chain()

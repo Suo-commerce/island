@@ -6,7 +6,7 @@
 //! 1. the writer's signature;
 //! 2. the writer's counter: the next number goes on, an exact resend gets
 //!    its first answer again, anything else is refused;
-//! 3. *(grants: build step 5)*;
+//! 3. a grant in force that lets the writer write it (`island-auth`);
 //! 4. *(the gate: build step 6)*;
 //! 5. position: `seq`, `at`, `policy`, `prev`;
 //! 6. hash and sign;
@@ -24,6 +24,7 @@
 use std::fmt;
 use std::io;
 
+use island_auth::Denied;
 use island_core::{
     Answer, DecodeError, Entry, Hash, PublicKey, Record, Refusal, Signature, SigningKey,
     Submission, public_key,
@@ -82,6 +83,9 @@ pub enum Rejected {
         /// Why it was refused.
         reason: Refusal,
     },
+    /// Authority does not allow the write: no grant covers it, or the
+    /// grant or revoke it carries is not allowed.
+    Denied(Denied),
     /// The record would not be a valid next entry.
     Invalid(Fault),
     /// The record is larger than a frame may hold.
@@ -112,6 +116,7 @@ impl fmt::Display for Rejected {
                     "refused by the gate ({reason:?}); verdict at entry {seq}"
                 )
             }
+            Self::Denied(denied) => write!(f, "not authorized: {denied}"),
             Self::Invalid(fault) => write!(f, "not a valid next entry: {fault}"),
             Self::TooLarge => f.write_str("the record is too large"),
             Self::Storage(kind) => write!(f, "storage failed ({kind}); the appender has stopped"),
@@ -301,7 +306,8 @@ impl<S: Storage, C: Clock> Appender<S, C> {
             });
         }
 
-        // 3 and 4. Grants and the gate join here.
+        // 3 is part of the check below, so that replay makes it too.
+        // 4. The gate joins here.
 
         // 5. Position. `at` never goes back, whatever the clock does.
         let now = self.clock.now_micros();
@@ -316,7 +322,10 @@ impl<S: Storage, C: Clock> Appender<S, C> {
 
         // 6. Hash and sign, then the same check replay will make.
         let record = Record::seal(entry, &self.key);
-        let step = self.chain.check(&record).map_err(Rejected::Invalid)?;
+        let step = self.chain.check(&record).map_err(|fault| match fault {
+            Fault::Denied(denied) => Rejected::Denied(denied),
+            fault => Rejected::Invalid(fault),
+        })?;
         let framed = frame::frame(&record.encode()).ok_or(Rejected::TooLarge)?;
 
         // 7. Durable, or stop.

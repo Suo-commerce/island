@@ -1,6 +1,6 @@
 //! How entries and state are printed.
 
-use island_core::{Answer, Body, Evidence, Grant, Invariant, Record, StreamId};
+use island_core::{Answer, Body, Evidence, Grant, Invariant, Record, Role, StreamId};
 use island_log::Chain;
 
 use crate::keys::hex;
@@ -62,22 +62,59 @@ fn invariants(list: &[Invariant]) -> String {
     list.iter().map(invariant).collect::<Vec<_>>().join(", ")
 }
 
-fn grant(grant: &Grant) -> String {
-    let scope: Vec<String> = grant.scope.iter().map(stream).collect();
-    let rights: Vec<String> = grant
+/// What a grant allows: `verse preference on island flare`.
+fn allows(grant: &Grant) -> String {
+    let list = |items: Vec<String>| {
+        if items.is_empty() {
+            "nothing".to_owned()
+        } else {
+            items.join(" ")
+        }
+    };
+    let rights = grant
         .rights
         .iter()
         .map(|kind| format!("{kind:?}").to_lowercase())
         .collect();
+    let scope = grant.scope.iter().map(stream).collect();
+    format!("{} on {}", list(rights), list(scope))
+}
+
+fn grant(grant: &Grant) -> String {
     let narrows = grant
         .narrows
         .map_or(String::new(), |id| format!(", narrows grant {id}"));
     format!(
-        "{} may write {} on {}{narrows}",
+        "{} may write {}{narrows}",
         short(&grant.holder),
-        rights.join(" "),
-        scope.join(" ")
+        allows(grant)
     )
+}
+
+/// Every grant the log has held, one per line, with its id.
+pub fn grants(chain: &Chain) -> String {
+    let mut out = String::new();
+    for (id, held) in &chain.state().grants {
+        let status = match held.ended {
+            None => "in force".to_owned(),
+            Some(ended) => match ended.by {
+                Some(by) => format!("replaced by {by} at entry {}", ended.at),
+                None => format!("revoked at entry {}", ended.at),
+            },
+        };
+        let role = match held.role {
+            Role::Ordinary => "",
+            Role::Root => "  [root capability]",
+            Role::Appender => "  [appender]",
+        };
+        out.push_str(&format!(
+            "{:<6}  {}  {}  ({status}){role}\n",
+            id.to_string(),
+            hex(&held.grant.holder),
+            allows(&held.grant),
+        ));
+    }
+    out
 }
 
 fn body(body: &Body) -> String {

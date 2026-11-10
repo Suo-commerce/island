@@ -22,6 +22,17 @@ pub const ROOT: u8 = 3;
 /// The streams an operation can name, by index.
 pub const STREAMS: [&str; 6] = ["island", "flare", "plan", "policy", "authority", "gate"];
 
+/// The kinds a grant's rights can name, by bit. The low three are the ones
+/// an ordinary grant may carry.
+pub const RIGHTS: [&str; 6] = [
+    "verse",
+    "preference",
+    "policy",
+    "grant",
+    "revoke",
+    "verdict",
+];
+
 /// One step of a case.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
@@ -106,21 +117,32 @@ pub enum What {
         /// The `VerseTextMax` bound, if that bit is set.
         max: u16,
     },
-    /// A grant.
+    /// A new grant.
     Grant {
         /// Holder (writer index).
         holder: u8,
         /// Scope, as a bit mask over [`STREAMS`].
         scope: u8,
-        /// Rights, as a bit mask over the kinds.
+        /// Rights, as a bit mask over [`RIGHTS`].
         rights: u8,
-        /// The grant it narrows.
-        narrows: Option<u8>,
+    },
+    /// A narrowing of an existing grant: that grant with some of its
+    /// streams and kinds dropped, unless `twist` breaks the rule.
+    Narrow {
+        /// Which grant: an index into every grant issued so far, in
+        /// order; one past the end names a grant that does not exist.
+        target: u8,
+        /// Which of its streams to keep, as a bit mask by position.
+        keep_scope: u8,
+        /// Which of its kinds to keep, as a bit mask by position.
+        keep_rights: u8,
+        /// How it breaks the narrowing rule, if at all.
+        twist: Twist,
     },
     /// A revoke.
     Revoke {
-        /// Which grant.
-        grant: u8,
+        /// Which grant, as for [`What::Narrow`].
+        target: u8,
     },
     /// A genesis declaring some writer's key as root.
     Genesis {
@@ -131,6 +153,8 @@ pub enum What {
     Bootstrap {
         /// Who it names as appender.
         appenders: Appenders,
+        /// How many root capabilities it holds (modulo 3). One is right.
+        roots: u8,
     },
     /// A verdict, which only the appender may write, and not yet.
     Verdict,
@@ -149,6 +173,28 @@ pub enum Appenders {
     Root,
     /// Only another key.
     Other,
+}
+
+/// How a narrowing breaks the rule that it may only shrink a grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Twist {
+    /// It does not.
+    None,
+    /// It names another holder.
+    OtherHolder {
+        /// The other holder (writer index).
+        writer: u8,
+    },
+    /// It adds a stream.
+    AddStream {
+        /// Which (index into [`STREAMS`]).
+        stream: u8,
+    },
+    /// It adds a kind.
+    AddRight {
+        /// Which (index into [`RIGHTS`]).
+        right: u8,
+    },
 }
 
 /// How a submission is signed.
@@ -187,6 +233,32 @@ pub fn start() -> [Op; 2] {
             ROOT,
             What::Bootstrap {
                 appenders: Appenders::Right,
+                roots: 1,
+            },
+        ),
+    ]
+}
+
+/// The grants a properly started case gives its three writers, so that
+/// they differ in what they may do: writer 0 may write verses and
+/// preferences on both projects and the plan, writer 1 only verses on
+/// `island`, and writer 2 nothing at all.
+pub fn first_grants() -> [Op; 2] {
+    [
+        authority_write(
+            ROOT,
+            What::Grant {
+                holder: 0,
+                scope: 0b000_111,
+                rights: 0b000_011,
+            },
+        ),
+        authority_write(
+            ROOT,
+            What::Grant {
+                holder: 1,
+                scope: 0b000_001,
+                rights: 0b000_001,
             },
         ),
     ]
@@ -198,6 +270,7 @@ fn home(what: &What) -> u8 {
         What::Verse { .. } | What::Preference => 0,
         What::Policy { .. } => 3,
         What::Grant { .. }
+        | What::Narrow { .. }
         | What::Revoke { .. }
         | What::Genesis { .. }
         | What::Bootstrap { .. } => 4,
@@ -215,18 +288,40 @@ fn appenders() -> impl Strategy<Value = Appenders> {
     ])
 }
 
+fn twist() -> impl Strategy<Value = Twist> {
+    prop_oneof![
+        6 => Just(Twist::None),
+        1 => (0..WRITERS).prop_map(|writer| Twist::OtherHolder { writer }),
+        1 => (0u8..6).prop_map(|stream| Twist::AddStream { stream }),
+        1 => (0u8..6).prop_map(|right| Twist::AddRight { right }),
+    ]
+}
+
 fn what() -> impl Strategy<Value = What> {
     prop_oneof![
         10 => (0u8..6, 0u8..40, 0u8..3)
             .prop_map(|(evidence, len, refs)| What::Verse { evidence, len, refs }),
         2 => Just(What::Preference),
         2 => (0u8..8, 0u16..5000).prop_map(|(invariants, max)| What::Policy { invariants, max }),
-        2 => (0..WRITERS, any::<u8>(), any::<u8>(), prop::option::of(0u8..8)).prop_map(
-            |(holder, scope, rights, narrows)| What::Grant { holder, scope, rights, narrows }
+        // A new grant: mostly rights a grant may carry, sometimes any.
+        2 => (
+            0..WRITERS,
+            0u8..64,
+            prop_oneof![5 => 1u8..8, 1 => 0u8..64],
+        )
+            .prop_map(|(holder, scope, rights)| What::Grant { holder, scope, rights }),
+        3 => (0u8..10, any::<u8>(), any::<u8>(), twist()).prop_map(
+            |(target, keep_scope, keep_rights, twist)| What::Narrow {
+                target,
+                keep_scope,
+                keep_rights,
+                twist,
+            }
         ),
-        1 => (0u8..8).prop_map(|grant| What::Revoke { grant }),
+        2 => (0u8..10).prop_map(|target| What::Revoke { target }),
         1 => (0..WRITERS).prop_map(|root| What::Genesis { root }),
-        1 => appenders().prop_map(|appenders| What::Bootstrap { appenders }),
+        1 => (appenders(), 0u8..3)
+            .prop_map(|(appenders, roots)| What::Bootstrap { appenders, roots }),
         1 => Just(What::Verdict),
     ]
 }
@@ -234,6 +329,8 @@ fn what() -> impl Strategy<Value = What> {
 fn write() -> impl Strategy<Value = Write> {
     (
         0..WRITERS,
+        // What only root may write is mostly written by root.
+        prop::bool::weighted(0.8),
         prop_oneof![8 => Just(0i8), 2 => -3i8..=3],
         0u8..4,
         what(),
@@ -245,14 +342,20 @@ fn write() -> impl Strategy<Value = Write> {
             1 => (0..WRITERS).prop_map(|writer| Sign::By { writer }),
         ],
     )
-        .prop_map(|(writer, counter, salt, what, stream, sign)| Write {
-            writer,
-            counter,
-            salt,
-            stream: stream.unwrap_or_else(|| home(&what)),
-            what,
-            sign,
-        })
+        .prop_map(
+            |(writer, as_root, counter, salt, what, stream, sign)| Write {
+                writer: if as_root && home(&what) >= 3 {
+                    ROOT
+                } else {
+                    writer
+                },
+                counter,
+                salt,
+                stream: stream.unwrap_or_else(|| home(&what)),
+                what,
+                sign,
+            },
+        )
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -273,15 +376,20 @@ fn op() -> impl Strategy<Value = Op> {
 /// places where a log can go wrong before it has started.
 fn beginning() -> impl Strategy<Value = Vec<Op>> {
     let [genesis, bootstrap] = start();
+    let mut granted = vec![genesis.clone(), bootstrap.clone()];
+    granted.extend(first_grants());
     prop_oneof![
-        14 => Just(vec![genesis.clone(), bootstrap]),
+        14 => Just(granted),
+        // Started, but nobody has been granted anything yet.
+        2 => Just(vec![genesis.clone(), bootstrap]),
         2 => Just(vec![genesis.clone()]),
         2 => Just(Vec::new()),
-        // A genesis, then a bootstrap naming anyone as appender.
-        3 => appenders().prop_map(move |appenders| {
+        // A genesis, then a bootstrap naming anyone as appender, with any
+        // number of root capabilities.
+        3 => (appenders(), 0u8..3).prop_map(move |(appenders, roots)| {
             vec![
                 genesis.clone(),
-                authority_write(ROOT, What::Bootstrap { appenders }),
+                authority_write(ROOT, What::Bootstrap { appenders, roots }),
             ]
         }),
         // Any writer declaring itself root.

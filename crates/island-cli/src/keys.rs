@@ -1,9 +1,8 @@
 //! Hex, and key files.
 //!
 //! A key file holds one ed25519 seed as 64 hex digits. Key files are for
-//! development and for the appender's key on the server. The root key
-//! belongs in AgentVault, and signing with it from there arrives with
-//! build step 5.
+//! development and for the appender's key on the server. A root key kept
+//! in a vault signs by hand instead: see `signer`.
 
 use std::fs::OpenOptions;
 use std::io::Write;

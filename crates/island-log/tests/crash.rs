@@ -16,7 +16,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 use common::{appender_key, pin, root, sign};
-use island_core::{Hash, public_key};
+use island_core::Hash;
 use island_env::{FileStorage, SystemClock};
 use island_log::{Appender, genesis, read};
 
@@ -43,10 +43,7 @@ fn no_acknowledged_entry_is_lost_to_kill_9() {
         let storage = FileStorage::create(&path).expect("create the log");
         let (mut appender, _) =
             Appender::open(storage, SystemClock, appender_key(), pin()).expect("open");
-        for submission in [
-            genesis::genesis(pin()),
-            genesis::bootstrap(pin(), public_key(&appender_key())),
-        ] {
+        for submission in [genesis::genesis(pin()), common::bootstrap()] {
             let signature = sign(&submission, &root());
             appender.submit(submission, signature).expect("accepted");
         }

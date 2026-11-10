@@ -6,22 +6,25 @@ that can only be tightened, and replicated for verification. Flare is its
 personal console. Both live in this one Cargo workspace.
 
 The specification is [`docs/spec.md`](docs/spec.md). The repo is at build
-step 4 of its "Build order":
+step 5 of its "Build order":
 
 - `island-core` holds the record formats, with golden vectors in
   `crates/island-core/tests/golden/`.
 - `island-env` holds the clock, randomness and storage.
+- `island-auth` holds authority: grants, narrowing, revoking, and the two
+  protected grants every log starts with.
 - `island-log` holds the appender, the reader and replay.
-- `island-cli` starts, verifies and reads a log.
+- `island-cli` starts, verifies and reads a log, and writes root-signed
+  grants and revokes to it.
 - `island-model` is the reference model: what the write path must answer,
   written to be read.
 - `island-harness` runs generated cases through the real appender on
   simulated storage, with the model beside it, and checks its oracles
   after every operation.
 
-Grants (step 5) and the gate (step 6) are not checked yet: the appender
-takes any signed, correctly counted submission on the right stream. The
-other crates are still empty libraries.
+The gate (step 6) is not checked yet: the appender takes any signed,
+correctly counted submission that a grant covers. The other crates are
+still empty libraries.
 
 ## Layout
 
@@ -74,7 +77,24 @@ just init               # entries 0 and 1; prints the root key to pin
 cargo run -p island-cli -- verify --log .island/island.log --root <root key>
 ```
 
-Key files are for development and for the appender. The root key belongs
-in AgentVault; signing from there arrives with build step 5.
+Grants are written by the root key, and a grant's id is the entry that
+holds it:
+
+```sh
+cargo run -p island-cli -- grant --log .island/island.log \
+    --appender-key .island/appender.key --root-key .island/root.key \
+    --holder <public key> --scope island,flare --rights verse,preference
+cargo run -p island-cli -- grants --log .island/island.log --root <root key>
+cargo run -p island-cli -- revoke --log .island/island.log \
+    --appender-key .island/appender.key --root-key .island/root.key --grant 2.0
+```
+
+Key files are for development and for the appender. A root key that lives
+in a vault signs by hand: give `--root <public key>` instead of
+`--root-key`, and the command prints the hash to sign and writes nothing;
+run it again with `--signature`. The signature is verified before anything
+is written. With OpenBao Transit the hash goes in as `input` to
+`transit/sign/<key>` with `prehashed` left off, and the `vault:v1:...`
+answer is accepted as it is.
 
 Changes to Taso go to the Taso repo as pull requests, never as a fork here.

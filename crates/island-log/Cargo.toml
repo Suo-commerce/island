@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+island-auth = { workspace = true }
 island-core = { workspace = true }
 island-env = { workspace = true }
 

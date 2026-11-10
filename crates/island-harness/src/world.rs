@@ -14,30 +14,33 @@
 //! 4. No acknowledged entry is ever missing or changed; nothing is
 //!    acknowledged before it is durable; after a crash the log holds what
 //!    the model holds, plus at most the one submission that was in flight.
+//! 5. Nothing outside a writer's grants was ever accepted: for every
+//!    stored entry, a grant issued earlier and not ended earlier covers
+//!    its writer, stream and kind. Worked out here from the stored
+//!    entries, without `island-auth` and without the model.
 //! 7. An exact resend returns the first answer and adds nothing.
 //!
-//! Oracles 5 (grants) and 6 (stronger means subset) join with build steps
-//! 5 and 6.
+//! Oracle 6 (stronger means subset) joins with build step 6.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use island_core::{
-    Body, Bootstrap, Evidence, Genesis, Grant, Hash, Invariant, Kind, Policy, Preference,
-    PublicKey, Record, Refusal, Revoke, Signature, SigningKey, StreamId, Submission, Verdict,
+    Body, Bootstrap, Evidence, Genesis, Grant, GrantId, Hash, Invariant, Kind, Policy, Preference,
+    PublicKey, Record, Refusal, Revoke, Role, Signature, SigningKey, StreamId, Submission, Verdict,
     Verse, public_key, sign_hash,
 };
-use island_log::{Ack, Appender, Chain, Fault, Rejected, frame};
-use island_model::{Model, Outcome, Why};
+use island_log::{Ack, Appender, Chain, Denied, Fault, Rejected, frame};
+use island_model::{Guard, Model, Outcome, Why};
 
-use crate::ops::{Appenders, Op, STREAMS, Sign, WRITERS, What, Write};
+use crate::ops::{Appenders, Op, STREAMS, Sign, Twist, WRITERS, What, Write};
 use crate::sim::{SimClock, SimStorage};
 
 /// An oracle that does not hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failure {
     /// Which oracle: `1-chain`, `2-replay`, `3-model`, `4-durability`,
-    /// `7-retry` or `determinism`.
+    /// `5-grants`, `7-retry` or `determinism`.
     pub oracle: &'static str,
     /// The index of the operation after which it broke.
     pub step: usize,
@@ -92,6 +95,16 @@ fn stream(index: u8) -> StreamId {
     StreamId::from(STREAMS[usize::from(index) % STREAMS.len()])
 }
 
+/// The kinds a rights mask can name, in the order of `ops::RIGHTS`.
+const KINDS: [Kind; 6] = [
+    Kind::Verse,
+    Kind::Preference,
+    Kind::Policy,
+    Kind::Grant,
+    Kind::Revoke,
+    Kind::Verdict,
+];
+
 fn short(bytes: &[u8]) -> String {
     bytes[..4]
         .iter()
@@ -106,6 +119,9 @@ struct Verified {
     bytes: Vec<u8>,
     hashes: Vec<Hash>,
     last_at: u64,
+    /// Oracle 5's own reading of the stored entries: every grant issued,
+    /// and whether a later entry ended it.
+    issued: Vec<(GrantId, Grant, bool)>,
 }
 
 struct World {
@@ -286,36 +302,67 @@ impl World {
                 holder,
                 scope,
                 rights,
-                narrows,
+            } => Body::Grant(Grant {
+                holder: public_key(&key(*holder)),
+                scope: (0u8..6)
+                    .filter(|bit| scope & (1 << bit) != 0)
+                    .map(stream)
+                    .collect(),
+                rights: (0..6)
+                    .filter(|bit| rights & (1 << bit) != 0)
+                    .map(|bit| KINDS[bit])
+                    .collect(),
+                narrows: None,
+            }),
+            What::Narrow {
+                target,
+                keep_scope,
+                keep_rights,
+                twist,
             } => {
-                let kinds = [
-                    Kind::Policy,
-                    Kind::Grant,
-                    Kind::Revoke,
-                    Kind::Verse,
-                    Kind::Preference,
-                    Kind::Verdict,
-                ];
-                Body::Grant(Grant {
-                    holder: public_key(&key(*holder)),
-                    scope: (0u8..6)
-                        .filter(|bit| scope & (1 << bit) != 0)
-                        .map(stream)
+                // The target with some of its streams and kinds dropped: a
+                // valid narrowing, unless the twist says otherwise.
+                let (id, old) = self.target(*target);
+                let kept = |mask: u8, index: usize| index >= 8 || mask & (1 << index) != 0;
+                let mut grant = Grant {
+                    holder: old.holder,
+                    scope: old
+                        .scope
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| kept(*keep_scope, *index))
+                        .map(|(_, stream)| stream.clone())
                         .collect(),
-                    rights: (0..6)
-                        .filter(|bit| rights & (1 << bit) != 0)
-                        .map(|bit| kinds[bit])
+                    rights: old
+                        .rights
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| kept(*keep_rights, *index))
+                        .map(|(_, kind)| *kind)
                         .collect(),
-                    narrows: narrows.map(u64::from),
-                })
+                    narrows: Some(id),
+                };
+                match twist {
+                    Twist::None => {}
+                    Twist::OtherHolder { writer } => grant.holder = public_key(&key(*writer)),
+                    Twist::AddStream { stream: index } => {
+                        grant.scope.insert(stream(*index));
+                    }
+                    Twist::AddRight { right } => {
+                        grant
+                            .rights
+                            .insert(KINDS[usize::from(*right) % KINDS.len()]);
+                    }
+                }
+                Body::Grant(grant)
             }
-            What::Revoke { grant } => Body::Revoke(Revoke {
-                grant: u64::from(*grant),
+            What::Revoke { target } => Body::Revoke(Revoke {
+                grant: self.target(*target).0,
             }),
             What::Genesis { root } => Body::Genesis(Genesis {
                 root: public_key(&key(*root)),
             }),
-            What::Bootstrap { appenders } => {
+            What::Bootstrap { appenders, roots } => {
                 let appender = |holder| Grant {
                     holder,
                     scope: BTreeSet::from([StreamId::from(StreamId::GATE)]),
@@ -323,14 +370,15 @@ impl World {
                     narrows: None,
                 };
                 let mine = public_key(&appender_key());
-                let mut grants = vec![Grant {
+                let root_capability = Grant {
                     holder: pin(),
                     scope: [StreamId::AUTHORITY, StreamId::POLICY]
                         .map(StreamId::from)
                         .into(),
                     rights: [Kind::Policy, Kind::Grant, Kind::Revoke].into(),
                     narrows: None,
-                }];
+                };
+                let mut grants = vec![root_capability; usize::from(*roots % 3)];
                 match appenders {
                     Appenders::Right => grants.push(appender(mine)),
                     Appenders::None => {}
@@ -372,6 +420,25 @@ impl World {
             Sign::By { writer } => sign_hash(&key(writer), &hash),
         };
         (submission, signature)
+    }
+
+    /// The grant a narrowing or a revoke aims at: an index into every
+    /// grant issued so far, or, one past the end, a grant that does not
+    /// exist.
+    fn target(&self, index: u8) -> (GrantId, Grant) {
+        let leases = self.model.grants();
+        match leases.get(usize::from(index) % (leases.len() + 1)) {
+            Some(lease) => (lease.id, lease.grant.clone()),
+            None => (
+                GrantId::new(9_999, 0),
+                Grant {
+                    holder: public_key(&key(0)),
+                    scope: BTreeSet::new(),
+                    rights: BTreeSet::new(),
+                    narrows: None,
+                },
+            ),
+        }
     }
 
     /// Send one submission through the appender and the model, and compare.
@@ -428,6 +495,12 @@ impl World {
         match (actual, result) {
             (Outcome::Accepted { seq }, Ok(ack)) => {
                 self.hit("accepted");
+                match &submission.body {
+                    Body::Grant(grant) if grant.narrows.is_some() => self.hit("grant:narrowed"),
+                    Body::Grant(_) => self.hit("grant:new"),
+                    Body::Revoke(_) => self.hit("grant:revoked"),
+                    _ => {}
+                }
                 if self.storage.synced_len() != self.storage.len() {
                     return Err(self.fail("4-durability", "acknowledged before it was synced"));
                 }
@@ -486,11 +559,21 @@ impl World {
             Err(Rejected::CounterOld { .. }) => Why::CounterOld,
             Err(Rejected::CounterGap { .. }) => Why::CounterGap,
             Err(Rejected::CounterConflict { .. }) => Why::CounterConflict,
+            Err(Rejected::Denied(denied)) => match denied {
+                Denied::NoGrant => Why::NoGrant,
+                Denied::UnknownGrant(_) => Why::UnknownGrant,
+                Denied::Ended(_) => Why::EndedGrant,
+                Denied::OtherHolder => Why::OtherHolder,
+                Denied::Wider => Why::Wider,
+                Denied::Ungrantable(_) => Why::Ungrantable,
+                Denied::Guarded(_) => Why::Guarded,
+            },
             Err(Rejected::Invalid(fault)) => match fault {
                 Fault::NotGenesis => Why::NotGenesis,
                 Fault::RootNotPinned => Why::RootNotPinned,
                 Fault::NotBootstrap => Why::NotBootstrap,
                 Fault::BootstrapAppender => Why::BootstrapAppender,
+                Fault::BootstrapRoot => Why::BootstrapRoot,
                 // The appender's seal does not verify against the key the
                 // bootstrap names: it names another appender.
                 Fault::AppenderSignature => Why::WrongAppender,
@@ -707,6 +790,72 @@ impl World {
             || (policy.is_none() && state.policy != Policy::default())
         {
             return Err(self.fail("3-model", "the policy in force is not the model's"));
+        }
+
+        // 3, for grants: the same grants, each in force or not, each
+        // protected or not.
+        let leases = self.model.grants();
+        if leases.len() != state.grants.len() {
+            return Err(self.fail("3-model", "the state holds other grants than the model"));
+        }
+        for lease in &leases {
+            let role = match lease.guard {
+                Guard::None => Role::Ordinary,
+                Guard::Root => Role::Root,
+                Guard::Appender => Role::Appender,
+            };
+            let same = state.grants.get(&lease.id).is_some_and(|held| {
+                held.grant == lease.grant && held.in_force() == lease.live && held.role == role
+            });
+            if !same {
+                return Err(self.fail("3-model", format!("grant {} is not the model's", lease.id)));
+            }
+        }
+
+        // 5: every stored entry was covered by a grant issued before it and
+        // not ended before it.
+        for record in &added {
+            let seq = record.entry.seq;
+            let submission = &record.entry.submission;
+            let covered = self.verified.issued.iter().any(|(_, grant, live)| {
+                *live
+                    && grant.holder == submission.writer
+                    && grant.scope.contains(&submission.stream)
+                    && grant.rights.contains(&submission.kind())
+            });
+            if seq >= 2 && !covered {
+                return Err(self.fail(
+                    "5-grants",
+                    format!(
+                        "entry {seq}: no grant in force lets {} write {:?} to {:?}",
+                        short(&submission.writer),
+                        submission.kind(),
+                        String::from_utf8_lossy(submission.stream.as_bytes())
+                    ),
+                ));
+            }
+            let end = |issued: &mut Vec<(GrantId, Grant, bool)>, id: GrantId| {
+                if let Some(grant) = issued.iter_mut().find(|(issued, _, _)| *issued == id) {
+                    grant.2 = false;
+                }
+            };
+            match &submission.body {
+                Body::Bootstrap(bootstrap) => {
+                    for (index, grant) in (0u32..).zip(&bootstrap.grants) {
+                        let id = GrantId::new(seq, index);
+                        self.verified.issued.push((id, grant.clone(), true));
+                    }
+                }
+                Body::Grant(grant) => {
+                    if let Some(old) = grant.narrows {
+                        end(&mut self.verified.issued, old);
+                    }
+                    let id = GrantId::new(seq, 0);
+                    self.verified.issued.push((id, grant.clone(), true));
+                }
+                Body::Revoke(revoke) => end(&mut self.verified.issued, revoke.grant),
+                _ => {}
+            }
         }
 
         // 4: every acknowledged entry is there, unchanged.

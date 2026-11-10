@@ -24,8 +24,9 @@ pub mod state;
 pub use decode::{DecodeError, Reader};
 pub use hash::{ENTRY_DOMAIN, SUBMISSION_DOMAIN, entry_hash, sub_hash};
 pub use record::{
-    Body, Bootstrap, Entry, Evidence, Genesis, Grant, Hash, Invariant, Kind, Policy, Preference,
-    PublicKey, Record, Refusal, Revoke, Signature, StreamId, Submission, Verdict, Verse,
+    Body, Bootstrap, Entry, Evidence, Genesis, Grant, GrantId, Hash, Invariant, Kind, Policy,
+    Preference, PublicKey, Record, Refusal, Revoke, Signature, StreamId, Submission, Verdict,
+    Verse,
 };
 pub use sign::{BadSignature, SigningKey, VerifyError, public_key, sign_hash, verify_hash};
-pub use state::{Answer, Last, STATE_DOMAIN, State, StreamState, state_hash};
+pub use state::{Answer, Ended, Held, Last, Role, STATE_DOMAIN, State, StreamState, state_hash};

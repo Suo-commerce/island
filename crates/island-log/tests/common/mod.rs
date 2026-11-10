@@ -8,8 +8,8 @@ use std::io;
 use std::rc::Rc;
 
 use island_core::{
-    Body, Entry, Evidence, PublicKey, Record, Signature, SigningKey, StreamId, Submission, Verse,
-    public_key,
+    Body, Entry, Evidence, Grant, Kind, PublicKey, Record, Signature, SigningKey, StreamId,
+    Submission, Verse, public_key,
 };
 use island_env::{Clock, Storage};
 use island_log::{Ack, Appender, genesis};
@@ -186,17 +186,29 @@ pub fn submit(appender: &mut TestAppender, submission: Submission, key: &Signing
         .expect("the submission is accepted")
 }
 
+/// The bootstrap these tests start from: the two grants every log has,
+/// and a third for the test writer, so that it can write verses and
+/// preferences without a grant entry of its own. That third grant is 1.2.
+pub fn bootstrap() -> Submission {
+    let mut submission = genesis::bootstrap(pin(), public_key(&appender_key()));
+    if let Body::Bootstrap(body) = &mut submission.body {
+        body.grants.push(Grant {
+            holder: public_key(&writer()),
+            scope: ["island", "plan", "crash"].map(StreamId::from).into(),
+            rights: [Kind::Verse, Kind::Preference].into(),
+            narrows: None,
+        });
+    }
+    submission
+}
+
 /// A new log with its genesis and bootstrap entries.
 pub fn started() -> (TestAppender, MemStorage, ManualClock) {
     let storage = MemStorage::default();
     let clock = ManualClock::at(1_000);
     let mut appender = open(&storage, &clock);
     submit(&mut appender, genesis::genesis(pin()), &root());
-    submit(
-        &mut appender,
-        genesis::bootstrap(pin(), public_key(&appender_key())),
-        &root(),
-    );
+    submit(&mut appender, bootstrap(), &root());
     (appender, storage, clock)
 }
 

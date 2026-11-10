@@ -15,8 +15,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::record::{
-    Body, Bootstrap, Entry, Genesis, Grant, Invariant, Kind, Policy, Preference, Record, Refusal,
-    Revoke, StreamId, Submission, Verdict, Verse,
+    Body, Bootstrap, Entry, Genesis, Grant, GrantId, Invariant, Kind, Policy, Preference, Record,
+    Refusal, Revoke, StreamId, Submission, Verdict, Verse,
 };
 
 /// Why bytes are not a canonical encoding. `at` is the byte offset.
@@ -279,13 +279,21 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// A [`GrantId`].
+    pub fn grant_id(&mut self) -> R<GrantId> {
+        Ok(GrantId {
+            entry: self.u64()?,
+            index: self.u32()?,
+        })
+    }
+
     /// A [`Grant`].
     pub fn grant(&mut self) -> R<Grant> {
         Ok(Grant {
             holder: self.fixed()?,
             scope: self.set("scope", Self::stream_id)?,
             rights: self.set("rights", Self::kind)?,
-            narrows: self.option(Self::u64)?,
+            narrows: self.option(Self::grant_id)?,
         })
     }
 
@@ -298,7 +306,9 @@ impl<'a> Reader<'a> {
                 invariants: self.seq(Self::invariant)?,
             }),
             Kind::Grant => Body::Grant(self.grant()?),
-            Kind::Revoke => Body::Revoke(Revoke { grant: self.u64()? }),
+            Kind::Revoke => Body::Revoke(Revoke {
+                grant: self.grant_id()?,
+            }),
             Kind::Verse => Body::Verse(Verse {
                 evidence: self.u8()?,
                 text: self.string()?,

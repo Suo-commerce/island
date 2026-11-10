@@ -9,9 +9,9 @@
 //! - [`read`]: a log file's bytes to verified records. Pure; this and
 //!   [`chain`] are the part Flare links.
 //!
-//! Build step 3 of docs/spec.md. Grants (step 5) and the gate (step 6)
-//! are not checked yet: until then the appender takes any signed,
-//! correctly counted submission on the right stream.
+//! Build steps 3 and 5 of docs/spec.md. The gate (step 6) is not checked
+//! yet: until then the appender takes any signed, correctly counted
+//! submission that a grant covers.
 
 #![warn(missing_docs)]
 
@@ -27,6 +27,7 @@ use island_core::{DecodeError, PublicKey, Record};
 pub use appender::{Ack, Appender, OpenError, Recovery, Rejected};
 pub use chain::{Chain, Fault, Head, ReplayError, replay};
 pub use frame::FrameError;
+pub use island_auth::Denied;
 
 /// Why bytes are not a valid log.
 #[derive(Clone, Debug, PartialEq, Eq)]

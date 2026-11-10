@@ -16,6 +16,7 @@ island-core = { workspace = true }
 island-env = { workspace = true }
 island-log = { workspace = true }
 clap = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
