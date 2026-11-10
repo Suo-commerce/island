@@ -1,0 +1,14 @@
+[package]
+name = "island-gate"
+description = "Island gate: judge, the invariants and strengthens. Pure, depends only on island-core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

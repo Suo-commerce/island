@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+repository = "https://github.com/Suo-commerce/island"
+publish = false
+
+# Workspace crates are named here once; a crate takes one with
+# `island-core = { workspace = true }`.  Which crate may take which is
+# enforced by `just deps` (scripts/check-deps.py).
+[workspace.dependencies]
+island-auth = { path = "crates/island-auth" }
+island-broker = { path = "crates/island-broker" }
+island-cli = { path = "crates/island-cli" }
+island-client = { path = "crates/island-client" }
+island-core = { path = "crates/island-core" }
+island-env = { path = "crates/island-env" }
+island-gate = { path = "crates/island-gate" }
+island-harness = { path = "crates/island-harness" }
+island-log = { path = "crates/island-log" }
+island-model = { path = "crates/island-model" }
+flare-core = { path = "crates/flare-core" }
+flare-link = { path = "crates/flare-link" }
+flare-server = { path = "crates/flare-server" }
+flare-tui = { path = "crates/flare-tui" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# The bans themselves are listed in clippy.toml.  Both lints only warn by
+# default; here they are errors in every crate that inherits the workspace
+# lints, which is all of them.
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+disallowed_types = "deny"

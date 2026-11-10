@@ -1,0 +1,29 @@
+# Determinism bans.  Island's log, gate, authority and replay must give the
+# same result on every machine and on every run of a harness seed, so no
+# crate reads the clock, draws randomness, starts a thread or iterates a
+# hash map on its own.  Time, randomness and storage come in through
+# island-env's Clock, Rng and Storage traits.
+#
+# island-env is the one exception: it holds the production implementations
+# and has its own crates/island-env/clippy.toml.  Clippy uses the nearest
+# clippy.toml and does not merge them.
+#
+# Cargo.toml turns both lints into errors for the whole workspace.
+
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "read time through island_env::Clock" },
+    { path = "std::time::SystemTime::elapsed", reason = "read time through island_env::Clock" },
+    { path = "std::time::Instant::now", reason = "read time through island_env::Clock" },
+    { path = "std::time::Instant::elapsed", reason = "read time through island_env::Clock" },
+    { path = "std::thread::spawn", reason = "one appender, one thread; concurrency belongs to island-env and the binaries' runtime" },
+    { path = "std::thread::Builder::spawn", reason = "one appender, one thread; concurrency belongs to island-env and the binaries' runtime" },
+    { path = "std::thread::scope", reason = "one appender, one thread; concurrency belongs to island-env and the binaries' runtime" },
+    { path = "rand::thread_rng", reason = "draw randomness through island_env::Rng", allow-invalid = true },
+    { path = "rand::rng", reason = "draw randomness through island_env::Rng", allow-invalid = true },
+    { path = "rand::random", reason = "draw randomness through island_env::Rng", allow-invalid = true },
+]
+
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order differs between runs; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order differs between runs; use BTreeSet" },
+]

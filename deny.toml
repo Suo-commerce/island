@@ -1,0 +1,39 @@
+# cargo deny: licences, advisories and sources of every crate in
+# Cargo.lock, and the crates Island must never link.  `just deps` and CI
+# run `cargo deny check`.
+#
+# The dependency direction inside the workspace (island never depends on
+# flare, and so on) is checked by scripts/check-deps.py, which `just deps`
+# runs right after this.  It goes by crate name, so it covers a new crate
+# without an edit here.
+
+[graph]
+all-features = true
+
+[advisories]
+# Every unmaintained or unsound crate fails, transitive ones too, unless it
+# is listed here by id with its reason.
+unmaintained = "all"
+unsound = "all"
+ignore = []
+
+[licenses]
+# A new dependency with a licence not listed here fails CI until it is
+# judged and added.  Taso's deny.toml is the list to start from.
+allow = ["Apache-2.0"]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"   # the workspace's own path dependencies carry no version
+
+deny = [
+    # Island never links the Warden.  It speaks to Wardens only through the
+    # Field protocol, as any sender would.
+    { crate = "taso-warden" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
