@@ -59,10 +59,101 @@ impl From<Malformed> for Error {
     }
 }
 
-/// A connection to one broker.
-pub struct Broker {
+/// The broker's two plain paths, `GET /log` and `GET /head`: all a
+/// replica needs. No MCP session, so nothing is set up before the first
+/// request and nothing is held between them.
+#[derive(Clone)]
+pub struct Plain {
     base: String,
     http: reqwest::Client,
+}
+
+impl Plain {
+    /// The paths of the broker at `base`, for example
+    /// `http://127.0.0.1:4747`.
+    pub fn new(base: &str) -> Result<Self, Error> {
+        let base = base.trim_end_matches('/').to_owned();
+        let http = reqwest::Client::builder()
+            .timeout(PATIENCE)
+            .build()
+            .map_err(|error| Error::Unreachable(format!("{base}: {error}")))?;
+        Ok(Self { base, http })
+    }
+
+    /// The broker's address, as given.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// The newest entry, and the broker's build.
+    pub async fn head(&self) -> Result<Head, Error> {
+        self.get("head", &LogQuery::default()).await
+    }
+
+    /// The records after position `after`, in order, and whether there
+    /// are more.
+    pub async fn log(
+        &self,
+        after: Option<u64>,
+        limit: Option<u32>,
+    ) -> Result<(Vec<Record>, bool), Error> {
+        let records: Records = self.get("log", &LogQuery { after, limit }).await?;
+        Ok((codec::parse_records(&records)?, records.more))
+    }
+
+    /// Every record after position `after` (from entry 0 if `None`),
+    /// pulled page by page.
+    pub async fn log_after(&self, after: Option<u64>) -> Result<Vec<Record>, Error> {
+        let mut all: Vec<Record> = Vec::new();
+        loop {
+            let from = all.last().map(|record| record.entry.seq).or(after);
+            let (page, more) = self.log(from, Some(MAX_LIMIT)).await?;
+            if more && page.is_empty() {
+                return Err(Error::Protocol("an empty page with more to come".into()));
+            }
+            all.extend(page);
+            if !more {
+                return Ok(all);
+            }
+        }
+    }
+
+    /// `GET` one of the plain paths.
+    async fn get<T: DeserializeOwned>(
+        &self,
+        path: &'static str,
+        query: &LogQuery,
+    ) -> Result<T, Error> {
+        let mut url = format!("{}/{path}", self.base);
+        let query: Vec<String> = [
+            ("after", query.after),
+            ("limit", query.limit.map(u64::from)),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| format!("{name}={value}")))
+        .collect();
+        if !query.is_empty() {
+            url = format!("{url}?{}", query.join("&"));
+        }
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| Error::Unreachable(format!("{url}: {error}")))?;
+        if !response.status().is_success() {
+            return Err(Error::Protocol(format!("{url}: {}", response.status())));
+        }
+        response
+            .json()
+            .await
+            .map_err(|error| Error::Protocol(format!("{url}: {error}")))
+    }
+}
+
+/// A connection to one broker: its tools, and its plain paths.
+pub struct Broker {
+    plain: Plain,
     mcp: RunningService<rmcp::RoleClient, ClientConfig>,
 }
 
@@ -70,7 +161,8 @@ impl Broker {
     /// Connect to the broker at `base`, for example
     /// `http://127.0.0.1:4747`.
     pub async fn connect(base: &str) -> Result<Self, Error> {
-        let base = base.trim_end_matches('/').to_owned();
+        let plain = Plain::new(base)?;
+        let base = plain.base();
         let transport = StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp")),
         );
@@ -78,11 +170,7 @@ impl Broker {
             .await
             .map_err(|_| Error::Unreachable(format!("{base}: no answer")))?
             .map_err(|error| Error::Unreachable(format!("{base}: {error}")))?;
-        let http = reqwest::Client::builder()
-            .timeout(PATIENCE)
-            .build()
-            .map_err(|error| Error::Unreachable(format!("{base}: {error}")))?;
-        Ok(Self { base, http, mcp })
+        Ok(Self { plain, mcp })
     }
 
     /// Hand a signed submission to the broker. `Ok(Ok(..))` is the entry
@@ -128,7 +216,7 @@ impl Broker {
 
     /// The newest entry, and the broker's build.
     pub async fn head(&self) -> Result<Head, Error> {
-        self.get("head", &LogQuery::default()).await
+        self.plain.head().await
     }
 
     /// The records after position `after`, in order, and whether there
@@ -138,24 +226,12 @@ impl Broker {
         after: Option<u64>,
         limit: Option<u32>,
     ) -> Result<(Vec<Record>, bool), Error> {
-        let records: Records = self.get("log", &LogQuery { after, limit }).await?;
-        Ok((codec::parse_records(&records)?, records.more))
+        self.plain.log(after, limit).await
     }
 
     /// Every record from entry 0, pulled page by page.
     pub async fn whole_log(&self) -> Result<Vec<Record>, Error> {
-        let mut all: Vec<Record> = Vec::new();
-        loop {
-            let after = all.last().map(|record| record.entry.seq);
-            let (page, more) = self.log(after, Some(MAX_LIMIT)).await?;
-            if more && page.is_empty() {
-                return Err(Error::Protocol("an empty page with more to come".into()));
-            }
-            all.extend(page);
-            if !more {
-                return Ok(all);
-            }
-        }
+        self.plain.log_after(None).await
     }
 
     /// Close the connection.
@@ -209,37 +285,5 @@ impl Broker {
             return Ok(Err(refused.refused));
         }
         serde_json::from_value(content).map(Ok).map_err(unread)
-    }
-
-    /// `GET` one of the plain paths.
-    async fn get<T: DeserializeOwned>(
-        &self,
-        path: &'static str,
-        query: &LogQuery,
-    ) -> Result<T, Error> {
-        let mut url = format!("{}/{path}", self.base);
-        let query: Vec<String> = [
-            ("after", query.after),
-            ("limit", query.limit.map(u64::from)),
-        ]
-        .into_iter()
-        .filter_map(|(name, value)| value.map(|value| format!("{name}={value}")))
-        .collect();
-        if !query.is_empty() {
-            url = format!("{url}?{}", query.join("&"));
-        }
-        let response = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|error| Error::Unreachable(format!("{url}: {error}")))?;
-        if !response.status().is_success() {
-            return Err(Error::Protocol(format!("{url}: {}", response.status())));
-        }
-        response
-            .json()
-            .await
-            .map_err(|error| Error::Protocol(format!("{url}: {error}")))
     }
 }

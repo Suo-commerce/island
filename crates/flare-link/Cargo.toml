@@ -12,3 +12,15 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+flare-core = { workspace = true }
+island-client = { workspace = true, features = ["net"] }
+island-core = { workspace = true }
+island-log = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time", "signal"] }
+
+[dev-dependencies]
+axum = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
+serde = { workspace = true }

@@ -45,10 +45,16 @@ harness:
 init:
     cargo run --quiet --locked -p island-cli -- init --log {{LOG}} --root-key {{ROOT_KEY}} --appender-key {{APPENDER_KEY}}
 
-# Build the programs, optimized: target/release/island-cli and target/release/island-broker.
+# Build the programs, optimized, into target/release.
 build:
-    cargo build --release --locked -p island-cli -p island-broker
+    cargo build --release --locked -p island-cli -p island-broker -p flare-link
+
+# Build the programs and put them in ~/.local/bin, where the user services run them from.
+install: build
+    install -d ~/.local/bin
+    install -m 755 target/release/island-cli target/release/island-broker target/release/flare-link ~/.local/bin/
 
 # Serve the log: the MCP tools at /mcp, GET /log and GET /head. Stop it with Ctrl-C.
 broker:
-    cargo run --quiet --locked -p island-broker -- --log {{LOG}} --appender-key {{APPENDER_KEY}} --root $(cargo run --quiet --locked -p island-cli -- public {{ROOT_KEY}}) --listen {{LISTEN}}
+    cargo build --locked -p island-broker -p island-cli
+    target/debug/island-broker --log {{LOG}} --appender-key {{APPENDER_KEY}} --root $(target/debug/island-cli public {{ROOT_KEY}}) --listen {{LISTEN}}

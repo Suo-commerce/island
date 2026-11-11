@@ -1,0 +1,14 @@
+# The broker for the development log on this laptop, as a user service.
+# Settings come from ~/.config/island/island.env; see deploy/README.md.
+[Unit]
+Description=Island broker (development log)
+
+[Service]
+EnvironmentFile=%h/.config/island/island.env
+ExecStart=%h/.local/bin/island-broker --log ${ISLAND_LOG} --appender-key ${ISLAND_APPENDER_KEY} --root ${ISLAND_ROOT} --listen 127.0.0.1:4747
+# Exit code 1 after a storage failure: starting again is the recovery.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

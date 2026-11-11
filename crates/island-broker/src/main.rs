@@ -83,6 +83,16 @@ async fn run(args: Args) -> Result<(), String> {
     let address = listener
         .local_addr()
         .map_err(|error| format!("{}: {error}", args.listen))?;
+    // Reads are open to whoever reaches the broker, so it listens on one
+    // address: loopback, or the server's tailnet address. Every interface
+    // at once would put the log on whatever network the machine is on.
+    if address.ip().is_unspecified() {
+        return Err(format!(
+            "{}: the broker does not listen on every interface; give one address: \
+             127.0.0.1, or this machine's tailnet address (`tailscale ip -4`)",
+            args.listen
+        ));
+    }
 
     // Loopback, the address listened on, and what was asked for.
     let mut hosts: Vec<String> = http::LOOPBACK.map(str::to_owned).to_vec();

@@ -1,6 +1,6 @@
 [package]
 name = "flare-core"
-description = "Flare core: the session and verb types shared by Flare's server, terminal and link."
+description = "Flare core: what Flare shows of a verified log (see), shared by Flare's link, server and terminal."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,3 +12,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+island-core = { workspace = true }
+island-log = { workspace = true }

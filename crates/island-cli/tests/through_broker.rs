@@ -907,3 +907,24 @@ fn a_verse_whose_answer_was_lost_is_never_written_twice() {
     proxy.abort();
     ground.stop(served);
 }
+
+#[test]
+fn the_helper_will_not_listen_on_every_interface() {
+    let ground = ground();
+    let (code, _, error) = outcome(&[
+        "mcp",
+        "--broker",
+        "http://127.0.0.1:1",
+        "--key",
+        &ground.writer_key,
+        "--root",
+        &ground.root,
+        "--listen",
+        "0.0.0.0:0",
+    ]);
+    assert_eq!(code, 1);
+    assert!(
+        error.contains("does not listen on every interface"),
+        "{error}"
+    );
+}

@@ -1,0 +1,15 @@
+# The MCP helper coding sessions write verses through, as a user service.
+# It holds the session key; it runs as you, outside the coding sandbox.
+[Unit]
+Description=Island MCP helper for coding sessions
+Wants=island-broker.service
+After=island-broker.service
+
+[Service]
+EnvironmentFile=%h/.config/island/island.env
+ExecStart=%h/.local/bin/island-cli mcp --broker ${ISLAND_BROKER} --key ${ISLAND_SESSION_KEY} --root ${ISLAND_ROOT} --listen 127.0.0.1:4748
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

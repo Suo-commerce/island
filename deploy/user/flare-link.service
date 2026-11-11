@@ -1,0 +1,12 @@
+# The verified replica on this laptop, pulled every minute.
+[Unit]
+Description=Flare link: verified replica of the Island log
+
+[Service]
+EnvironmentFile=%h/.config/island/island.env
+ExecStart=%h/.local/bin/flare-link pull --broker ${ISLAND_BROKER} --root ${ISLAND_ROOT} --every 60
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,41 @@
+# The broker on the Island server, as a system service. Not used until the
+# server is deployed; see docs/server.md.
+#
+# Settings come from /etc/island/island.env:
+#   ISLAND_LOG, ISLAND_APPENDER_KEY, ISLAND_ROOT,
+#   ISLAND_LISTEN  this server's tailnet address and the port, e.g. from
+#                  `tailscale ip -4` followed by :4747
+#   ISLAND_HOST    this server's tailnet name, as clients reach it
+[Unit]
+Description=Island broker
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+User=island
+Group=island
+EnvironmentFile=/etc/island/island.env
+ExecStart=/usr/local/bin/island-broker --log ${ISLAND_LOG} --appender-key ${ISLAND_APPENDER_KEY} --root ${ISLAND_ROOT} --listen ${ISLAND_LISTEN} --allow-host ${ISLAND_HOST}
+# The tailnet address may not be up yet at boot; and after a storage
+# failure, starting again is the recovery.
+Restart=on-failure
+RestartSec=5
+
+# The broker reads its key and writes its log, and nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=/var/lib/island
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -6,7 +6,7 @@ that can only be tightened, and replicated for verification. Flare is its
 personal console. Both live in this one Cargo workspace.
 
 The specification is [`docs/spec.md`](docs/spec.md). The repo is at build
-step 7 of its "Build order":
+step 8 of its "Build order":
 
 - `island-core` holds the record formats, with golden vectors in
   `crates/island-core/tests/golden/`.
@@ -34,7 +34,12 @@ step 7 of its "Build order":
   simulated storage, with the model beside it, and checks its seven
   oracles after every operation.
 
-Flare (steps 8 and 9) comes next. The `flare-*` crates are still empty
+- `flare-core` is what Flare shows of a verified log: `see`.
+- `flare-link` keeps a verified replica of the log on this machine,
+  pulled from a broker; every record is checked from genesis against the
+  pinned root key, and a batch with one bad record is refused whole.
+
+`flare-server` and `flare-tui` (step 9) come next; they are still empty
 libraries.
 
 ## Layout
@@ -234,6 +239,58 @@ Whoever can reach the helper's address can write verses with its key, so
 keep it on loopback or inside the sandbox's own network. If the broker
 does not answer, the helper says so; a verse sent again after a lost
 answer is never written twice.
+
+### The replica, and see
+
+`flare-link` pulls the log from a broker into a file of its own,
+`~/.local/share/flare/island.log` unless told otherwise, and verifies
+every record before it keeps it. `see` pulls first, then shows the
+replica: an overview, or one stream.
+
+```sh
+ROOT=$(cargo run -q -p island-cli -- public .island/root.key)
+cargo run -q -p flare-link -- pull --broker http://127.0.0.1:4747 --root $ROOT
+cargo run -q -p flare-link -- see --broker http://127.0.0.1:4747 --root $ROOT
+cargo run -q -p flare-link -- see --broker http://127.0.0.1:4747 --root $ROOT island -n 5
+```
+
+If the broker serves anything that does not verify, nothing of it is
+kept: `pull` and `see` say `REFUSED` and which entry, and exit with 1.
+If the broker is not running, `see` shows the replica as it stands.
+
+### Running them as user services
+
+The broker, the helper and the replica can run as user services, so
+they are up whenever you are logged in. The programs go to
+`~/.local/bin`, and the settings to `~/.config/island/island.env`:
+
+```sh
+just install
+install -d ~/.config/island ~/.config/systemd/user
+ROOT=$(~/.local/bin/island-cli public .island/root.key)
+cat > ~/.config/island/island.env <<END
+ISLAND_LOG=$PWD/.island/island.log
+ISLAND_APPENDER_KEY=$PWD/.island/appender.key
+ISLAND_SESSION_KEY=$PWD/.island/opencode.key
+ISLAND_ROOT=$ROOT
+ISLAND_BROKER=http://127.0.0.1:4747
+END
+chmod 600 ~/.config/island/island.env
+install -m 644 deploy/user/*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now island-broker island-helper flare-link
+systemctl --user status island-broker island-helper flare-link --no-pager
+```
+
+Stop any broker or helper you started by hand first: the log is held by
+one broker at a time. The helper's terminal output, one line per tool
+call, is then in `journalctl --user -u island-helper -f`.
+
+### On the server
+
+`docs/server.md` holds what the broker needs on the Island server: the
+tailnet address only, a firewall rule and a tailnet policy, with their
+files in `deploy/server/`.
 
 ### Signing as root without a key file
 

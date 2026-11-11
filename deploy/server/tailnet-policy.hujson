@@ -1,0 +1,18 @@
+// The part of the tailnet policy file that concerns the broker. Merge it
+// into the policy in the Tailscale admin console; see docs/server.md.
+//
+// Tag the server with tag:island. Only devices of the tailnet's admins
+// (yours) reach its broker port. Grants only allow: if the policy still
+// has an allow-everything rule, remove it, or this restricts nothing.
+{
+  "tagOwners": {
+    "tag:island": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["autogroup:admin"],
+      "dst": ["tag:island"],
+      "ip": ["tcp:4747"]
+    }
+  ]
+}

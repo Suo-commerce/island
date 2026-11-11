@@ -157,13 +157,23 @@ struct Helper {
     tool_router: ToolRouter<Self>,
 }
 
-/// A tool answer the session reads as a success.
+/// A tool answer the session reads as a success. Its first line is also
+/// said on standard error, so the helper's terminal shows every call.
 fn said(text: String) -> CallToolResult {
+    eprintln!(
+        "island-cli mcp: {}",
+        text.lines().next().unwrap_or_default()
+    );
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
 
-/// A tool answer the session reads as a failure.
+/// A tool answer the session reads as a failure, also said on standard
+/// error.
 fn failed(text: String) -> CallToolResult {
+    eprintln!(
+        "island-cli mcp: failed: {}",
+        text.lines().next().unwrap_or_default()
+    );
     CallToolResult::error(vec![ContentBlock::text(text)])
 }
 
@@ -442,6 +452,14 @@ pub fn run(
         let bound = listener
             .local_addr()
             .map_err(|error| format!("{address}: {error}"))?;
+        // Whoever reaches the helper writes verses with its key: never on
+        // every interface at once.
+        if bound.ip().is_unspecified() {
+            return Err(format!(
+                "{address}: the helper does not listen on every interface; give one \
+                 address, 127.0.0.1 unless the session must reach it elsewhere"
+            ));
+        }
         let mut hosts: Vec<String> = ["localhost", "127.0.0.1", "::1"]
             .map(str::to_owned)
             .to_vec();

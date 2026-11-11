@@ -789,3 +789,29 @@ async fn the_tools_describe_themselves() {
 
     running.stop().await;
 }
+
+#[test]
+fn the_broker_will_not_listen_on_every_interface() {
+    let (dir, log) = started_log();
+    let key = dir.path().join("appender.key");
+    std::fs::write(&key, island_env::keyfile::hex(&[0x41; 32])).expect("write");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_island-broker"))
+        .args([
+            "--log",
+            log.to_str().expect("UTF-8"),
+            "--appender-key",
+            key.to_str().expect("UTF-8"),
+            "--root",
+            &island_env::keyfile::hex(&pin()),
+            "--listen",
+            "0.0.0.0:0",
+        ])
+        .output()
+        .expect("run island-broker");
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8(output.stderr).expect("UTF-8");
+    assert!(
+        error.contains("does not listen on every interface"),
+        "{error}"
+    );
+}

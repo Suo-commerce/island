@@ -6,7 +6,8 @@
 //!   and Island's own types. The broker uses the same two modules, so the
 //!   format has one implementation.
 //! - [`Broker`] (feature `net`) calls a broker: its MCP tools, `/log` and
-//!   `/head`.
+//!   `/head`. [`Plain`] calls only the last two, which is all a replica
+//!   needs.
 //!
 //! Flare and the coding-session tools both build on this crate.
 
@@ -19,6 +20,6 @@ pub mod wire;
 mod writer;
 
 #[cfg(feature = "net")]
-pub use broker::{Broker, Error};
+pub use broker::{Broker, Error, Plain};
 pub use codec::Malformed;
 pub use writer::{Signed, Writer};

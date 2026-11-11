@@ -1,0 +1,12 @@
+# The broker's port answers only on loopback and the tailnet interface.
+# A second wall behind the broker's own one-address rule: if Tailscale is
+# down or misconfigured, the port is still closed to every other network.
+#
+#   sudo install -m 644 deploy/server/island.nft /etc/nftables.d/island.nft
+#   sudo nft -f /etc/nftables.d/island.nft
+table inet island {
+    chain input {
+        type filter hook input priority filter; policy accept;
+        tcp dport 4747 iifname != { "lo", "tailscale0" } drop
+    }
+}
