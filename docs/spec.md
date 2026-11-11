@@ -249,7 +249,7 @@ Each step leaves something that runs. Spikes S1 to S3 start in the first days, i
 7. **`island-broker` and `island-client`.** rmcp server with the three tools, `/log` and `/head`; the client library. First real verse from a coding session.
 8. **`flare-link` and `flare-core`.** Replica pull with verification against the pinned root key; `see`.
 9. **`flare-server` and `flare-tui`.** Session event log on the server, WebSocket attach and replay, `propose` signed with the device key. The laptop and an `ssh` session share one session.
-10. **A week of real use** with one real tightening of the policy, then spike S2 on the server and the slice 2 spec: the Vessel socket, access entries, inference, and Flare's agent loop ported from Pi.
+10. **A week of real use** with one real tightening of the policy, then spike S2 on the server and the slice 2 spec: the Vessel socket, access entries, inference, Flare's agent loop ported from Pi, and Flare's face.
 
 ## Slice 2 preview: repos as witnesses
 
@@ -270,3 +270,28 @@ The first item of slice 2 gives Island read access to Jarmo's repositories, so a
 - Only pushed work is visible. Uncommitted changes on the laptop are not.
 
 **Also in slice 2,** after spike S2: the Vessel socket for reads and inference, `access` entries, the inbox and `Proposals` paths, and Flare's agent loop ported from Pi.
+
+## Slice 2 preview: Flare's face
+
+Slice 1 gives Flare a line-by-line terminal, enough to prove the path. Slice 2 gives it a face: the app or page Jarmo actually uses to run Island. It is designed with the agent loop, so the screens make room from the start for agents, sub-agents, the review loop and proposals waiting for Jarmo. It is built in two passes: first how it works, then how it looks.
+
+**Already fixed by slice 1.**
+
+- The session protocol is the face's only interface. A new client speaks it; `flare-server` does not change for it.
+- The server holds no key. Every signature is made on the device in Jarmo's hand.
+- The approver key is a device-bound passkey on Jarmo's phone.
+- `flare-server` refuses every web page today. A browser client needs the server to serve the page itself and accept only that one origin; a native app needs neither.
+- What the face shows from the log is checked, not taken on the server's word. A device without a replica fetches the entries and checks the signatures against the pinned root key itself.
+
+**How it works: to settle first.**
+
+1. **Jobs.** What Jarmo opens Flare for: reading where things stand, singing a verse, answering what waits for him (a refusal, an override request, a repo asking for a verse, later an agent's proposal), watching an agent and stepping in. Each job becomes a flow; the screens follow from the flows.
+2. **Signing tiers.** Which actions need nothing (reading), which the daily key (verses), which the passkey (approvals, overrides, policy). This sets the friction of each action.
+3. **Reaching Jarmo.** Whether a refusal or a waiting approval notifies the phone or waits until Flare is opened. Push needs an address to push to and a path out of the server, so this choice shapes the architecture.
+4. **Devices.** One shared session on every device. Open: whether each device does everything, or the phone answers and approves while the laptop reads and steers.
+5. **Visible trust.** How the face shows "verified against the log" apart from "the server says so", the way the terminal shows ✓ and ✗.
+6. **The agent.** How a running agent, its sub-agents and the review loop appear, and where Jarmo steps in.
+
+**Then how it looks:** layout, density, the first screen, phone and laptop.
+
+**Rule:** the terminal stays. The face is one more client of the same session, never the only way in.
