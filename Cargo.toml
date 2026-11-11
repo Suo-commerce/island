@@ -52,6 +52,9 @@ tokio = "1.54"
 tokio-util = "0.7"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
+# Flare's session: the same WebSocket library axum's own support uses.
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

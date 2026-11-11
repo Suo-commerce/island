@@ -6,7 +6,7 @@ that can only be tightened, and replicated for verification. Flare is its
 personal console. Both live in this one Cargo workspace.
 
 The specification is [`docs/spec.md`](docs/spec.md). The repo is at build
-step 8 of its "Build order":
+step 9 of its "Build order":
 
 - `island-core` holds the record formats, with golden vectors in
   `crates/island-core/tests/golden/`.
@@ -39,8 +39,15 @@ step 8 of its "Build order":
   pulled from a broker; every record is checked from genesis against the
   pinned root key, and a batch with one bad record is refused whole.
 
-`flare-server` and `flare-tui` (step 9) come next; they are still empty
-libraries.
+- `flare-server` holds the shared sessions: append-only lists of events
+  that terminals attach to over WebSocket. It holds no writer key; it
+  relays signed proposals to the broker and answers `see` from its own
+  verified replica.
+- `flare-tui` is a terminal on a session: commands in, every event of
+  the session out, verses signed with this device's key, and what `see`
+  shows checked against this machine's replica.
+
+Slice 1's last step is a week of real use (step 10).
 
 ## Layout
 
@@ -258,10 +265,37 @@ If the broker serves anything that does not verify, nothing of it is
 kept: `pull` and `see` say `REFUSED` and which entry, and exit with 1.
 If the broker is not running, `see` shows the replica as it stands.
 
+### The shared session
+
+`flare-server` keeps the sessions; every terminal attached to one sees
+every event in it, whoever caused it. With the broker running, in one
+terminal:
+
+```sh
+just session
+```
+
+and in another, as many times as you like, each a terminal on the same
+session:
+
+```sh
+just tui
+```
+
+Then type `help`. `see` and `see island 5` show the log; `verse decision
+the gate judges every verse` proposes a verse, signed with the daily key
+(`just KEY=.island/opencode.key tui` signs with another). `quit` leaves;
+the session goes on, and `flare-tui --after 0` shows it from the start.
+A `see` is checked against this machine's replica: `✓ matches your
+replica` or, if the server showed something else, `✗ DOES NOT MATCH`.
+
+The server holds no key and answers no web page: a browser that tries
+to attach is refused.
+
 ### Running them as user services
 
-The broker, the helper and the replica can run as user services, so
-they are up whenever you are logged in. The programs go to
+The broker, the helper, the replica and the session server can run as
+user services, so they are up whenever you are logged in. The programs go to
 `~/.local/bin`, and the settings to `~/.config/island/island.env`:
 
 ```sh
@@ -278,8 +312,8 @@ END
 chmod 600 ~/.config/island/island.env
 install -m 644 deploy/user/*.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now island-broker island-helper flare-link
-systemctl --user status island-broker island-helper flare-link --no-pager
+systemctl --user enable --now island-broker island-helper flare-link flare-server
+systemctl --user status island-broker island-helper flare-link flare-server --no-pager
 ```
 
 Stop any broker or helper you started by hand first: the log is held by

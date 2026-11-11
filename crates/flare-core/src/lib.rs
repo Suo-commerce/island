@@ -9,8 +9,11 @@
 //! - [`Overview`]: the head, the policy in force, every stream with its
 //!   newest entry, and the counts worth watching.
 //! - [`StreamView`]: the newest entries of one stream.
+//! - [`session`]: the protocol between `flare-server` and its clients.
 
 #![warn(missing_docs)]
+
+pub mod session;
 
 use std::fmt;
 
@@ -290,7 +293,7 @@ impl fmt::Display for Overview {
                 short(&self.root),
                 short(&hash)
             )?,
-            None => writeln!(f, "an empty log")?,
+            None => writeln!(f, "nothing pulled yet: the replica is empty")?,
         }
         match &self.policy {
             Some((seq, policy)) => writeln!(
@@ -300,10 +303,17 @@ impl fmt::Display for Overview {
             )?,
             None => writeln!(f, "policy    none yet")?,
         }
+        let count =
+            |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
         writeln!(
             f,
-            "gate      {} verdicts, {} override requests",
-            self.verdicts, self.override_requests
+            "gate      {}, {}",
+            count(self.verdicts, "verdict", "verdicts"),
+            count(
+                self.override_requests,
+                "override request",
+                "override requests"
+            )
         )?;
         writeln!(f, "streams")?;
         for stream in &self.streams {

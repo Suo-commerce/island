@@ -1,6 +1,6 @@
 [package]
 name = "flare-tui"
-description = "Flare terminal client: attaches to the shared session; see and propose."
+description = "Flare terminal: attaches to a shared session; see, and propose verses signed with this device's key."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,3 +12,22 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+flare-core = { workspace = true }
+flare-link = { workspace = true }
+island-client = { workspace = true, features = ["net"] }
+island-core = { workspace = true }
+clap = { workspace = true }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "io-std", "io-util", "time", "sync"] }
+tokio-tungstenite = { workspace = true }
+
+[dev-dependencies]
+flare-server = { workspace = true }
+island-log = { workspace = true }
+axum = { workspace = true }
+rmcp = { workspace = true, features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
+schemars = { workspace = true }
+serde = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }

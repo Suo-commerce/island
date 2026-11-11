@@ -1,6 +1,6 @@
 [package]
 name = "flare-core"
-description = "Flare core: what Flare shows of a verified log (see), shared by Flare's link, server and terminal."
+description = "Flare core: what Flare shows of a verified log (see), and the session protocol, shared by Flare's link, server and terminal."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,3 +14,5 @@ workspace = true
 [dependencies]
 island-core = { workspace = true }
 island-log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

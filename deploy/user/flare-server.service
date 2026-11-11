@@ -1,0 +1,15 @@
+# The shared Flare session server, on this laptop for now. It holds no
+# writer key: terminals sign their own verses.
+[Unit]
+Description=Flare session server
+Wants=island-broker.service
+After=island-broker.service
+
+[Service]
+EnvironmentFile=%h/.config/island/island.env
+ExecStart=%h/.local/bin/flare-server --broker ${ISLAND_BROKER} --root ${ISLAND_ROOT} --listen 127.0.0.1:4749
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

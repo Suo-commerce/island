@@ -1,0 +1,22 @@
+# flare-server records when each session event happened, so its program
+# reads the wall clock (in main.rs, handed to the library as a `Clock`).
+# Clippy uses the nearest clippy.toml and does not merge, so this is the
+# root's list without SystemTime::now. Session events are not part of the
+# Island log and are never replayed.
+
+disallowed-methods = [
+    { path = "std::time::SystemTime::elapsed", reason = "read time through island_env::Clock" },
+    { path = "std::time::Instant::now", reason = "read time through island_env::Clock" },
+    { path = "std::time::Instant::elapsed", reason = "read time through island_env::Clock" },
+    { path = "std::thread::spawn", reason = "one appender, one thread; concurrency belongs to island-env and the binaries' runtime" },
+    { path = "std::thread::Builder::spawn", reason = "one appender, one thread; concurrency belongs to island-env and the binaries' runtime" },
+    { path = "std::thread::scope", reason = "one appender, one thread; concurrency belongs to island-env and the binaries' runtime" },
+    { path = "rand::thread_rng", reason = "draw randomness through island_env::Rng", allow-invalid = true },
+    { path = "rand::rng", reason = "draw randomness through island_env::Rng", allow-invalid = true },
+    { path = "rand::random", reason = "draw randomness through island_env::Rng", allow-invalid = true },
+]
+
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order differs between runs; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order differs between runs; use BTreeSet" },
+]

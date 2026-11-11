@@ -214,23 +214,35 @@ impl Helper {
 
 /// How an answered submission is told to the session.
 fn told(stream: &str, answer: Result<(u64, Hash), wire::Refusal>) -> CallToolResult {
+    told_after("", stream, answer)
+}
+
+/// The same, said after `before`: what became of an earlier verse.
+fn told_after(
+    before: &str,
+    stream: &str,
+    answer: Result<(u64, Hash), wire::Refusal>,
+) -> CallToolResult {
     match answer {
         Ok((seq, hash)) => said(format!(
-            "written: entry {seq} on stream {stream}, hash {}",
+            "{before}written: entry {seq} on stream {stream}, hash {}",
             hex(&hash)
         )),
-        Err(refusal) => failed(match (refusal.code, &refusal.verdict) {
-            (Code::Gate, Some(verdict)) => format!(
-                "{}. The refusal is recorded as entry {}; the verse is not in the log. \
+        Err(refusal) => failed(
+            before.to_owned()
+                + &match (refusal.code, &refusal.verdict) {
+                    (Code::Gate, Some(verdict)) => format!(
+                        "{}. The refusal is recorded as entry {}; the verse is not in the log. \
                  Change the verse to meet the policy and send it again.",
-                refusal.reason, verdict.seq
-            ),
-            (Code::Denied, _) => format!(
-                "not written: {}. `my_capabilities` lists what this key may write.",
-                refusal.reason
-            ),
-            _ => format!("not written: {}", refusal.reason),
-        }),
+                        refusal.reason, verdict.seq
+                    ),
+                    (Code::Denied, _) => format!(
+                        "not written: {}. `my_capabilities` lists what this key may write.",
+                        refusal.reason
+                    ),
+                    _ => format!("not written: {}", refusal.reason),
+                },
+        ),
     }
 }
 
@@ -302,21 +314,7 @@ impl Helper {
                         refusal.code,
                         Code::CounterOld | Code::CounterGap | Code::CounterConflict
                     ) => {}
-                Ok(answer) => {
-                    let CallToolResult {
-                        content, is_error, ..
-                    } = told(&stream, answer);
-                    let text = content
-                        .first()
-                        .and_then(|block| block.as_text())
-                        .map_or(String::new(), |text| text.text.clone());
-                    let text = format!("{before}{text}");
-                    return if is_error == Some(true) {
-                        failed(text)
-                    } else {
-                        said(text)
-                    };
-                }
+                Ok(answer) => return told_after(&before, &stream, answer),
             }
         }
         failed(format!(

@@ -47,14 +47,25 @@ init:
 
 # Build the programs, optimized, into target/release.
 build:
-    cargo build --release --locked -p island-cli -p island-broker -p flare-link
+    cargo build --release --locked -p island-cli -p island-broker -p flare-link -p flare-server -p flare-tui
 
 # Build the programs and put them in ~/.local/bin, where the user services run them from.
 install: build
     install -d ~/.local/bin
-    install -m 755 target/release/island-cli target/release/island-broker target/release/flare-link ~/.local/bin/
+    install -m 755 target/release/island-cli target/release/island-broker target/release/flare-link target/release/flare-server target/release/flare-tui ~/.local/bin/
 
 # Serve the log: the MCP tools at /mcp, GET /log and GET /head. Stop it with Ctrl-C.
 broker:
     cargo build --locked -p island-broker -p island-cli
     target/debug/island-broker --log {{LOG}} --appender-key {{APPENDER_KEY}} --root $(target/debug/island-cli public {{ROOT_KEY}}) --listen {{LISTEN}}
+
+# The shared Flare session server, beside a running broker. Stop it with Ctrl-C.
+session:
+    cargo build --locked -p flare-server -p island-cli
+    target/debug/flare-server --broker http://{{LISTEN}} --root $(target/debug/island-cli public {{ROOT_KEY}})
+
+# A terminal on the shared session, signing verses with KEY. `just KEY=.island/daily.key tui`
+KEY := ".island/daily.key"
+tui:
+    cargo build --locked -p flare-tui -p island-cli
+    target/debug/flare-tui --client $(hostname) --key {{KEY}} --broker http://{{LISTEN}} --root $(target/debug/island-cli public {{ROOT_KEY}})
