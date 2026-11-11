@@ -105,6 +105,23 @@ pub fn read(path: &Path, pin: PublicKey) -> Result<Snapshot, ReplicaError> {
     })
 }
 
+/// Take the replica's exclusive lock, waiting up to a second for a holder
+/// to let go: a process that starts another program lends its open files,
+/// and so their locks, to the child for a moment (see `island_env`'s
+/// `FileStorage`). Another flare-link pulling into the replica holds it
+/// for longer than that.
+fn lock(file: &File) -> Result<(), std::fs::TryLockError> {
+    for _ in 1..20 {
+        match file.try_lock() {
+            Err(std::fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            other => return other,
+        }
+    }
+    file.try_lock()
+}
+
 impl Replica {
     /// Open the replica at `path`, creating it if there is none, and
     /// verify all of it from genesis against `pin`.
@@ -126,7 +143,7 @@ impl Replica {
             .truncate(false)
             .open(path)
             .map_err(at)?;
-        file.try_lock().map_err(|error| match error {
+        lock(&file).map_err(|error| match error {
             std::fs::TryLockError::WouldBlock => ReplicaError::Busy(path.into()),
             std::fs::TryLockError::Error(error) => at(error),
         })?;

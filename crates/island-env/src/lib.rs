@@ -124,7 +124,29 @@ impl FileStorage {
     }
 }
 
+/// How long [`lock`] waits for a holder to let go: tries, and the pause
+/// between them.
+const LOCK_TRIES: u32 = 20;
+const LOCK_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Take the file's exclusive lock, waiting up to a second for a holder to
+/// let go.
+///
+/// The lock belongs to the open file, and a process that starts another
+/// program copies its open files into the child for the moment before
+/// the child's own program starts. So a log closed by one appender can
+/// still be held, for that moment, by a child some other thread just
+/// started; and a broker restarted by its service manager can meet the
+/// old process still on its way out. Neither is another appender, and
+/// both are over well within the second.
 fn lock(file: &File) -> io::Result<()> {
+    for _ in 1..LOCK_TRIES {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(LOCK_PAUSE),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
     file.try_lock().map_err(|error| match error {
         std::fs::TryLockError::WouldBlock => io::Error::new(
             io::ErrorKind::WouldBlock,
