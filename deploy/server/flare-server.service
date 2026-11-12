@@ -1,0 +1,40 @@
+# The shared Flare session server on the Island server, as a system
+# service; see docs/server.md. It holds no writer key: terminals sign
+# their own verses. It keeps the sessions and its own replica of the log
+# in /var/lib/island/flare.
+#
+# Settings come from /etc/island/island.env: ISLAND_ROOT.
+# It listens on the server's WireGuard address only.
+[Unit]
+Description=Flare session server
+Requires=wg-quick@wg-island.service
+Wants=island-broker.service
+After=wg-quick@wg-island.service island-broker.service
+
+[Service]
+User=island
+Group=island
+EnvironmentFile=/etc/island/island.env
+ExecStart=/usr/local/bin/flare-server --broker http://10.77.0.1:4747 --root ${ISLAND_ROOT} --data /var/lib/island/flare --listen 10.77.0.1:4749
+# The broker may still be starting.
+Restart=on-failure
+RestartSec=5
+
+# It writes its sessions and replica, and nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=/var/lib/island
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

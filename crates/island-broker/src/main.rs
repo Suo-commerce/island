@@ -35,7 +35,7 @@ struct Args {
     #[arg(long, default_value = DEFAULT_LISTEN)]
     listen: String,
     /// A host name or address clients reach the broker by, besides
-    /// loopback and the address it listens on: its tailnet name, for
+    /// loopback and the address it listens on: a name for the server, for
     /// example. May be given more than once.
     #[arg(long, value_name = "HOST")]
     allow_host: Vec<String>,
@@ -84,12 +84,12 @@ async fn run(args: Args) -> Result<(), String> {
         .local_addr()
         .map_err(|error| format!("{}: {error}", args.listen))?;
     // Reads are open to whoever reaches the broker, so it listens on one
-    // address: loopback, or the server's tailnet address. Every interface
+    // address: loopback, or the server's WireGuard address. Every interface
     // at once would put the log on whatever network the machine is on.
     if address.ip().is_unspecified() {
         return Err(format!(
             "{}: the broker does not listen on every interface; give one address: \
-             127.0.0.1, or this machine's tailnet address (`tailscale ip -4`)",
+             127.0.0.1, or this machine's WireGuard address",
             args.listen
         ));
     }

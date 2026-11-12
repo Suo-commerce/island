@@ -128,7 +128,7 @@ Verdict entries are written under that `verdict` grant. Its holder is the append
 
 Three interfaces cross the repo boundary or a machine boundary. They are the contract between `island` and `flare`, so they are versioned and tested by golden fixtures in both repos.
 
-**1. The broker's MCP tools** (`island-broker`, rmcp, streamable HTTP over the tailnet). There is no bearer token: the signed submission is the credential. The client builds and signs the `Submission`; the broker never holds a device's writer key. In slice 1, reads are open to any client on the tailnet.
+**1. The broker's MCP tools** (`island-broker`, rmcp, streamable HTTP over WireGuard). There is no bearer token: the signed submission is the credential. The client builds and signs the `Submission`; the broker never holds a device's writer key. In slice 1, reads are open to any device on the WireGuard network.
 
 | Tool | Input | Output |
 | --- | --- | --- |
@@ -153,7 +153,7 @@ The server assigns event order; two clients typing at once never conflict. In sl
 
 **One session, three ways in.** `flare-server` runs on the server, owns the session's event log and keeps running when every device is closed.
 
-- **Laptop:** `flare-tui` attaches over the tailnet, signs with the laptop's daily key and cross-checks against its own verified replica.
+- **Laptop:** `flare-tui` attaches over WireGuard, signs with the laptop's daily key and cross-checks against its own verified replica.
 - **Any other laptop:** `ssh` to the server and run the same `flare-tui` there. The key stays on the server with a verses-only grant, so a borrowed machine holds nothing.
 - **Phone:** the web app served by `flare-server`, built after slice 1. The phone trusts the server's view. Approvals come only from the phone's passkey; for a high-stakes one, the request hash on the phone can be compared with the hash the laptop computed itself.
 
@@ -189,14 +189,14 @@ The harness is written with the first crate and runs on every push. In slice 1 t
 
 Slice 1 runs without Taso. The server is set up Taso-ready from the start so spike S2 runs on it, and Vessels arrive in slice 2. The Taso facts below were checked against Taso main on 2026-11-09.
 
-**Server.** UpCloud is Taso's most-tested host: its nightly release gate and soak runs happen on an UpCloud KVM server in Helsinki. Island takes the same: a Premium plan in Helsinki, Ubuntu 26.04, 4 vCPU and 16 GB to start, with a separate MaxIOPS volume of about 160 GB at `/var/lib/taso` for the block log, images and build output. It must be a KVM virtual machine with its own kernel: Taso needs `ublk_drv`, cgroup v2, no SELinux, `runc` and a local filesystem, so shared-kernel containers and managed Kubernetes are out. `taso-ctl init` checks every requirement before writing anything.
+**Server.** UpCloud is Taso's most-tested host: its nightly release gate and soak runs happen on an UpCloud KVM server in Helsinki. Island takes the same: a Premium plan in Helsinki, Ubuntu 26.04, 4 vCPU and 16 GB to start, with a separate MaxIOPS volume of about 160 GB at `/var/lib/taso` for the block log, images and build output. It must be a KVM virtual machine with its own kernel: Taso needs `ublk_drv`, cgroup v2, no SELinux, `runc` and a local filesystem, so shared-kernel containers and managed Kubernetes are out. `taso-ctl init` checks every requirement before writing anything. The server and Jarmo's devices form a WireGuard network of their own (`wg-island`, `10.77.0.0/24`), apart from any tailnet: WireGuard's UDP port is the only one open to the internet, and SSH, the broker and `flare-server` answer only inside it (`docs/server.md`).
 
 | Runs on the server | Stays off the server |
 | --- | --- |
 | `taso-blkd`, `taso-wardend` | AgentVault with the root, data and Vessel writer keys |
 | `island-broker` with the appender | The approval passkey, on the phone |
 | `flare-server` | Inference, on its GPU box |
-| Tailscale; no public ports | The Island log replica, on the laptop |
+| WireGuard; its UDP port is the only public one | The Island log replica, on the laptop |
 
 Taso's packs and the Island log are shipped to UpCloud's S3-compatible object storage as well as to the laptop. A VM disk's durability under power loss is the provider's promise, not something the Warden checks, so VM snapshots are a convenience only.
 
@@ -255,7 +255,7 @@ Each step leaves something that runs. Spikes S1 to S3 start in the first days, i
 
 The first item of slice 2 gives Island read access to Jarmo's repositories, so a verse can be checked against what happened in the repo, and the repo can ask for a verse. It needs no Vessels, so it can start right after slice 1 and before spike S2 finishes.
 
-**The observer.** A poller inside the broker reads each repo's branch heads with one read-only GitHub credential from AgentVault. The server has no public ports, so it polls and takes no webhooks. For each new head it submits a `receipt` (tag 6): `{ repo, branch, head: [u8;20], previous: Option<[u8;20]>, commits: u32, observed_at }`. Hashes and counts only, never code or commit messages. The observer is a writer like any other: its own key, and a grant limited to `receipt` on the `repos` stream.
+**The observer.** A poller inside the broker reads each repo's branch heads with one read-only GitHub credential from AgentVault. The server has no public TCP ports, so it polls and takes no webhooks. For each new head it submits a `receipt` (tag 6): `{ repo, branch, head: [u8;20], previous: Option<[u8;20]>, commits: u32, observed_at }`. Hashes and counts only, never code or commit messages. The observer is a writer like any other: its own key, and a grant limited to `receipt` on the `repos` stream.
 
 **Verse to repo.** An artefact verse names a commit hash in `refs`. `ArtefactHasRef` is tightened into `ArtefactRefHasReceipt`: the gate accepts the verse only if the state holds a receipt covering that commit. The gate reads the receipt, never GitHub, so replay stays pure.
 

@@ -1,12 +1,26 @@
-# The broker's port answers only on loopback and the tailnet interface.
-# A second wall behind the broker's own one-address rule: if Tailscale is
-# down or misconfigured, the port is still closed to every other network.
+# The Island server's firewall: from the open network, only WireGuard's
+# UDP port answers. SSH, the broker (4747) and the session server (4749)
+# answer only inside the tunnel, on wg-island. If the tunnel is down,
+# they are closed. Outgoing traffic is not limited.
 #
-#   sudo install -m 644 deploy/server/island.nft /etc/nftables.d/island.nft
-#   sudo nft -f /etc/nftables.d/island.nft
+# Load it only after SSH over WireGuard works; see docs/server.md.
+#   install -m 644 island.nft /etc/nftables.d/island.nft
+#   nft -f /etc/nftables.d/island.nft
+table inet island
+delete table inet island
+
 table inet island {
     chain input {
-        type filter hook input priority filter; policy accept;
-        tcp dport 4747 iifname != { "lo", "tailscale0" } drop
+        type filter hook input priority filter; policy drop;
+        iifname "lo" accept
+        ct state established,related accept
+        ct state invalid drop
+        meta l4proto { icmp, ipv6-icmp } accept
+        udp dport { 68, 546 } accept comment "DHCP leases for the public address"
+        udp dport 51820 accept
+        iifname "wg-island" tcp dport { 22, 4747, 4749 } accept
+    }
+    chain forward {
+        type filter hook forward priority filter; policy drop;
     }
 }

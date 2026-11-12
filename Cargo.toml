@@ -45,7 +45,7 @@ base64 = "0.23"
 
 # The broker's network face (docs/spec.md, "Interfaces"). rmcp is the MCP
 # SDK; each crate turns on the sides and transports it uses. reqwest comes
-# without TLS: the broker is reached over the tailnet or on loopback.
+# without TLS: the broker is reached over WireGuard or on loopback.
 rmcp = { version = "3.9", default-features = false }
 schemars = "1"
 tokio = "1.54"

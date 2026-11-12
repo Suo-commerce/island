@@ -98,7 +98,7 @@ async fn run(args: Args) -> Result<(), String> {
     if address.ip().is_unspecified() {
         return Err(format!(
             "{}: flare-server does not listen on every interface; give one address: \
-             127.0.0.1, or this machine's tailnet address (`tailscale ip -4`)",
+             127.0.0.1, or this machine's WireGuard address",
             args.listen
         ));
     }

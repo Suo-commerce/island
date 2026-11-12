@@ -34,7 +34,7 @@ struct Plain {
 /// `hosts` are the names and addresses a request's `Host` header may
 /// carry, with or without a port. A request addressed to any other name
 /// is refused, which keeps a web page from reaching a broker on loopback
-/// or on the tailnet through a name it controls. `shutdown` ends the MCP
+/// or on the private network through a name it controls. `shutdown` ends the MCP
 /// service's open requests.
 pub fn router(keeper: Keeper, hosts: Vec<String>, shutdown: &CancellationToken) -> Router {
     // Stateless, with plain JSON answers: nothing is kept per client, so
@@ -152,22 +152,22 @@ mod tests {
         let hosts = [
             "localhost".to_owned(),
             "::1".to_owned(),
-            "island.tailnet.example:4747".to_owned(),
+            "island.example:4747".to_owned(),
         ];
         for allowed in [
             "localhost",
             "LOCALHOST:4747",
             "[::1]:4747",
             "[::1]",
-            "island.tailnet.example:4747",
+            "island.example:4747",
         ] {
             assert!(host_allowed(allowed, &hosts), "{allowed}");
         }
         for refused in [
             "evil.example",
             "localhost.evil.example",
-            "island.tailnet.example:80",
-            "island.tailnet.example",
+            "island.example:80",
+            "island.example",
             "",
         ] {
             assert!(!host_allowed(refused, &hosts), "{refused}");

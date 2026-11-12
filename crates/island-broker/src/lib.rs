@@ -9,7 +9,7 @@
 //! The broker holds the appender's key and no other. A writer signs its
 //! own submissions; the signature is the only credential the broker
 //! asks for, and reads are open to whoever can reach it. It is meant to
-//! be reached over loopback or the tailnet, never from the open network.
+//! be reached over loopback or WireGuard, never from the open network.
 
 #![warn(missing_docs)]
 

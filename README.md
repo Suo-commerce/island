@@ -192,7 +192,7 @@ curl -s $BROKER/head
 
 A `policy` written through a broker names the broker's build as its
 evaluator, since that is the build that judges. To reach the broker by
-another name than loopback, on the tailnet for example, start it with
+another name than loopback, on WireGuard for example, start it with
 `--listen` and one `--allow-host` per name (`cargo run -p island-broker --
 --help`). Stop it with Ctrl-C; a restart loses nothing, and clients carry
 on without connecting anew.
@@ -322,9 +322,10 @@ call, is then in `journalctl --user -u island-helper -f`.
 
 ### On the server
 
-`docs/server.md` holds what the broker needs on the Island server: the
-tailnet address only, a firewall rule and a tailnet policy, with their
-files in `deploy/server/`.
+`docs/server.md` moves the broker and the session server to the Island
+server: a WireGuard network of your own devices, the programs on its
+private address only, and a firewall that leaves only WireGuard open, with
+their files in `deploy/server/`.
 
 ### Signing as root without a key file
 

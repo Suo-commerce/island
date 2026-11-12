@@ -2,22 +2,19 @@
 # server is deployed; see docs/server.md.
 #
 # Settings come from /etc/island/island.env:
-#   ISLAND_LOG, ISLAND_APPENDER_KEY, ISLAND_ROOT,
-#   ISLAND_LISTEN  this server's tailnet address and the port, e.g. from
-#                  `tailscale ip -4` followed by :4747
-#   ISLAND_HOST    this server's tailnet name, as clients reach it
+#   ISLAND_LOG, ISLAND_APPENDER_KEY, ISLAND_ROOT
+# It listens on the server's WireGuard address only.
 [Unit]
 Description=Island broker
-Wants=network-online.target
-After=network-online.target tailscaled.service
+Requires=wg-quick@wg-island.service
+After=wg-quick@wg-island.service
 
 [Service]
 User=island
 Group=island
 EnvironmentFile=/etc/island/island.env
-ExecStart=/usr/local/bin/island-broker --log ${ISLAND_LOG} --appender-key ${ISLAND_APPENDER_KEY} --root ${ISLAND_ROOT} --listen ${ISLAND_LISTEN} --allow-host ${ISLAND_HOST}
-# The tailnet address may not be up yet at boot; and after a storage
-# failure, starting again is the recovery.
+ExecStart=/usr/local/bin/island-broker --log ${ISLAND_LOG} --appender-key ${ISLAND_APPENDER_KEY} --root ${ISLAND_ROOT} --listen 10.77.0.1:4747
+# After a storage failure, starting again is the recovery.
 Restart=on-failure
 RestartSec=5
 
