@@ -136,8 +136,12 @@ On the laptop, build them and copy them over:
 ```sh
 cd /srv/oc-projects/island
 just build
-scp target/release/island-broker target/release/island-cli target/release/flare-server root@10.77.0.1:/usr/local/bin/
+scp target/release/island-broker target/release/island-cli target/release/flare-server root@10.77.0.1:/tmp/
+ssh root@10.77.0.1 'install -m 755 /tmp/island-broker /tmp/island-cli /tmp/flare-server /usr/local/bin/'
 ```
+
+`install -m 755` sets the mode the `island` user needs to run them; a copy
+made with `scp` straight into place keeps whatever the remote umask leaves.
 
 On the server, the `island` user and its settings. The root public key is
 the same 64 hex digits as everywhere else; on the laptop,
