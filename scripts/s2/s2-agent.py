@@ -16,6 +16,8 @@ Steps:
                    expect them echoed back whole (the inference-socket test)
     tcp:HOST:PORT  try a TCP connection; recorded as reached or refused
                    (the Vessel has no network, so refused is expected)
+    note:TEXT      record TEXT (the host names each start with one, so it
+                   can tell this start's report from one left before it)
 
 Each effect gets a fresh 16-byte idempotency key, so the host can tell
 which declaration reached which sender.  The agent never lists or
@@ -165,6 +167,8 @@ class Agent:
             elif name == "socket":
                 path, _, n = rest.rpartition(":")
                 self.socket_echo(path, int(n))
+            elif name == "note":
+                self.events.append({"step": "note", "text": rest})
             elif name == "tcp":
                 host, _, port = rest.rpartition(":")
                 self.tcp(host, int(port))
@@ -184,7 +188,7 @@ def main():
     args = p.parse_args()
     steps = [s for s in args.steps.split(",") if s]
     # Validate before connecting, so a typo fails before anything is declared.
-    known = {"effect", "seal", "report", "wait", "stall", "socket", "tcp"}
+    known = {"effect", "seal", "report", "wait", "stall", "socket", "tcp", "note"}
     for s in steps:
         if s.partition(":")[0] not in known:
             p.error(f"unknown step {s!r}")

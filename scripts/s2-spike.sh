@@ -189,7 +189,7 @@ cfg() {
     local a=("$@")
     while [ ${#a[@]} -lt 7 ]; do a+=(""); done
     python3 - "${a[@]}" "$SOCK" "$WORK" "$ROOTFS" "$NS" "$LANDLOCK" "$BLK_SOCK" "$MNT" <<'PY'
-import json, sys
+import json, os, sys
 out, root, subject, slot, steps, parent, promote = sys.argv[1:8]
 sock, work, rootfs, ns, landlock, blk_sock, mnt = sys.argv[8:15]
 vessel = {"namespace": ns, "subject": subject, "uid_slot": int(slot)}
@@ -200,7 +200,10 @@ else:
 if promote:
     vessel["promote"] = {"child": promote, "seal": "last"}
 rt = {"rootfs": rootfs, "host_uid_base": 200000,
-      "args": ["/usr/bin/python3", "/usr/lib/s2/s2-agent.py", "--steps", steps],
+      # The first step names this start, so the host never mistakes a report
+      # left by an earlier start, or adopted from a promoted child, for its own.
+      "args": ["/usr/bin/python3", "/usr/lib/s2/s2-agent.py", "--steps",
+               "note:" + os.path.basename(out)[:-len(".json")] + "," + steps],
       "memory_bytes": 268435456, "pids": 64}
 if landlock == "1":
     rt["landlock_shim"] = "/usr/lib/taso/landlock"
@@ -265,15 +268,29 @@ killw() {   # killw <pid>: SIGKILL a Warden, clear its container
 # last Seal): the copy is what the checks read.
 REPORTS=0
 report_of() {
-    local err=$1 n=$2 ds path copy
+    local err=$1 n=$2 ds path copy start
+    start=$(basename "$err" .err)   # the start's name, which its config names too
     for _ in $(seq $WAIT); do
         ds=$(ds_of "$err")
         if [ -n "$ds" ]; then
             path=$MNT/$ds/s2-report.json
-            if [ -f "$path" ] && [ "$(jq_ "$path" 'len(d["events"])' 2>/dev/null || echo 0)" -ge "$n" ]; then
-                REPORTS=$((REPORTS + 1))
-                copy=${err%.err}.report-$REPORTS.json
-                cp "$path" "$copy"
+            REPORTS=$((REPORTS + 1))
+            copy=${err%.err}.report-$REPORTS.json
+            # Only this start's report counts (its note), with at least n
+            # events besides the note; the copy leaves the note out.
+            if [ -f "$path" ] && python3 - "$path" "$copy" "$start" "$n" <<'PY' 2>/dev/null
+import json, sys
+path, copy, start, n = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+d = json.load(open(path))
+notes = [e for e in d["events"] if e["step"] == "note"]
+if not notes or notes[0]["text"] != start:
+    sys.exit(1)
+d["events"] = [e for e in d["events"] if e["step"] != "note"]
+if len(d["events"]) < n:
+    sys.exit(1)
+json.dump(d, open(copy, "w"), indent=1)
+PY
+            then
                 echo "$copy"; return 0
             fi
         fi
@@ -322,7 +339,7 @@ promote_and_send() {
     rm -f "$MNT/$(ds_of "$OUT/$r-prime.err")/sender-done"
     forget "$OUT/$r-prime.err"
     start "$r-prime-$tag" "$WORK/$r-prime-$tag.json"
-    report_of "$ERR" 1 >/dev/null
+    report_of "$ERR" 0 >/dev/null   # the agent is up: its report names this start
     send "$ERR" "$OUT/$r-sender-$tag.json" --apply
     go "$ERR" sender-done
     finish "$PID"
@@ -529,7 +546,7 @@ run_s() {
     cfg "$WORK/s1-prime-p.json" "s2/$STAMP/s1" s1-prime 0 "report,wait:sender-done" "" s1-child
     forget "$OUT/s1-prime.err"
     start s1-prime-p "$WORK/s1-prime-p.json"
-    report_of "$ERR" 1 >/dev/null
+    report_of "$ERR" 0 >/dev/null   # the agent is up: its report names this start
     local vessel; vessel=$(basename "$(sender_sock "$ERR")" .sock)
     isend "$ERR" "$OUT/s1-pass1.jsonl"
     local p1; p1=$(lines "$OUT/s1-pass1.jsonl")

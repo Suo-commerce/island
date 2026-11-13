@@ -142,7 +142,8 @@ def report(work, n_events=None, timeout=10):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if os.path.exists(path):
-            doc = json.load(open(path))
+            with open(path) as fh:
+                doc = json.load(fh)
             if n_events is None or len(doc["events"]) >= n_events:
                 return doc
         time.sleep(0.02)
@@ -226,6 +227,14 @@ class Flow(unittest.TestCase):
         finally:
             echo.kill()
             echo.wait()
+
+    def test_a_note_is_recorded(self):
+        s = StandIn(self.tmp)
+        p = agent(s, self.work, ["note:start-1", "effect:nem", "report"])
+        self.assertEqual(p.wait(10), 0, p.stderr.read())
+        ev = report(self.work)["events"]
+        self.assertEqual(ev[0], {"step": "note", "text": "start-1"})
+        self.assertEqual(ev[1]["result"], "Released")
 
     def test_unknown_step_fails_before_connecting(self):
         r = subprocess.run([sys.executable, os.path.join(HERE, "s2-agent.py"), "--steps", "effect:nem,dance",

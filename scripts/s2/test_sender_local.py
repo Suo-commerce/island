@@ -58,6 +58,8 @@ class Sender(unittest.TestCase):
             cli("grant", "--log", self.log, "--appender-key", k("appender"), "--root-key", k("root"),
                 "--holder", cli("public", k(who)), "--scope", "plan", "--rights", "preference")
         self.appender_key = k("appender")
+        self.broker_err = open(os.path.join(self.tmp, "broker.err"), "a")
+        self.addCleanup(self.broker_err.close)
         self.port = free_port()
         self.broker_url = f"http://127.0.0.1:{self.port}"
         self.broker = None
@@ -69,7 +71,7 @@ class Sender(unittest.TestCase):
         self.broker = subprocess.Popen(
             [os.path.join(BIN, "island-broker"), "--log", self.log, "--appender-key", self.appender_key,
              "--root", self.root, "--listen", f"127.0.0.1:{self.port}"],
-            stderr=open(os.path.join(self.tmp, "broker.err"), "a"))
+            stderr=self.broker_err)
         for _ in range(200):
             try:
                 socket.create_connection(("127.0.0.1", self.port), timeout=0.2).close()
