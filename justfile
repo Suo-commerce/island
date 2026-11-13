@@ -69,3 +69,11 @@ KEY := ".island/daily.key"
 tui:
     cargo build --locked -p flare-tui -p island-cli
     target/debug/flare-tui --client $(hostname) --key {{KEY}} --broker http://{{LISTEN}} --root $(target/debug/island-cli public {{ROOT_KEY}})
+
+# Spike S2: the agent and sender scripts against Taso's codec and a stand-in Warden (no root needed).
+s2-test:
+    python3 -m unittest scripts/s2/test_s2_field.py scripts/s2/test_s2_flow.py
+
+# Spike S2 on the server, as root: Island's agent in Taso Vessels (runs a to h). TASO names the Taso checkout.
+s2-spike TASO="/root/taso":
+    TASO={{TASO}} scripts/s2-spike.sh
