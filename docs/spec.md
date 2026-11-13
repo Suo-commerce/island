@@ -200,7 +200,7 @@ Slice 1 runs without Taso. The server is set up Taso-ready from the start so spi
 
 Taso's packs and the Island log are shipped to UpCloud's S3-compatible object storage as well as to the laptop. A VM disk's durability under power loss is the provider's promise, not something the Warden checks, so VM snapshots are a convenience only.
 
-**Vessels (slice 2).** One image, `island-agent`, built like Taso's demo agent and unpacked to `/var/lib/taso/agent-island`: Ubuntu 26.04 base, the `flare-agent` worker binary, git, coreutils, ripgrep, and the mount targets Taso expects. No keys, no tokens, no network tools. How Taso behaves, and what Island does about it:
+**Vessels (slice 2).** *Superseded by `docs/slice-2.md`, written after spike S2 ran: the prime Vessel dispatches and its forks hold, the value is `"hold"`, and the sender is `island-sender`. What follows is the plan as it stood before the spike.* One image, `island-agent`, built like Taso's demo agent and unpacked to `/var/lib/taso/agent-island`: Ubuntu 26.04 base, the `flare-agent` worker binary, git, coreutils, ripgrep, and the mount targets Taso expects. No keys, no tokens, no network tools. How Taso behaves, and what Island does about it:
 
 - **Identity by socket.** The Field socket and the sender socket are per Vessel and owned by the Warden; the agent can never list or report on actions. The island socket follows the same rule, so no request on it carries a token.
 - **One outbox.** The broker is Taso's sender, not a parallel channel: it reads released actions on the sender socket, signs them with the Vessel's key and reports outcomes back. A verse from a Vessel is an action with provider `island`.
@@ -253,6 +253,8 @@ Each step leaves something that runs. Spikes S1 to S3 start in the first days, i
 
 ## Slice 2 preview: repos as witnesses
 
+*Superseded by `docs/slice-2.md`, "Repos as witnesses". Kept as the record of the first plan.*
+
 The first item of slice 2 gives Island read access to Jarmo's repositories, so a verse can be checked against what happened in the repo, and the repo can ask for a verse. It needs no Vessels, so it can start right after slice 1 and before spike S2 finishes.
 
 **The observer.** A poller inside the broker reads each repo's branch heads with one read-only GitHub credential from AgentVault. The server has no public TCP ports, so it polls and takes no webhooks. For each new head it submits a `receipt` (tag 6): `{ repo, branch, head: [u8;20], previous: Option<[u8;20]>, commits: u32, observed_at }`. Hashes and counts only, never code or commit messages. The observer is a writer like any other: its own key, and a grant limited to `receipt` on the `repos` stream.
@@ -272,6 +274,8 @@ The first item of slice 2 gives Island read access to Jarmo's repositories, so a
 **Also in slice 2,** after spike S2: the Vessel socket for reads and inference, `access` entries, the inbox and `Proposals` paths, and Flare's agent loop ported from Pi.
 
 ## Slice 2 preview: Flare's face
+
+*Carried into `docs/slice-2.md`, "Session protocol, version 2". The six questions under "How it works" are answered by Jarmo's UX plan.*
 
 Slice 1 gives Flare a line-by-line terminal, enough to prove the path. Slice 2 gives it a face: the app or page Jarmo actually uses to run Island. It is designed with the agent loop, so the screens make room from the start for agents, sub-agents, the review loop and proposals waiting for Jarmo. It is built in two passes: first how it works, then how it looks.
 
