@@ -183,6 +183,20 @@ enum Command {
         /// Why it should have been accepted.
         why: String,
     },
+    /// Approve one released Taso effect by its request hash, as
+    /// `island-sender` prints it, or decline it with --decline. Spike S2's
+    /// stand-in for slice 2's approval kind: a preference on `plan` that
+    /// island-sender reads (island-client's `approval` module).
+    Approve {
+        #[command(flatten)]
+        writer: WriterArgs,
+        /// The request hash, 64 hex digits.
+        #[arg(value_parser = parse_hash)]
+        request: Hash,
+        /// Decline it instead: it is never sent.
+        #[arg(long)]
+        decline: bool,
+    },
     /// Serve MCP tools that write verses with one key, for a coding
     /// session. The key stays with this process, outside the session's
     /// sandbox; the session can ask for a verse and cannot read the key.
@@ -434,6 +448,26 @@ fn run(command: Command) -> Result<(), Stop> {
                 ack.seq
             );
             println!("nothing is let through; the request is counted (see `replay`)");
+            Ok(())
+        }
+        Command::Approve {
+            writer,
+            request,
+            decline,
+        } => {
+            use island_client::approval;
+            let key = if decline {
+                approval::DECLINE
+            } else {
+                approval::APPROVE
+            };
+            let body = Body::Preference(Preference {
+                key: key.to_owned(),
+                value: hex(&request),
+            });
+            let ack = write_as_key(&writer, StreamId::from(approval::STREAM), body)?;
+            let verb = if decline { "declined" } else { "approved" };
+            println!("entry {}  {verb} request {}", ack.seq, hex(&request));
             Ok(())
         }
         Command::Mcp {

@@ -74,6 +74,11 @@ tui:
 s2-test:
     python3 -m unittest scripts/s2/test_s2_field.py scripts/s2/test_s2_flow.py
 
-# Spike S2 on the server, as root: Island's agent in Taso Vessels (runs a to h). TASO names the Taso checkout.
+# Spike S2: island-sender against a real Island log and broker, with a stand-in Warden (no root needed).
+s2-sender-test:
+    cargo build --locked -p island-cli -p island-broker -p island-sender
+    python3 -m unittest scripts/s2/test_sender_local.py
+
+# Spike S2 on the server, as root: Island's agent in Taso Vessels (runs a to h, and s: island-sender). TASO names the Taso checkout.
 s2-spike TASO="/root/taso":
     TASO={{TASO}} scripts/s2-spike.sh

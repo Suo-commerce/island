@@ -16,6 +16,14 @@
 #      again: the proposals survive, the promotion adopts them once
 #   e  the child's Warden is killed between its effects and its TurnEnd:
 #      the next start withdraws them; none of them is ever promoted
+#   s  (S2.4) island-sender in place of the stand-in sender, on a
+#      throwaway Island log and broker of its own (127.0.0.1:4790): a
+#      promoted child's two effects wait until one is approved and one
+#      declined; the approved one is sent once, the declined one never;
+#      then a sender that crashes right after its sent mark, a Warden
+#      kill and a broker restart: the next pass reports the same mark
+#      (no second send), lapses the unapproved effect, and the prime
+#      gets its effect authority back
 #   f  the prime has a released Irreversible effect and its Warden is
 #      killed before a sender reports: after the restart the effect is
 #      listed unknown, a new effect is refused (no effect authority), and
@@ -46,11 +54,12 @@ set -euo pipefail
 trap 'echo "STOPPED at line $LINENO (exit $?)" >&2' ERR
 
 TASO=${TASO:-/root/taso}
-ONLY=${ONLY:-a b c d e f}
+ONLY=${ONLY:-a b c d e f s}
 LANDLOCK=${LANDLOCK:-1}
 KEEP=${KEEP:-0}
 OUT=${OUT:-/root/island-s2-$(date +%Y%m%d-%H%M%S)}
 S2=$(cd "$(dirname "$0")/s2" && pwd)
+ISLAND=$(cd "$(dirname "$0")/.." && pwd)
 WAIT=1200   # tenths of a second: how long to wait for a Warden or an agent
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
@@ -59,13 +68,19 @@ for t in runc ldd python3 cargo mountpoint; do
 done
 [ -f "$TASO/Cargo.toml" ] || { echo "no Taso checkout at $TASO (set TASO)" >&2; exit 2; }
 for r in $ONLY; do
-    case $r in a|b|c|d|e|f) ;; *) echo "ONLY: unknown run $r (a b c d e f; b also does g and h)" >&2; exit 2 ;; esac
+    case $r in a|b|c|d|e|f|s) ;; *) echo "ONLY: unknown run $r (a b c d e f s; b also does g and h)" >&2; exit 2 ;; esac
 done
 
 echo "== building Taso (release) in $TASO at $(git -C "$TASO" log -1 --format='%h %s' 2>/dev/null || echo '?')"
 (cd "$TASO" && cargo build --release -q -p taso-warden -p taso-landlock \
     && cargo build --release -q -p taso-blk --bin taso-blkd)
 BIN=$TASO/target/release
+case " $ONLY " in *" s "*)
+    echo "== building island-cli, island-broker, island-sender (release) in $ISLAND"
+    (cd "$ISLAND" && cargo build --release -q --locked -p island-cli -p island-broker -p island-sender)
+    ;;
+esac
+IBIN=$ISLAND/target/release
 modprobe ublk_drv
 [ -c /dev/ublk-control ] || { echo "/dev/ublk-control missing (ublk_drv)" >&2; exit 2; }
 
@@ -452,6 +467,127 @@ run_f() {
     check f "the sender lists only the new effect" "$(open_keys "$OUT/f-sender-apply.json" before)" "$(keys "$rep" Released)"
     go "$ERR" finished
     finish "$PID"
+}
+
+
+# ── s: island-sender (S2.4), on a throwaway Island log and broker ──────
+ISL_PORT=4790
+island_up() {   # the broker on the throwaway log
+    "$IBIN/island-broker" --log "$ISL/island.log" --appender-key "$ISL/appender.key" \
+        --root "$ISL_ROOT" --listen "127.0.0.1:$ISL_PORT" >>"$OUT/island-broker.out" 2>&1 &
+    ISL_BROKER=$!
+    BG_PIDS+=("$ISL_BROKER")
+    for _ in $(seq 100); do (exec 3<>"/dev/tcp/127.0.0.1/$ISL_PORT") 2>/dev/null && return 0; sleep 0.1; done
+    echo "the throwaway broker did not start; see $OUT/island-broker.out" >&2; return 1
+}
+island_down() { kill "$ISL_BROKER" 2>/dev/null || true; wait "$ISL_BROKER" 2>/dev/null || true; }
+island_setup() {
+    ISL=$WORK/island
+    mkdir -p "$ISL"
+    local who
+    for who in root appender approver sender; do "$IBIN/island-cli" keygen "$ISL/$who.key" >/dev/null; done
+    ISL_ROOT=$("$IBIN/island-cli" public "$ISL/root.key")
+    ISL_APPROVER=$("$IBIN/island-cli" public "$ISL/approver.key")
+    "$IBIN/island-cli" init --log "$ISL/island.log" --appender-key "$ISL/appender.key" \
+        --root-key "$ISL/root.key" >"$OUT/island-init.out"
+    for who in approver sender; do
+        "$IBIN/island-cli" grant --log "$ISL/island.log" --appender-key "$ISL/appender.key" \
+            --root-key "$ISL/root.key" --holder "$("$IBIN/island-cli" public "$ISL/$who.key")" \
+            --scope plan --rights preference >>"$OUT/island-init.out"
+    done
+    island_up
+    note s "throwaway Island log $ISL/island.log, broker 127.0.0.1:$ISL_PORT"
+}
+
+# isend <err> <out> [options]: one island-sender pass; sets ISEND_CODE
+isend() {
+    local err=$1 out=$2 s; shift 2
+    s=$(sender_sock "$err")
+    ISEND_CODE=0
+    "$IBIN/island-sender" --socket "$s" --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" \
+        --key "$ISL/sender.key" --approver "$ISL_APPROVER" --once --wait 120 "$@" \
+        >"$out" 2>"$out.err" || ISEND_CODE=$?
+}
+lines() { python3 -c 'import json, sys; print(json.dumps([json.loads(l) for l in open(sys.argv[1]) if l.strip()]))' "$1" > "$1.json"; echo "$1.json"; }
+iapprove() {   # iapprove <hash> [--decline]
+    "$IBIN/island-cli" approve --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" \
+        --key "$ISL/approver.key" "$@" >>"$OUT/island-approve.out"
+}
+sent_marks() {   # sent_marks <vessel-id>: how many sent marks name this Vessel
+    "$IBIN/island-cli" tail --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" -n 500 \
+        | grep -c "\"sent\" = \"$1 " || true
+}
+
+run_s() {
+    echo "-- s: island-sender: approvals, a crash after a send, the lapse rule"
+    island_setup
+
+    # s1: a promoted child's two effects; one approved, one declined
+    prime_seal s1
+    cfg "$WORK/s1-child.json" "s2/$STAMP/s1" s1-child 1 "effect:irr,effect:irr,seal,report" s1-prime
+    run s1-child "$WORK/s1-child.json"
+    cfg "$WORK/s1-prime-p.json" "s2/$STAMP/s1" s1-prime 0 "report,wait:sender-done" "" s1-child
+    forget "$OUT/s1-prime.err"
+    start s1-prime-p "$WORK/s1-prime-p.json"
+    report_of "$ERR" 1 >/dev/null
+    local vessel; vessel=$(basename "$(sender_sock "$ERR")" .sock)
+    isend "$ERR" "$OUT/s1-pass1.jsonl"
+    local p1; p1=$(lines "$OUT/s1-pass1.jsonl")
+    check s "nothing approved: both promoted effects wait" "$(jq_ "$p1" "[x['action'] for x in d]")" '["wait", "wait"]'
+    iapprove "$(jq_ "$p1" "d[0]['request_hash']")"
+    iapprove "$(jq_ "$p1" "d[1]['request_hash']")" --decline
+    isend "$ERR" "$OUT/s1-pass2.jsonl"
+    local p2; p2=$(lines "$OUT/s1-pass2.jsonl")
+    check s "the approved one is sent, the declined one is not" \
+        "$(jq_ "$p2" "[(x['action'], x.get('reported')) for x in d]")" '[["send", true], ["decline", true]]'
+    isend "$ERR" "$OUT/s1-pass3.jsonl"
+    check s "nothing is left to send" "$(grep -c . "$OUT/s1-pass3.jsonl" || true)" 0
+    go "$ERR" sender-done
+    finish "$PID"
+    check s "the log has one sent mark for this Vessel" "$(sent_marks "$vessel")" 1
+
+    # s2: crash after the sent mark, then a Warden kill and a broker restart
+    cfg "$WORK/s2-prime-1.json" "s2/$STAMP/s2" s2-prime 0 "effect:irr,effect:irr,seal,report,wait:never"
+    start s2-prime-1 "$WORK/s2-prime-1.json"
+    report_of "$ERR" 3 >/dev/null
+    vessel=$(basename "$(sender_sock "$ERR")" .sock)
+    isend "$ERR" "$OUT/s2-pass1.jsonl"
+    p1=$(lines "$OUT/s2-pass1.jsonl")
+    iapprove "$(jq_ "$p1" "d[0]['request_hash']")"
+    isend "$ERR" "$OUT/s2-crash.jsonl" --stop-after-send
+    local crash; crash=$(lines "$OUT/s2-crash.jsonl")
+    check s "the sender stops after its sent mark, before reporting" \
+        "$ISEND_CODE $(jq_ "$crash" "[(x['action'], x.get('stopped_before_report')) for x in d]")" '3 [["send", true]]'
+    killw "$PID"
+    forget "$ERR"
+    island_down
+    island_up
+    note s "Warden killed and broker restarted after the sent mark"
+    cfg "$WORK/s2-prime-2.json" "s2/$STAMP/s2" s2-prime 0 \
+        "effect:nem,report,wait:resumed,effect:nem,seal,report,wait:finished"
+    start s2-prime-2 "$WORK/s2-prime-2.json"
+    local rep; rep=$(report_of "$ERR" 1)
+    check s "after the kill a new effect is refused: no effect authority" \
+        "$(jq_ "$rep" "d['events'][0]['result'] + ': ' + d['events'][0].get('reason', '')[:19]")" \
+        "Refused: no effect authority"
+    isend "$ERR" "$OUT/s2-pass2.jsonl"
+    p2=$(lines "$OUT/s2-pass2.jsonl")
+    check s "the sent one is reported from its mark, the unapproved one lapses" \
+        "$(jq_ "$p2" "[(x['action'], x['unknown'], x.get('reported')) for x in d]")" \
+        '[["already-sent", true, true], ["lapse", true, true]]'
+    check s "the same mark as before the crash: no second send" \
+        "$(jq_ "$p2" "d[0].get('sent_at')")" "$(jq_ "$crash" "d[0]['sent_at']")"
+    go "$ERR" resumed
+    rep=$(report_of "$ERR" 4)
+    check s "effect authority is back: the next effect is released" \
+        "$(jq_ "$rep" "[e['result'] for e in d['events'] if e['step'] == 'effect']")" '["Refused", "Released"]'
+    isend "$ERR" "$OUT/s2-pass3.jsonl"
+    p2=$(lines "$OUT/s2-pass3.jsonl")
+    check s "the new, unapproved effect waits" "$(jq_ "$p2" "[x['action'] for x in d]")" '["wait"]'
+    go "$ERR" finished
+    finish "$PID"
+    check s "still one sent mark for this Vessel" "$(sent_marks "$vessel")" 1
+    island_down
 }
 
 for r in $ONLY; do "run_$r"; done

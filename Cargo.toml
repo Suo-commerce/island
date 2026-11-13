@@ -24,6 +24,7 @@ island-gate = { path = "crates/island-gate" }
 island-harness = { path = "crates/island-harness" }
 island-log = { path = "crates/island-log" }
 island-model = { path = "crates/island-model" }
+island-sender = { path = "crates/island-sender" }
 flare-core = { path = "crates/flare-core" }
 flare-link = { path = "crates/flare-link" }
 flare-server = { path = "crates/flare-server" }
@@ -32,7 +33,10 @@ flare-tui = { path = "crates/flare-tui" }
 # taso-core gives the canonical encoding (docs/spec.md, "Record formats").
 # Pinned to a commit of Taso main; moved by hand, with the golden vectors
 # re-checked in the same commit.
-taso-core = { git = "https://github.com/Suo-commerce/taso", rev = "0e7fed6866c72ff7a3aa5b3ceb759418157a3964" }
+taso-core = { git = "https://github.com/Suo-commerce/taso", rev = "c031ee5c30e05fd1f042ad4bd25fcf5b412da374" }
+# taso-field gives the Field protocol island-sender speaks on a Vessel's
+# sender socket (S2 plan, decision D2). Same commit as taso-core.
+taso-field = { git = "https://github.com/Suo-commerce/taso", rev = "c031ee5c30e05fd1f042ad4bd25fcf5b412da374" }
 blake3 = "1.8"
 ed25519-dalek = "3"
 proptest = "1.12"

@@ -1086,6 +1086,7 @@ name = "island-client"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "blake3",
  "island-core",
  "proptest",
  "reqwest",
@@ -1152,6 +1153,21 @@ name = "island-model"
 version = "0.0.0"
 dependencies = [
  "island-core",
+]
+
+[[package]]
+name = "island-sender"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "island-client",
+ "island-core",
+ "island-env",
+ "island-log",
+ "serde_json",
+ "taso-core",
+ "taso-field",
+ "tokio",
 ]
 
 [[package]]
@@ -1833,9 +1849,17 @@ dependencies = [
 [[package]]
 name = "taso-core"
 version = "0.1.0"
-source = "git+https://github.com/Suo-commerce/taso?rev=0e7fed6866c72ff7a3aa5b3ceb759418157a3964#0e7fed6866c72ff7a3aa5b3ceb759418157a3964"
+source = "git+https://github.com/Suo-commerce/taso?rev=c031ee5c30e05fd1f042ad4bd25fcf5b412da374#c031ee5c30e05fd1f042ad4bd25fcf5b412da374"
 dependencies = [
  "blake3",
+]
+
+[[package]]
+name = "taso-field"
+version = "0.1.0"
+source = "git+https://github.com/Suo-commerce/taso?rev=c031ee5c30e05fd1f042ad4bd25fcf5b412da374#c031ee5c30e05fd1f042ad4bd25fcf5b412da374"
+dependencies = [
+ "taso-core",
 ]
 
 [[package]]
