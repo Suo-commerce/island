@@ -20,7 +20,7 @@
 #      throwaway Island log and broker of its own (127.0.0.1:4790): a
 #      promoted child's two effects wait until one is approved and one
 #      declined; the approved one is sent once, the declined one never;
-#      then a sender that crashes right after its sent mark, a Warden
+#      then a sender that crashes right after its dispatch, a Warden
 #      kill and a broker restart: the next pass reports the same mark
 #      (no second send), lapses the unapproved effect, and the prime
 #      gets its effect authority back
@@ -504,13 +504,14 @@ island_setup() {
     local who
     for who in root appender approver sender; do "$IBIN/island-cli" keygen "$ISL/$who.key" >/dev/null; done
     ISL_ROOT=$("$IBIN/island-cli" public "$ISL/root.key")
-    ISL_APPROVER=$("$IBIN/island-cli" public "$ISL/approver.key")
     "$IBIN/island-cli" init --log "$ISL/island.log" --appender-key "$ISL/appender.key" \
         --root-key "$ISL/root.key" >"$OUT/island-init.out"
-    for who in approver sender; do
+    local right
+    for who in approver:approval sender:dispatch; do
+        right=${who#*:} who=${who%%:*}
         "$IBIN/island-cli" grant --log "$ISL/island.log" --appender-key "$ISL/appender.key" \
             --root-key "$ISL/root.key" --holder "$("$IBIN/island-cli" public "$ISL/$who.key")" \
-            --scope plan --rights preference >>"$OUT/island-init.out"
+            --scope approvals --rights "$right" >>"$OUT/island-init.out"
     done
     island_up
     note s "throwaway Island log $ISL/island.log, broker 127.0.0.1:$ISL_PORT"
@@ -522,7 +523,7 @@ isend() {
     s=$(sender_sock "$err")
     ISEND_CODE=0
     "$IBIN/island-sender" --socket "$s" --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" \
-        --key "$ISL/sender.key" --approver "$ISL_APPROVER" --once --wait 120 "$@" \
+        --key "$ISL/sender.key" --once --wait 120 "$@" \
         >"$out" 2>"$out.err" || ISEND_CODE=$?
 }
 lines() { python3 -c 'import json, sys; print(json.dumps([json.loads(l) for l in open(sys.argv[1]) if l.strip()]))' "$1" > "$1.json"; echo "$1.json"; }
@@ -530,9 +531,9 @@ iapprove() {   # iapprove <hash> [--decline]
     "$IBIN/island-cli" approve --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" \
         --key "$ISL/approver.key" "$@" >>"$OUT/island-approve.out"
 }
-sent_marks() {   # sent_marks <vessel-id>: how many sent marks name this Vessel
+sent_marks() {   # sent_marks <vessel-id>: how many dispatch entries name this Vessel
     "$IBIN/island-cli" tail --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" -n 500 \
-        | grep -c "\"sent\" = \"$1 " || true
+        | grep -c " dispatch .* vessel $1 op " || true
 }
 
 run_s() {
@@ -561,9 +562,9 @@ run_s() {
     check s "nothing is left to send" "$(grep -c . "$OUT/s1-pass3.jsonl" || true)" 0
     go "$ERR" sender-done
     finish "$PID"
-    check s "the log has one sent mark for this Vessel" "$(sent_marks "$vessel")" 1
+    check s "the log has one dispatch for this Vessel" "$(sent_marks "$vessel")" 1
 
-    # s2: crash after the sent mark, then a Warden kill and a broker restart
+    # s2: crash after the dispatch, then a Warden kill and a broker restart
     cfg "$WORK/s2-prime-1.json" "s2/$STAMP/s2" s2-prime 0 "effect:irr,effect:irr,seal,report,wait:never"
     start s2-prime-1 "$WORK/s2-prime-1.json"
     report_of "$ERR" 3 >/dev/null
@@ -573,13 +574,13 @@ run_s() {
     iapprove "$(jq_ "$p1" "d[0]['request_hash']")"
     isend "$ERR" "$OUT/s2-crash.jsonl" --stop-after-send
     local crash; crash=$(lines "$OUT/s2-crash.jsonl")
-    check s "the sender stops after its sent mark, before reporting" \
+    check s "the sender stops after its dispatch, before reporting" \
         "$ISEND_CODE $(jq_ "$crash" "[(x['action'], x.get('stopped_before_report')) for x in d]")" '3 [["send", true]]'
     killw "$PID"
     forget "$ERR"
     island_down
     island_up
-    note s "Warden killed and broker restarted after the sent mark"
+    note s "Warden killed and broker restarted after the dispatch"
     cfg "$WORK/s2-prime-2.json" "s2/$STAMP/s2" s2-prime 0 \
         "effect:nem,report,wait:resumed,effect:nem,seal,report,wait:finished"
     start s2-prime-2 "$WORK/s2-prime-2.json"
@@ -589,7 +590,7 @@ run_s() {
         "Refused: no effect authority"
     isend "$ERR" "$OUT/s2-pass2.jsonl"
     p2=$(lines "$OUT/s2-pass2.jsonl")
-    check s "the sent one is reported from its mark, the unapproved one lapses" \
+    check s "the sent one is reported from its dispatch, the unapproved one lapses" \
         "$(jq_ "$p2" "[(x['action'], x['unknown'], x.get('reported')) for x in d]")" \
         '[["already-sent", true, true], ["lapse", true, true]]'
     check s "the same mark as before the crash: no second send" \
@@ -603,7 +604,7 @@ run_s() {
     check s "the new, unapproved effect waits" "$(jq_ "$p2" "[x['action'] for x in d]")" '["wait"]'
     go "$ERR" finished
     finish "$PID"
-    check s "still one sent mark for this Vessel" "$(sent_marks "$vessel")" 1
+    check s "still one dispatch for this Vessel" "$(sent_marks "$vessel")" 1
     island_down
 }
 

@@ -199,13 +199,17 @@ An action is a Taso effect: provider, exact request bytes, a key, a consequence.
 
 Both are declared `Irreversible`: said is said, and a log entry stays.
 
-**The order of decisions** for a released action, unchanged from S2 (`island-client`'s `approval` module), per provider:
+**The order of decisions** for a released action (`island-client`'s `approval` module), per provider:
 
 1. Already dispatched, this op or an earlier op of the same Vessel with the same key: report applied, send nothing.
-2. Declined: report not applied.
-3. Approved, or needing no approval: send, then report applied.
+2. Approved, or needing no approval: send, then report applied. An approval counts if no dispatch has used it and no decline of the same request came after it.
+3. Declined, with no approval after the decline: report not applied.
 4. Unapproved and its outcome was lost in a Warden restart: report not applied, "lapsed". The agent is told on its next `Result` and proposes it again; an approval given later still counts, because it names the request, not the attempt.
 5. Otherwise: leave it waiting. Nothing expires on its own: Jarmo declines what he does not want, and the cap of 16 waiting actions keeps the list short.
+
+**The gate holds the same rule** (built in step 1). A `dispatch` is accepted only if, checked in this order: the same Vessel has not dispatched the same key (`AlreadyDispatched`); the entry it names is an `approval` that approves the same request (`Unapproved`); no earlier dispatch used that approval (`ApprovalUsed`); no decline of the request comes after that approval (`Declined`). A refusal is a `verdict` like any other. This differs from S2 in one place: a decline no longer stops the request forever, only the approvals before it, so Jarmo can change his mind by approving again. The rule is a structural rule of the log, as grants are, not an invariant of the policy: no policy can loosen it.
+
+**An action's key** is `blake3_derive_key("island.effect-key.v1", key)`, where `key` is the effect's idempotency key when its provider deduplicates by one, and otherwise `taso-op:<op>`, since Taso never reuses an op within a Vessel.
 
 **Sending a verse once.** The sender first appends a `dispatch` entry naming the Vessel, the op, the action's key, the approval it consumes and the counter the Vessel's key will use. Only then does it submit the verse with that counter. A sender that dies between the two finds its `dispatch` entry next time and submits the same bytes again; the log's counter rule answers an exact resend with the first answer. A verse the gate refuses is reported not applied with the `verdict`'s position.
 
@@ -235,7 +239,9 @@ Four kinds join the eight of slice 1. Encoding, hashing and signatures are uncha
 
 **The S2 stand-in ends.** S2 wrote approvals as `preference` entries on `plan`, and only on throwaway logs. Once the kinds exist, `island-cli approve` writes an `approval` and the sender reads nothing else. An approver is whoever the log's grants let write one, so the sender's `--approver` option goes.
 
-**Replay** stays pure: a receipt, an approval and a dispatch are judged from the state alone. State gains the receipts (repo, branch, head), the approvals not yet consumed and the dispatches.
+**Replay** stays pure: a receipt, an approval and a dispatch are judged from the state alone. State gains the approvals (each with the dispatch that used it), the newest decline per request, and the (Vessel, key) pairs dispatched; its hash domain becomes `island.state.v2`. The receipts join the state in step 7, with the invariant that reads them. Note there that a receipt's `head` is a 20-byte commit id while a verse's refs are 32-byte hashes: `ArtefactRefHasReceipt` needs a stated mapping between them.
+
+**Logs from before step 1.** `repos`, `access` and `approvals` are system streams now, holding only their own kinds. A log that already holds a verse or a preference on a stream of one of those names no longer replays. The real log has none; the S2 throwaway logs wrote their marks on `plan` and are not kept.
 
 ## Session protocol, version 2
 
@@ -294,7 +300,8 @@ On the server, once, as `docs/server.md` will list step by step:
 **In `just test`,** deterministic as in slice 1:
 
 - `island-model` gains the four kinds and the approval-and-dispatch rule in a few dozen lines.
-- A generator of sender histories: actions released, approvals and declines in any order and number, sender deaths at every step (before the `dispatch`, between it and the verse, before the report), Warden restarts that mark actions unknown, turns redone with the same keys.
+- The log harness (built in step 1) generates approvals, declines and dispatches by the two writers granted them; oracle 8 checks from the stored entries alone that every accepted dispatch names an unused approval of its request with no later decline, and that no (Vessel, key) is dispatched twice. Coverage requires each of the four refusals.
+- A generator of sender histories (step 2, with the Taso node): actions released, approvals and declines in any order and number, sender deaths at every step (before the `dispatch`, between it and the verse, before the report), Warden restarts that mark actions unknown, turns redone with the same keys.
 - Oracles: no action is sent without an approval that names it; none is sent twice; a declined one is never sent; an approval lets out one action; after any history every barrier action is settled or waiting, never lost; the model and `island-sender`'s decisions agree.
 - The agent loop runs against a scripted model (answers replayed from a file) and a stand-in Warden, so its turns, keys and restarts are tested without a GPU or Taso.
 

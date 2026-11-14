@@ -15,8 +15,9 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::record::{
-    Body, Bootstrap, Entry, Genesis, Grant, GrantId, Invariant, Kind, Policy, Preference, Record,
-    Refusal, Revoke, StreamId, Submission, Verdict, Verse,
+    Access, AccessKind, Answered, Approval, Body, Bootstrap, Dispatch, Entry, Genesis, Grant,
+    GrantId, Invariant, Kind, Policy, Preference, Receipt, Record, Refusal, Revoke, StreamId,
+    Submission, Verdict, Verse,
 };
 
 /// Why bytes are not a canonical encoding. `at` is the byte offset.
@@ -270,6 +271,10 @@ impl<'a> Reader<'a> {
         Ok(match self.tag()? {
             (_, 0) => Refusal::Invariant(self.invariant()?),
             (_, 1) => Refusal::WeakerPolicy,
+            (_, 2) => Refusal::Unapproved,
+            (_, 3) => Refusal::ApprovalUsed,
+            (_, 4) => Refusal::Declined,
+            (_, 5) => Refusal::AlreadyDispatched,
             (at, tag) => {
                 return Err(DecodeError::BadTag {
                     at,
@@ -296,6 +301,38 @@ impl<'a> Reader<'a> {
             rights: self.set("rights", Self::kind)?,
             narrows: self.option(Self::grant_id)?,
         })
+    }
+
+    /// An [`AccessKind`].
+    pub fn access_kind(&mut self) -> R<AccessKind> {
+        let (at, tag) = self.tag()?;
+        AccessKind::from_u8(tag).ok_or(DecodeError::BadTag {
+            at,
+            what: "access kind",
+            tag,
+        })
+    }
+
+    /// An [`Answered`].
+    pub fn answered(&mut self) -> R<Answered> {
+        let (at, tag) = self.tag()?;
+        Answered::from_u8(tag).ok_or(DecodeError::BadTag {
+            at,
+            what: "approval verdict",
+            tag,
+        })
+    }
+
+    /// An approval's proof: always none until spike S3 gives it a form.
+    fn proof(&mut self) -> R<Option<crate::record::Proof>> {
+        match self.tag()? {
+            (_, 0) => Ok(None),
+            (at, tag) => Err(DecodeError::BadTag {
+                at,
+                what: "approval proof",
+                tag,
+            }),
+        }
     }
 
     /// The fields of a body of the given kind. `nested` is true inside a
@@ -330,6 +367,36 @@ impl<'a> Reader<'a> {
                 rejected: Box::new(self.submission_at(true)?),
                 sig_writer: self.fixed()?,
                 reason: self.refusal()?,
+            }),
+            Kind::Receipt => Body::Receipt(Receipt {
+                repo: self.string()?,
+                branch: self.string()?,
+                head: self.fixed()?,
+                previous: self.option(Self::fixed)?,
+                commits: self.u32()?,
+                observed_at: self.u64()?,
+            }),
+            Kind::Access => Body::Access(Access {
+                vessel: self.fixed()?,
+                what: self.access_kind()?,
+                provider: self.string()?,
+                calls: self.u32()?,
+                bytes_in: self.u64()?,
+                bytes_out: self.u64()?,
+                digest: self.fixed()?,
+            }),
+            Kind::Approval => Body::Approval(Approval {
+                request: self.fixed()?,
+                verdict: self.answered()?,
+                proof: self.proof()?,
+            }),
+            Kind::Dispatch => Body::Dispatch(Dispatch {
+                vessel: self.fixed()?,
+                op: self.u64()?,
+                key: self.fixed()?,
+                request: self.fixed()?,
+                approval: self.u64()?,
+                counter: self.u64()?,
             }),
             Kind::Genesis => Body::Genesis(Genesis {
                 root: self.fixed()?,

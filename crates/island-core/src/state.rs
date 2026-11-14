@@ -8,14 +8,17 @@
 //! the same records are compared, so the encoding only has to be
 //! canonical, not decodable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use taso_core::canon::{Canon, Canonical};
 
-use crate::record::{Grant, GrantId, Hash, Policy, PublicKey, Refusal, StreamId};
+use crate::record::{
+    Answered, Grant, GrantId, Hash, Policy, PublicKey, Refusal, StreamId, VesselId,
+};
 
-/// Domain string for the state hash.
-pub const STATE_DOMAIN: &str = "island.state.v1";
+/// Domain string for the state hash. `v2` from slice 2: the state holds
+/// approvals and dispatches.
+pub const STATE_DOMAIN: &str = "island.state.v2";
 
 /// What is known about one stream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -153,6 +156,27 @@ impl Canonical for Held {
     }
 }
 
+/// An approval as the log knows it: what it answered, and the dispatch
+/// that used it, if one has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Given {
+    /// The request hash it answers.
+    pub request: Hash,
+    /// The answer.
+    pub verdict: Answered,
+    /// The `seq` of the dispatch that consumed it; `None` while unused.
+    /// Only an `approve` is ever consumed.
+    pub used_by: Option<u64>,
+}
+
+impl Canonical for Given {
+    fn canon(&self, out: &mut Canon) {
+        out.fixed(&self.request);
+        self.verdict.canon(out);
+        out.option(self.used_by.as_ref());
+    }
+}
+
 /// Everything judging a new write may depend on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct State {
@@ -165,6 +189,46 @@ pub struct State {
     /// The policy in force: the newest `policy` entry's body, or the empty
     /// policy before the first one.
     pub policy: Policy,
+    /// Every approval and decline, by the `seq` of its entry.
+    pub approvals: BTreeMap<u64, Given>,
+    /// Per request hash, the `seq` of its newest decline.
+    pub declined: BTreeMap<Hash, u64>,
+    /// Every action dispatched, by Vessel and key.
+    pub dispatched: BTreeSet<(VesselId, Hash)>,
+}
+
+impl State {
+    /// Why the gate refuses a dispatch of `vessel`'s action `key` with
+    /// request `request`, consuming the approval at `approval`; `None` if
+    /// it lets it out. The order is the rule: an action already out is
+    /// out; then the approval must answer this request with `approve`,
+    /// be unused, and no decline of the request may have come after it.
+    pub fn dispatch_refusal(
+        &self,
+        vessel: &VesselId,
+        key: &Hash,
+        request: &Hash,
+        approval: u64,
+    ) -> Option<Refusal> {
+        if self.dispatched.contains(&(*vessel, *key)) {
+            return Some(Refusal::AlreadyDispatched);
+        }
+        let given = match self.approvals.get(&approval) {
+            Some(given) if given.verdict == Answered::Approve && &given.request == request => given,
+            _ => return Some(Refusal::Unapproved),
+        };
+        if given.used_by.is_some() {
+            return Some(Refusal::ApprovalUsed);
+        }
+        if self
+            .declined
+            .get(request)
+            .is_some_and(|decline| *decline > approval)
+        {
+            return Some(Refusal::Declined);
+        }
+        None
+    }
 }
 
 impl Canonical for State {
@@ -173,6 +237,15 @@ impl Canonical for State {
         self.grants.canon(out);
         self.writers.canon(out);
         self.policy.canon(out);
+        self.approvals.canon(out);
+        self.declined.canon(out);
+        // A set of pairs, in the set's order: the count, then each pair's
+        // two fixed-width halves.
+        out.u64(self.dispatched.len() as u64);
+        for (vessel, key) in &self.dispatched {
+            out.fixed(vessel);
+            out.fixed(key);
+        }
     }
 }
 

@@ -16,6 +16,11 @@
 //! Invariants judge new writes only, so tightening never invalidates what
 //! is already in the log.
 //!
+//! One rule is not a policy and is never loosened: a `dispatch` lets out
+//! only an action an approver approved, once ([`State::dispatch_refusal`],
+//! docs/slice-2.md, "Actions and the sender"). It reads the state the log
+//! has replayed to, so replay judges every dispatch again.
+//!
 //! Pure, and depends on `island-core` alone: values in, values out.
 
 #![warn(missing_docs)]
@@ -27,13 +32,13 @@ use island_core::{Body, Evidence, Invariant, Policy, Refusal, State, Submission,
 /// - A verse must hold every invariant. The first one that does not, in
 ///   the policy's own order, is the refusal.
 /// - A `policy` entry must strengthen the policy in force.
+/// - A `dispatch` must name an unused approval of its request that no
+///   later decline overrides, for an action not dispatched before.
 /// - Every other kind passes: authority has already decided who may write
 ///   it.
 ///
-/// `state` is what the log has replayed to before this write. No slice 1
-/// invariant reads it; it is here because slice 2's will (a verse that
-/// names a commit needs the receipt for it).
-pub fn judge(_state: &State, policy: &Policy, submission: &Submission) -> Result<(), Refusal> {
+/// `state` is what the log has replayed to before this write.
+pub fn judge(state: &State, policy: &Policy, submission: &Submission) -> Result<(), Refusal> {
     match &submission.body {
         Body::Verse(verse) => match policy
             .invariants
@@ -50,6 +55,15 @@ pub fn judge(_state: &State, policy: &Policy, submission: &Submission) -> Result
                 Err(Refusal::WeakerPolicy)
             }
         }
+        Body::Dispatch(dispatch) => match state.dispatch_refusal(
+            &dispatch.vessel,
+            &dispatch.key,
+            &dispatch.request,
+            dispatch.approval,
+        ) {
+            Some(refusal) => Err(refusal),
+            None => Ok(()),
+        },
         _ => Ok(()),
     }
 }

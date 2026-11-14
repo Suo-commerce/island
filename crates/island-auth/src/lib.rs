@@ -20,9 +20,10 @@
 //! able to grant. The appender's grant can be neither narrowed nor
 //! revoked: its holder is the key every entry's seal is checked against.
 //!
-//! In slice 1 only the root capability carries the right to write grants.
-//! An ordinary grant may carry `policy`, `verse` and `preference`, nothing
-//! else, so nobody but root can ever grant.
+//! Only the root capability carries the right to write grants. An
+//! ordinary grant may carry `policy`, `verse`, `preference`, and from
+//! slice 2 `receipt`, `access`, `approval` and `dispatch`; nothing else,
+//! so nobody but root can ever grant.
 //!
 //! Pure: values in, values out.
 
@@ -35,7 +36,15 @@ use island_core::{
 };
 
 /// The kinds an ordinary grant may carry.
-pub const GRANTABLE: [Kind; 3] = [Kind::Policy, Kind::Verse, Kind::Preference];
+pub const GRANTABLE: [Kind; 7] = [
+    Kind::Policy,
+    Kind::Verse,
+    Kind::Preference,
+    Kind::Receipt,
+    Kind::Access,
+    Kind::Approval,
+    Kind::Dispatch,
+];
 
 /// Why authority says no. Nothing is written to the log for any of these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

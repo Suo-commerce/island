@@ -24,9 +24,12 @@ pub mod state;
 pub use decode::{DecodeError, Reader};
 pub use hash::{ENTRY_DOMAIN, SUBMISSION_DOMAIN, entry_hash, sub_hash};
 pub use record::{
-    Body, Bootstrap, Entry, Evidence, Genesis, Grant, GrantId, Hash, Invariant, Kind, Policy,
-    Preference, PublicKey, Record, Refusal, Revoke, Signature, StreamId, Submission, Verdict,
-    Verse,
+    Access, AccessKind, Answered, Approval, Body, Bootstrap, CommitId, Dispatch, EFFECT_KEY_DOMAIN,
+    Entry, Evidence, Genesis, Grant, GrantId, Hash, Invariant, Kind, Policy, Preference, Proof,
+    PublicKey, REQUEST_DOMAIN, Receipt, Record, Refusal, Revoke, Signature, StreamId, Submission,
+    Verdict, Verse, VesselId, effect_key, request_hash,
 };
 pub use sign::{BadSignature, SigningKey, VerifyError, public_key, sign_hash, verify_hash};
-pub use state::{Answer, Ended, Held, Last, Role, STATE_DOMAIN, State, StreamState, state_hash};
+pub use state::{
+    Answer, Ended, Given, Held, Last, Role, STATE_DOMAIN, State, StreamState, state_hash,
+};

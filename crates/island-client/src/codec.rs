@@ -108,7 +108,7 @@ pub fn parse_records(records: &Records) -> Result<Vec<Record>, Malformed> {
 }
 
 /// Every kind, with its name on the wire and on the command line.
-const KINDS: [(Kind, &str); 8] = [
+const KINDS: [(Kind, &str); 12] = [
     (Kind::Policy, "policy"),
     (Kind::Grant, "grant"),
     (Kind::Revoke, "revoke"),
@@ -117,6 +117,10 @@ const KINDS: [(Kind, &str); 8] = [
     (Kind::Verdict, "verdict"),
     (Kind::Genesis, "genesis"),
     (Kind::Bootstrap, "bootstrap"),
+    (Kind::Receipt, "receipt"),
+    (Kind::Access, "access"),
+    (Kind::Approval, "approval"),
+    (Kind::Dispatch, "dispatch"),
 ];
 
 /// A kind's name.
@@ -177,6 +181,16 @@ pub fn gate_reason(reason: &island_core::Refusal) -> String {
         island_core::Refusal::Invariant(broken) => format!("it breaks {}", invariant_name(broken)),
         island_core::Refusal::WeakerPolicy => {
             "the policy would be weaker than the one in force".to_owned()
+        }
+        island_core::Refusal::Unapproved => "no approval of this request lets it out".to_owned(),
+        island_core::Refusal::ApprovalUsed => {
+            "its approval has already let an action out".to_owned()
+        }
+        island_core::Refusal::Declined => {
+            "the request was declined after it was approved".to_owned()
+        }
+        island_core::Refusal::AlreadyDispatched => {
+            "this action has already been let out".to_owned()
         }
     }
 }

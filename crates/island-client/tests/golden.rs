@@ -342,12 +342,16 @@ fn names_of_kinds_go_both_ways() {
         Kind::Verdict,
         Kind::Genesis,
         Kind::Bootstrap,
+        Kind::Receipt,
+        Kind::Access,
+        Kind::Approval,
+        Kind::Dispatch,
     ] {
         let name = codec::kind_name(kind);
         assert_eq!(name, format!("{kind:?}").to_lowercase());
         assert_eq!(codec::kind_from_name(name), Some(kind));
     }
-    assert_eq!(codec::kind_from_name("receipt"), None);
+    assert_eq!(codec::kind_from_name("claim"), None);
 }
 
 #[test]

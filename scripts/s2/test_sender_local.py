@@ -19,7 +19,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from test_s2_flow import StandIn, agent, report  # noqa: E402
+from test_s2_flow import VESSEL, StandIn, agent, report  # noqa: E402
 
 BIN = os.environ.get("ISLAND_BIN", os.path.join(HERE, "..", "..", "target", "debug"))
 PROGRAMS = ("island-cli", "island-broker", "island-sender")
@@ -54,9 +54,9 @@ class Sender(unittest.TestCase):
         self.sender_key = k("sender")
         self.log = os.path.join(self.tmp, "island.log")
         cli("init", "--log", self.log, "--appender-key", k("appender"), "--root-key", k("root"))
-        for who in ("approver", "sender"):
+        for who, right in (("approver", "approval"), ("sender", "dispatch")):
             cli("grant", "--log", self.log, "--appender-key", k("appender"), "--root-key", k("root"),
-                "--holder", cli("public", k(who)), "--scope", "plan", "--rights", "preference")
+                "--holder", cli("public", k(who)), "--scope", "approvals", "--rights", right)
         self.appender_key = k("appender")
         self.broker_err = open(os.path.join(self.tmp, "broker.err"), "a")
         self.addCleanup(self.broker_err.close)
@@ -90,7 +90,7 @@ class Sender(unittest.TestCase):
     def sender(self, standin, *extra, code=0):
         r = subprocess.run([os.path.join(BIN, "island-sender"), "--socket", standin.sender_path,
                             "--broker", self.broker_url, "--root", self.root, "--key", self.sender_key,
-                            "--approver", cli("public", self.approver_key), "--once", "--wait", "5",
+                            "--once", "--wait", "5",
                             *extra], capture_output=True, text=True)
         self.assertEqual(r.returncode, code, r.stderr)
         return [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
@@ -113,9 +113,11 @@ class Sender(unittest.TestCase):
         self.assertEqual(self.sender(s), [], "nothing is left on the Open list")
         open(os.path.join(self.work, "sender-done"), "w").close()
         self.assertEqual(p.wait(10), 0)
-        # The log holds one sent mark, for the approved op.
+        # The log holds one dispatch, for the approved op.
         tail = cli("tail", "--log", self.log, "--root", self.root, "-n", "20")
-        self.assertEqual(tail.count('"sent" = '), 1, tail)
+        self.assertEqual(tail.count(f"vessel {VESSEL} op {first[0]['op']} "), 1, tail)
+        kinds = [line.split()[2] for line in tail.splitlines() if len(line.split()) > 2]
+        self.assertEqual(kinds.count("dispatch"), 1, tail)
 
     def test_crash_after_send_does_not_send_twice_and_unapproved_lapses(self):
         s = StandIn(self.tmp)
@@ -133,7 +135,7 @@ class Sender(unittest.TestCase):
         after = self.sender(s)
         self.assertEqual([(x["op"], x["action"]) for x in after],
                          [(first[0]["op"], "already-sent"), (first[1]["op"], "lapse")])
-        self.assertEqual(after[0]["sent_at"], crashed[0]["sent_at"], "the same mark, not a second send")
+        self.assertEqual(after[0]["sent_at"], crashed[0]["sent_at"], "the same dispatch, not a second send")
         self.assertTrue(all(x["reported"] for x in after))
         self.assertTrue(s.authority, "both barriers settled: effect authority is back")
 

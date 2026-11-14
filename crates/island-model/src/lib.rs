@@ -16,14 +16,15 @@
 //! Covered: the writer's signature, the counter and retries, the genesis
 //! and bootstrap rules, which kind belongs on which stream, grants (who
 //! may write what, narrowing, revoking, the two protected grants), and the
-//! gate: the three invariants, the policy ratchet, and the verdict entry a
+//! gate: the three invariants, the policy ratchet, the rule that a
+//! dispatch lets out only an approved action once, and the verdict entry a
 //! refusal leaves.
 
 #![warn(missing_docs)]
 
 use island_core::{
-    Body, Grant, GrantId, Invariant, Kind, Policy, PublicKey, Refusal, Signature, StreamId,
-    Submission, Verdict, Verse,
+    Answered, Body, Dispatch, Grant, GrantId, Invariant, Kind, Policy, PublicKey, Refusal,
+    Signature, StreamId, Submission, Verdict, Verse,
 };
 
 /// What must happen to a submission.
@@ -269,8 +270,49 @@ impl Model {
                 .find(|invariant| breaks(verse, invariant))
                 .map(|invariant| Refusal::Invariant(*invariant)),
             Body::Policy(new) => weakens(in_force, new).then_some(Refusal::WeakerPolicy),
+            Body::Dispatch(dispatch) => self.dispatch_refusal(dispatch),
             _ => None,
         }
+    }
+
+    /// What is wrong with a dispatch, read off the log: an action of that
+    /// Vessel and key already let out; then an approval that is not an
+    /// `approve` of this very request at the position named; then one an
+    /// earlier dispatch used; then a decline of the request after it.
+    fn dispatch_refusal(&self, dispatch: &Dispatch) -> Option<Refusal> {
+        let dispatches = self.log.iter().filter_map(|entry| match &entry.body {
+            Body::Dispatch(earlier) => Some(earlier),
+            _ => None,
+        });
+        if dispatches
+            .clone()
+            .any(|earlier| earlier.vessel == dispatch.vessel && earlier.key == dispatch.key)
+        {
+            return Some(Refusal::AlreadyDispatched);
+        }
+        let named = usize::try_from(dispatch.approval)
+            .ok()
+            .and_then(|position| self.log.get(position));
+        let approves = matches!(
+            named.map(|entry| &entry.body),
+            Some(Body::Approval(approval))
+                if approval.verdict == Answered::Approve && approval.request == dispatch.request
+        );
+        if !approves {
+            return Some(Refusal::Unapproved);
+        }
+        if dispatches
+            .clone()
+            .any(|earlier| earlier.approval == dispatch.approval)
+        {
+            return Some(Refusal::ApprovalUsed);
+        }
+        let declined_later = (0u64..).zip(&self.log).any(|(seq, entry)| {
+            seq > dispatch.approval
+                && matches!(&entry.body, Body::Approval(approval)
+                    if approval.verdict == Answered::Decline && approval.request == dispatch.request)
+        });
+        declined_later.then_some(Refusal::Declined)
     }
 
     /// What must happen to `submission`, signed with `sig_writer`. Changes
@@ -491,10 +533,18 @@ fn can_grant(grant: &Grant) -> bool {
 
 /// Whether a grant carries only the kinds an ordinary grant may.
 fn only_grantable(grant: &Grant) -> bool {
-    grant
-        .rights
-        .iter()
-        .all(|kind| matches!(kind, Kind::Policy | Kind::Verse | Kind::Preference))
+    grant.rights.iter().all(|kind| {
+        matches!(
+            kind,
+            Kind::Policy
+                | Kind::Verse
+                | Kind::Preference
+                | Kind::Receipt
+                | Kind::Access
+                | Kind::Approval
+                | Kind::Dispatch
+        )
+    })
 }
 
 /// The streams of docs/spec.md's kinds table, as a table.
@@ -503,16 +553,23 @@ fn belongs_on(kind: Kind, stream: &StreamId) -> bool {
     const AUTHORITY: &[u8] = b"authority";
     const GATE: &[u8] = b"gate";
     const PLAN: &[u8] = b"plan";
+    const REPOS: &[u8] = b"repos";
+    const ACCESS: &[u8] = b"access";
+    const APPROVALS: &[u8] = b"approvals";
+    const SYSTEM: [&[u8]; 6] = [POLICY, AUTHORITY, GATE, REPOS, ACCESS, APPROVALS];
 
     let stream = stream.as_bytes();
     match kind {
         Kind::Policy => stream == POLICY,
         Kind::Grant | Kind::Revoke | Kind::Genesis | Kind::Bootstrap => stream == AUTHORITY,
         Kind::Verdict => stream == GATE,
+        Kind::Receipt => stream == REPOS,
+        Kind::Access => stream == ACCESS,
+        Kind::Approval | Kind::Dispatch => stream == APPROVALS,
         // A project: any stream that is not one of the system's.
-        Kind::Verse => ![POLICY, AUTHORITY, GATE, PLAN].contains(&stream),
+        Kind::Verse => !SYSTEM.contains(&stream) && stream != PLAN,
         // A project, or the plan.
-        Kind::Preference => ![POLICY, AUTHORITY, GATE].contains(&stream),
+        Kind::Preference => !SYSTEM.contains(&stream),
     }
 }
 

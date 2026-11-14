@@ -4,8 +4,9 @@
 use std::collections::BTreeSet;
 
 use island_core::{
-    Body, Bootstrap, DecodeError, Entry, Genesis, Grant, GrantId, Invariant, Kind, Policy,
-    Preference, Record, Refusal, Revoke, StreamId, Submission, Verdict, Verse,
+    Access, AccessKind, Answered, Approval, Body, Bootstrap, DecodeError, Dispatch, Entry, Genesis,
+    Grant, GrantId, Invariant, Kind, Policy, Preference, Receipt, Record, Refusal, Revoke,
+    StreamId, Submission, Verdict, Verse,
 };
 use proptest::collection::{btree_set, vec};
 use proptest::prelude::*;
@@ -25,6 +26,10 @@ fn kind() -> impl Strategy<Value = Kind> {
         Kind::Verdict,
         Kind::Genesis,
         Kind::Bootstrap,
+        Kind::Receipt,
+        Kind::Access,
+        Kind::Approval,
+        Kind::Dispatch,
     ])
 }
 
@@ -77,6 +82,78 @@ fn plain_body() -> impl Strategy<Value = Body> {
         (".{0,16}", ".{0,16}").prop_map(|(key, value)| Body::Preference(Preference { key, value })),
         any::<[u8; 32]>().prop_map(|root| Body::Genesis(Genesis { root })),
         vec(grant(), 0..4).prop_map(|grants| Body::Bootstrap(Bootstrap { grants })),
+        (
+            (".{0,12}", ".{0,12}"),
+            any::<[u8; 20]>(),
+            prop::option::of(any::<[u8; 20]>()),
+            any::<u32>(),
+            any::<u64>(),
+        )
+            .prop_map(|((repo, branch), head, previous, commits, observed_at)| {
+                Body::Receipt(Receipt {
+                    repo,
+                    branch,
+                    head,
+                    previous,
+                    commits,
+                    observed_at,
+                })
+            }),
+        (
+            any::<[u8; 16]>(),
+            prop::sample::select(vec![
+                AccessKind::Inference,
+                AccessKind::Read,
+                AccessKind::Task,
+                AccessKind::Note,
+            ]),
+            ".{0,12}",
+            any::<u32>(),
+            (any::<u64>(), any::<u64>()),
+            any::<[u8; 32]>(),
+        )
+            .prop_map(
+                |(vessel, what, provider, calls, (bytes_in, bytes_out), digest)| {
+                    Body::Access(Access {
+                        vessel,
+                        what,
+                        provider,
+                        calls,
+                        bytes_in,
+                        bytes_out,
+                        digest,
+                    })
+                }
+            ),
+        (any::<[u8; 32]>(), any::<bool>()).prop_map(|(request, decline)| {
+            Body::Approval(Approval {
+                request,
+                verdict: if decline {
+                    Answered::Decline
+                } else {
+                    Answered::Approve
+                },
+                proof: None,
+            })
+        }),
+        (
+            any::<[u8; 16]>(),
+            any::<u64>(),
+            any::<[u8; 32]>(),
+            any::<[u8; 32]>(),
+            any::<u64>(),
+            any::<u64>(),
+        )
+            .prop_map(|(vessel, op, key, request, approval, counter)| {
+                Body::Dispatch(Dispatch {
+                    vessel,
+                    op,
+                    key,
+                    request,
+                    approval,
+                    counter,
+                })
+            }),
     ]
 }
 
@@ -99,6 +176,10 @@ fn refusal() -> impl Strategy<Value = Refusal> {
     prop_oneof![
         invariant().prop_map(Refusal::Invariant),
         Just(Refusal::WeakerPolicy),
+        Just(Refusal::Unapproved),
+        Just(Refusal::ApprovalUsed),
+        Just(Refusal::Declined),
+        Just(Refusal::AlreadyDispatched),
     ]
 }
 
@@ -220,12 +301,12 @@ fn grant_of(scope: &[&str], rights: &[Kind]) -> Grant {
 const KIND_AT: usize = 8 + 6 + 32 + 8;
 
 #[test]
-fn reserved_and_unknown_kinds_are_refused() {
+fn unknown_kinds_are_refused() {
     let mut bytes = verse_submission(Body::Revoke(Revoke {
         grant: GrantId::new(1, 0),
     }))
     .canon_bytes();
-    for tag in [6, 7, 10, 255] {
+    for tag in [12, 13, 200, 255] {
         bytes[KIND_AT] = tag;
         assert_eq!(
             Submission::decode(&bytes),

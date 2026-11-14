@@ -37,6 +37,12 @@ impl StreamId {
     pub const GATE: &'static str = "gate";
     /// The system stream for plan-level `preference` entries.
     pub const PLAN: &'static str = "plan";
+    /// The system stream that holds `receipt` entries.
+    pub const REPOS: &'static str = "repos";
+    /// The system stream that holds `access` entries.
+    pub const ACCESS: &'static str = "access";
+    /// The system stream that holds `approval` and `dispatch` entries.
+    pub const APPROVALS: &'static str = "approvals";
 
     /// A stream id from its bytes.
     pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
@@ -64,9 +70,6 @@ impl Canonical for StreamId {
 // ── Kinds ───────────────────────────────────────────────────────────
 
 /// What a submission is. The tag is the `u8` on the wire.
-///
-/// Tags 6 (`receipt`) and 7 (`access`) are reserved for slice 2 and are
-/// refused by the decoder until then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Kind {
@@ -82,10 +85,18 @@ pub enum Kind {
     Preference = 4,
     /// A submission the gate refused, kept so replay can re-judge it.
     Verdict = 5,
+    /// A repo's branch head moved (docs/slice-2.md, "Repos as witnesses").
+    Receipt = 6,
+    /// What a Vessel took through the island socket: counts and a digest.
+    Access = 7,
     /// The root key. Entry 0 only.
     Genesis = 8,
     /// The initial grants. Entry 1 only.
     Bootstrap = 9,
+    /// An approver's answer to an action's exact request.
+    Approval = 10,
+    /// A sender's record that it lets one approved action out.
+    Dispatch = 11,
 }
 
 impl Kind {
@@ -103,8 +114,12 @@ impl Kind {
             3 => Self::Verse,
             4 => Self::Preference,
             5 => Self::Verdict,
+            6 => Self::Receipt,
+            7 => Self::Access,
             8 => Self::Genesis,
             9 => Self::Bootstrap,
+            10 => Self::Approval,
+            11 => Self::Dispatch,
             _ => return None,
         })
     }
@@ -386,6 +401,238 @@ impl Canonical for Preference {
     }
 }
 
+// ── Receipt ─────────────────────────────────────────────────────────
+
+/// A git commit id: SHA-1, 20 bytes.
+pub type CommitId = [u8; 20];
+
+/// The body of a `receipt` entry: a repo's branch head, as the observer
+/// saw it. Hashes and counts only; what the commits mean is a verse's to
+/// say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Receipt {
+    /// The repo, `owner/name`.
+    pub repo: String,
+    /// The branch.
+    pub branch: String,
+    /// The new head.
+    pub head: CommitId,
+    /// The head before, if the observer had seen one.
+    pub previous: Option<CommitId>,
+    /// How many commits lie between `previous` and `head`.
+    pub commits: u32,
+    /// When the observer saw it, in microseconds since the epoch.
+    pub observed_at: u64,
+}
+
+impl Canonical for Receipt {
+    fn canon(&self, out: &mut Canon) {
+        out.str(&self.repo);
+        out.str(&self.branch);
+        out.fixed(&self.head);
+        out.option(self.previous.as_ref());
+        out.u32(self.commits);
+        out.u64(self.observed_at);
+    }
+}
+
+// ── Access ──────────────────────────────────────────────────────────
+
+/// A Vessel's id: 16 bytes, as Taso names it.
+pub type VesselId = [u8; 16];
+
+/// What a Vessel asked the island socket for. A `u8` on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum AccessKind {
+    /// A model call.
+    Inference = 0,
+    /// A read of the log or a repo.
+    Read = 1,
+    /// A task pulled.
+    Task = 2,
+    /// A fork's note, posted or read.
+    Note = 3,
+}
+
+impl AccessKind {
+    /// The wire byte.
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// The access kind a wire byte names, if any.
+    pub const fn from_u8(byte: u8) -> Option<Self> {
+        Some(match byte {
+            0 => Self::Inference,
+            1 => Self::Read,
+            2 => Self::Task,
+            3 => Self::Note,
+            _ => return None,
+        })
+    }
+}
+
+impl Canonical for AccessKind {
+    fn canon(&self, out: &mut Canon) {
+        out.u8(self.as_u8());
+    }
+}
+
+/// The body of an `access` entry: one batch of one Vessel's requests of
+/// one kind. Never what was asked or answered, only how much, and one
+/// digest that ties the batch to the Vessel's own transcript.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Access {
+    /// The Vessel that asked.
+    pub vessel: VesselId,
+    /// What it asked for.
+    pub what: AccessKind,
+    /// The model provider that answered; empty unless `what` is inference.
+    pub provider: String,
+    /// How many requests.
+    pub calls: u32,
+    /// Bytes the Vessel sent.
+    pub bytes_in: u64,
+    /// Bytes it received.
+    pub bytes_out: u64,
+    /// One digest over the requests' own digests.
+    pub digest: Hash,
+}
+
+impl Canonical for Access {
+    fn canon(&self, out: &mut Canon) {
+        out.fixed(&self.vessel);
+        self.what.canon(out);
+        out.str(&self.provider);
+        out.u32(self.calls);
+        out.u64(self.bytes_in);
+        out.u64(self.bytes_out);
+        out.fixed(&self.digest);
+    }
+}
+
+// ── Approval and dispatch ───────────────────────────────────────────
+
+/// An approver's answer. A `u8` on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Answered {
+    /// The action may go out, once.
+    Approve = 0,
+    /// It may not.
+    Decline = 1,
+}
+
+impl Answered {
+    /// The wire byte.
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// The answer a wire byte names, if any.
+    pub const fn from_u8(byte: u8) -> Option<Self> {
+        Some(match byte {
+            0 => Self::Approve,
+            1 => Self::Decline,
+            _ => return None,
+        })
+    }
+}
+
+impl Canonical for Answered {
+    fn canon(&self, out: &mut Canon) {
+        out.u8(self.as_u8());
+    }
+}
+
+/// A proof that an approval was made on a registered passkey. It has no
+/// form yet: spike S3 decides it. Until then the only encoding of an
+/// approval's proof is "none", and the decoder refuses any other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Proof {}
+
+impl Canonical for Proof {
+    fn canon(&self, _out: &mut Canon) {
+        match *self {}
+    }
+}
+
+/// The body of an `approval` entry: an answer to one exact request,
+/// named by its hash ([`request_hash`]). An approval names the request,
+/// not the attempt, so it still counts when the same request is proposed
+/// again after a restart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approval {
+    /// The request hash.
+    pub request: Hash,
+    /// The answer.
+    pub verdict: Answered,
+    /// The passkey's proof; always `None` until spike S3.
+    pub proof: Option<Proof>,
+}
+
+impl Canonical for Approval {
+    fn canon(&self, out: &mut Canon) {
+        out.fixed(&self.request);
+        self.verdict.canon(out);
+        out.option(self.proof.as_ref());
+    }
+}
+
+/// The body of a `dispatch` entry: a sender lets one approved action of
+/// a Vessel out. The gate holds it to the approval it names
+/// (docs/slice-2.md, "Actions and the sender").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dispatch {
+    /// The Vessel whose action it is.
+    pub vessel: VesselId,
+    /// The action's op, as Taso numbered it.
+    pub op: u64,
+    /// The action's key ([`effect_key`]): the same across attempts.
+    pub key: Hash,
+    /// The request hash; the approval named must answer this one.
+    pub request: Hash,
+    /// The `seq` of the approval it consumes.
+    pub approval: u64,
+    /// The counter the Vessel's key uses for what is sent next; 0 when
+    /// nothing is submitted after the dispatch.
+    pub counter: u64,
+}
+
+impl Canonical for Dispatch {
+    fn canon(&self, out: &mut Canon) {
+        out.fixed(&self.vessel);
+        out.u64(self.op);
+        out.fixed(&self.key);
+        out.fixed(&self.request);
+        out.u64(self.approval);
+        out.u64(self.counter);
+    }
+}
+
+/// The BLAKE3 derive-key context of a request hash.
+pub const REQUEST_DOMAIN: &str = "island.effect-request.v1";
+
+/// The BLAKE3 derive-key context of an action's key.
+pub const EFFECT_KEY_DOMAIN: &str = "island.effect-key.v1";
+
+/// What an approval names: the hash of an action's provider and its exact
+/// request bytes, as the Vessel declared them to Taso.
+pub fn request_hash(provider: &str, request: &[u8]) -> Hash {
+    let mut bytes = Vec::with_capacity(8 + provider.len() + request.len());
+    bytes.extend_from_slice(&(provider.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(provider.as_bytes());
+    bytes.extend_from_slice(request);
+    blake3::derive_key(REQUEST_DOMAIN, &bytes)
+}
+
+/// An action's key as a dispatch records it: Taso's idempotency key, of
+/// whatever length the agent chose, hashed to 32 bytes.
+pub fn effect_key(raw: &[u8]) -> Hash {
+    blake3::derive_key(EFFECT_KEY_DOMAIN, raw)
+}
+
 // ── Verdict ─────────────────────────────────────────────────────────
 
 /// Why the gate refused a submission.
@@ -399,6 +646,17 @@ pub enum Refusal {
     /// Tag 1. A `policy` entry that does not strengthen the policy in
     /// force: it drops an invariant or loosens a parameter.
     WeakerPolicy,
+    /// Tag 2. A dispatch whose approval is not an earlier `approve` of the
+    /// same request.
+    Unapproved,
+    /// Tag 3. A dispatch whose approval another dispatch has used.
+    ApprovalUsed,
+    /// Tag 4. A dispatch whose request was declined after the approval it
+    /// names.
+    Declined,
+    /// Tag 5. A dispatch of an action of the same Vessel and key as an
+    /// earlier dispatch.
+    AlreadyDispatched,
 }
 
 impl Canonical for Refusal {
@@ -410,6 +668,18 @@ impl Canonical for Refusal {
             }
             Self::WeakerPolicy => {
                 out.tag(1);
+            }
+            Self::Unapproved => {
+                out.tag(2);
+            }
+            Self::ApprovalUsed => {
+                out.tag(3);
+            }
+            Self::Declined => {
+                out.tag(4);
+            }
+            Self::AlreadyDispatched => {
+                out.tag(5);
             }
         }
     }
@@ -457,10 +727,18 @@ pub enum Body {
     Preference(Preference),
     /// Tag 5.
     Verdict(Verdict),
+    /// Tag 6.
+    Receipt(Receipt),
+    /// Tag 7.
+    Access(Access),
     /// Tag 8.
     Genesis(Genesis),
     /// Tag 9.
     Bootstrap(Bootstrap),
+    /// Tag 10.
+    Approval(Approval),
+    /// Tag 11.
+    Dispatch(Dispatch),
 }
 
 impl Body {
@@ -473,8 +751,12 @@ impl Body {
             Self::Verse(_) => Kind::Verse,
             Self::Preference(_) => Kind::Preference,
             Self::Verdict(_) => Kind::Verdict,
+            Self::Receipt(_) => Kind::Receipt,
+            Self::Access(_) => Kind::Access,
             Self::Genesis(_) => Kind::Genesis,
             Self::Bootstrap(_) => Kind::Bootstrap,
+            Self::Approval(_) => Kind::Approval,
+            Self::Dispatch(_) => Kind::Dispatch,
         }
     }
 
@@ -487,8 +769,12 @@ impl Body {
             Self::Verse(body) => body.canon(out),
             Self::Preference(body) => body.canon(out),
             Self::Verdict(body) => body.canon(out),
+            Self::Receipt(body) => body.canon(out),
+            Self::Access(body) => body.canon(out),
             Self::Genesis(body) => body.canon(out),
             Self::Bootstrap(body) => body.canon(out),
+            Self::Approval(body) => body.canon(out),
+            Self::Dispatch(body) => body.canon(out),
         }
     }
 }

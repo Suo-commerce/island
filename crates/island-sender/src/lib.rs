@@ -8,16 +8,19 @@
 //! reports the outcome back to Taso. The broker stays unprivileged and
 //! the decision stays in the log; this program only carries.
 //!
-//! What sending means in the spike: the `sent` mark this program appends
-//! to the log, which is also what makes a send happen once. A real
-//! provider (a verse from a Vessel, a mail) is slice 2.
+//! What sending means so far: the `dispatch` entry this program appends
+//! to the log, naming the approval it uses. The gate accepts it only by
+//! the approval rule, and only once per action key, which is also what
+//! makes a send happen once. Real providers (a verse from a Vessel, a
+//! mail) come in later steps of slice 2 (docs/slice-2.md).
 
 #![warn(missing_docs)]
 
 use std::io::{Read, Write};
 
 use island_client::approval::{self, Decision, Marks};
-use island_core::Hash;
+use island_core::{Hash, VesselId};
+use taso_core::record::RetryPolicy;
 use taso_field::protocol::{
     OpenEffect, Outcome, ProtocolError, Reply, Request, VERSION, recv_reply, send_request,
 };
@@ -122,23 +125,39 @@ pub struct Planned {
     pub effect: OpenEffect,
     /// Its request hash: what an approval names.
     pub hash: Hash,
+    /// Its action key: what a dispatch is unique by.
+    pub key: Hash,
     /// The decision.
     pub decision: Decision,
 }
 
 /// The decision for one effect of `vessel`, from the marks so far.
-pub fn plan(marks: &Marks, vessel: &str, effect: OpenEffect) -> Planned {
+pub fn plan(marks: &Marks, vessel: &VesselId, effect: OpenEffect) -> Planned {
     let hash = approval::request_hash(&effect.provider, &effect.request);
-    let decision = approval::decide(marks, vessel, effect.op, &hash, effect.unknown);
+    let key = action_key(&effect);
+    let decision = approval::decide(marks, vessel, &key, &hash, effect.unknown);
     Planned {
         effect,
         hash,
+        key,
         decision,
     }
 }
 
+/// An effect's action key: its idempotency key when the provider
+/// deduplicates by one, and otherwise its op, which Taso never reuses
+/// within a Vessel. The same across a Warden restart either way.
+pub fn action_key(effect: &OpenEffect) -> Hash {
+    match &effect.retry {
+        RetryPolicy::ProviderDeduplicated { key } => approval::effect_key(key),
+        RetryPolicy::Queryable { .. } | RetryPolicy::UnsafeToRetry => {
+            approval::effect_key(format!("taso-op:{}", effect.op).as_bytes())
+        }
+    }
+}
+
 /// The outcome to report for a decision, once any send is done.
-/// `sent_entry` is the entry of the `sent` mark for [`Decision::Send`].
+/// `sent_entry` is the entry of the `dispatch` for [`Decision::Send`].
 pub fn outcome(decision: Decision, sent_entry: Option<u64>) -> Option<Outcome> {
     match decision {
         Decision::Wait => None,
@@ -159,17 +178,17 @@ fn applied(entry: u64) -> Outcome {
     }
 }
 
-/// The Vessel id a sender socket's name carries: `<id>.sock`.
-pub fn vessel_of(socket: &std::path::Path) -> Option<String> {
+/// The Vessel id a sender socket's name carries: `<32 hex digits>.sock`.
+pub fn vessel_of(socket: &std::path::Path) -> Option<VesselId> {
     let name = socket.file_name()?.to_str()?;
-    name.strip_suffix(".sock").map(str::to_owned)
+    approval::unhex(name.strip_suffix(".sock")?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
-    use taso_core::record::{Consequence, RetryPolicy};
+    use taso_core::record::Consequence;
     use taso_field::protocol::{recv_request, send_reply};
 
     fn effect(op: u64, request: &[u8], unknown: bool) -> OpenEffect {
@@ -186,15 +205,27 @@ mod tests {
         }
     }
 
+    const V: VesselId = [0xAB; 16];
+
     #[test]
     fn the_hash_is_the_approval_modules() {
-        let p = plan(&Marks::default(), "v", effect(3, b"req", false));
+        let p = plan(&Marks::default(), &V, effect(3, b"req", false));
         assert_eq!(p.hash, approval::request_hash("island", b"req"));
+        assert_eq!(p.key, approval::effect_key(&[3]));
         assert_eq!(p.decision, Decision::Wait);
         assert_eq!(
-            plan(&Marks::default(), "v", effect(3, b"req", true)).decision,
+            plan(&Marks::default(), &V, effect(3, b"req", true)).decision,
             Decision::Lapse
         );
+    }
+
+    #[test]
+    fn an_effect_without_a_key_is_keyed_by_its_op() {
+        let mut e = effect(9, b"req", false);
+        e.retry = RetryPolicy::UnsafeToRetry;
+        assert_eq!(action_key(&e), approval::effect_key(b"taso-op:9"));
+        e.retry = RetryPolicy::Queryable { probe: vec![1] };
+        assert_eq!(action_key(&e), approval::effect_key(b"taso-op:9"));
     }
 
     #[test]
@@ -221,9 +252,11 @@ mod tests {
 
     #[test]
     fn vessel_from_socket_name() {
+        let name = format!("/run/taso/run/senders/{}.sock", "ab".repeat(16));
+        assert_eq!(vessel_of(std::path::Path::new(&name)), Some(V));
         assert_eq!(
-            vessel_of(std::path::Path::new("/run/taso/run/senders/ab12.sock")).as_deref(),
-            Some("ab12")
+            vessel_of(std::path::Path::new("/run/taso/run/senders/ab12.sock")),
+            None
         );
         assert_eq!(vessel_of(std::path::Path::new("/run/x")), None);
     }

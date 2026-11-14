@@ -1,6 +1,8 @@
 //! How entries and state are printed.
 
-use island_core::{Answer, Body, Evidence, Grant, Invariant, Record, Refusal, Role, StreamId};
+use island_core::{
+    Answer, Answered, Body, Evidence, Grant, Invariant, Record, Refusal, Role, StreamId,
+};
 use island_log::Chain;
 
 use crate::keys::hex;
@@ -68,6 +70,10 @@ pub fn refusal(reason: &Refusal) -> String {
     match reason {
         Refusal::Invariant(broken) => format!("it breaks {}", invariant(broken)),
         Refusal::WeakerPolicy => "the policy would be weaker than the one in force".to_owned(),
+        Refusal::Unapproved => "it names no approval of its request".to_owned(),
+        Refusal::ApprovalUsed => "its approval was already used".to_owned(),
+        Refusal::Declined => "its request was declined after the approval".to_owned(),
+        Refusal::AlreadyDispatched => "its action was already let out".to_owned(),
     }
 }
 
@@ -157,6 +163,38 @@ fn body(body: &Body) -> String {
             short(&verdict.rejected.writer),
             short(&verdict.rejected.hash()),
             refusal(&verdict.reason)
+        ),
+        Body::Receipt(receipt) => format!(
+            "{} {} at {}, {} commit(s)",
+            receipt.repo,
+            receipt.branch,
+            hex(&receipt.head),
+            receipt.commits
+        ),
+        Body::Access(access) => format!(
+            "vessel {} {:?} via {:?}, {} call(s), {} bytes in, {} out",
+            hex(&access.vessel),
+            access.what,
+            access.provider,
+            access.calls,
+            access.bytes_in,
+            access.bytes_out
+        ),
+        Body::Approval(approval) => format!(
+            "{} request {}",
+            match approval.verdict {
+                Answered::Approve => "approve",
+                Answered::Decline => "decline",
+            },
+            hex(&approval.request)
+        ),
+        Body::Dispatch(dispatch) => format!(
+            "vessel {} op {} key {} request {} under approval {}",
+            hex(&dispatch.vessel),
+            dispatch.op,
+            short(&dispatch.key),
+            short(&dispatch.request),
+            dispatch.approval
         ),
         Body::Genesis(genesis) => format!("root {}", hex(&genesis.root)),
         Body::Bootstrap(bootstrap) => bootstrap

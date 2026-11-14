@@ -113,6 +113,13 @@ fn the_generators_reach_every_outcome() {
         "verdict:VerseTextMax",
         "verdict:ArtefactHasRef",
         "verdict:WeakerPolicy",
+        "approval:approved",
+        "approval:declined",
+        "dispatch:let-out",
+        "verdict:Unapproved",
+        "verdict:ApprovalUsed",
+        "verdict:Declined",
+        "verdict:AlreadyDispatched",
         "verdict-retry",
         "fault:verdict-landed",
     ];

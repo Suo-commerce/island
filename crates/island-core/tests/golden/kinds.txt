@@ -1,0 +1,34 @@
+# Island golden vectors for the kinds slice 2 adds (docs/slice-2.md, step 1).
+#
+# Inputs:
+#   writer        32 bytes of 0x57 in every submission
+#   request_hash  provider "github", request {"op":"open-pr","repo":"island"}
+#   effect_key    raw key "pr:island:step-1"
+#   receipt       stream "repos", counter 1: repo "island", branch "main",
+#                 head 20 bytes of 0x11, previous 20 bytes of 0x10, commits 3,
+#                 observed_at 1794312000000000
+#   access        stream "access", counter 2: vessel 16 bytes of 0x0c, inference (0),
+#                 provider "local", calls 4, bytes_in 1000, bytes_out 2000,
+#                 digest 32 bytes of 0xd1
+#   approval      stream "approvals", counter 3: request_hash, approve (0), no proof
+#   dispatch      stream "approvals", counter 4: vessel 16 bytes of 0x0c, op 7,
+#                 effect_key, request_hash, approval 5, counter 0
+#
+# Derived:
+#   request_hash  = blake3_derive_key("island.effect-request.v1",
+#                                     u64le(len provider) || provider || request)
+#   effect_key    = blake3_derive_key("island.effect-key.v1", raw key)
+#   <kind>_hash   = blake3_derive_key("island.submission.v1", <kind>)
+#
+# All values are lowercase hex. Hashes checked on 2026-11-14 against the
+# reference BLAKE3 Python bindings.
+request_hash = 97008474dd68a40d710422fccd0b37c5d77905dbe5460a9b0529ccd058a705f7
+effect_key = 8ed09693311c8d237101b6185e3aaf3d1f7071c733a05745f7d5dfa36a00c9dc
+receipt = 05000000000000007265706f735757575757575757575757575757575757575757575757575757575757575757010000000000000006060000000000000069736c616e6404000000000000006d61696e111111111111111111111111111111111111111101101010101010101010101010101010101010101003000000005060d1ea5f0600
+receipt_hash = af0e3df8240cc962041eb7101ee2ef8cea002234efbcd105f65ebb01f2a42c21
+access = 060000000000000061636365737357575757575757575757575757575757575757575757575757575757575757570200000000000000070c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0005000000000000006c6f63616c04000000e803000000000000d007000000000000d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1
+access_hash = 9324578aa79506deef072628c6943e39fde45366feb022324ca054ce24f4f1f3
+approval = 0900000000000000617070726f76616c73575757575757575757575757575757575757575757575757575757575757575703000000000000000a97008474dd68a40d710422fccd0b37c5d77905dbe5460a9b0529ccd058a705f70000
+approval_hash = 0f308ed75455c8299c08d06a2b654f373386fbadbc59957e38361d4f3759ef90
+dispatch = 0900000000000000617070726f76616c73575757575757575757575757575757575757575757575757575757575757575704000000000000000b0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c07000000000000008ed09693311c8d237101b6185e3aaf3d1f7071c733a05745f7d5dfa36a00c9dc97008474dd68a40d710422fccd0b37c5d77905dbe5460a9b0529ccd058a705f705000000000000000000000000000000
+dispatch_hash = c4ad65b81f170f304e9568c361cc12f26620803fa0462d4c86668377b5cd07c7

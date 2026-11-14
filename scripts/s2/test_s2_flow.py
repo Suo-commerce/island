@@ -36,6 +36,9 @@ def _b(x):
     return _u64(len(x)) + x
 
 
+
+VESSEL = "0123456789abcdef0123456789abcdef"
+
 class StandIn:
     """One Vessel's Field socket and sender socket."""
 
@@ -47,7 +50,8 @@ class StandIn:
         self.released = {}  # op -> (provider, request, key, consequence, unknown)
         self.lock = threading.Lock()
         self.field_path = os.path.join(tmp, "field.sock")
-        self.sender_path = os.path.join(tmp, "sender.sock")
+        # Named like the Warden's: <vessel-id in 32 hex digits>.sock.
+        self.sender_path = os.path.join(tmp, VESSEL + ".sock")
         for p in (self.field_path, self.sender_path):
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.bind(p)

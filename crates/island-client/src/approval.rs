@@ -1,179 +1,145 @@
-//! Approvals of Taso effects: spike S2's stand-in for slice 2's approval
-//! kind (S2 plan, decisions D1 and D2; docs/spec.md, "The review gate
-//! lives in the broker").
+//! Approvals of Taso effects, read from a verified log (docs/slice-2.md,
+//! step 1; docs/spec.md, "The review gate lives in the broker").
 //!
-//! A Vessel's released effect is sent only once an approver has named it.
-//! The spec has an approval name "the hash of the exact request bytes";
-//! until slice 2 brings a kind of its own, signed with the phone's passkey,
-//! the marks are `preference` entries on the `plan` stream:
+//! A Vessel's released effect is let out only once an `approval` entry
+//! has approved its request hash ([`request_hash`]). The sender records
+//! each effect it lets out as a `dispatch` entry naming the approval it
+//! used; both kinds live on the `approvals` stream.
 //!
-//! | key       | value                                    | written by    |
-//! |-----------|------------------------------------------|---------------|
-//! | `approve` | request hash                             | an approver   |
-//! | `decline` | request hash                             | an approver   |
-//! | `sent`    | `<vessel> <op> <request hash> <approval>` | island-sender |
+//! The gate holds the rule in the log itself (island-core's
+//! `State::dispatch_refusal`): a dispatch must name an approval of its
+//! own request that no earlier dispatch used and that no later decline
+//! overrides, and a Vessel's action key ([`effect_key`]) is dispatched at
+//! most once. [`decide`] makes the sender's choice by the same rule, so
+//! that what it tries to write is what the gate accepts.
 //!
-//! One approval lets one effect out: a `sent` mark consumes the approval
-//! it names, so a second identical request needs a second approval. A
-//! decline stops every not-yet-sent effect with that request hash, and
-//! wins over an approval: it fails closed. Marks count only from the keys
-//! [`Marks`] is told to trust, and only once the gate accepted them (they
-//! are read from a verified log).
+//! Who may approve and who may dispatch is authority's business: grants
+//! of `approval` and `dispatch` on `approvals`. Everything here comes from
+//! a log the caller verified, so every entry read was accepted; a refused
+//! write is inside a `verdict` and is not read as an approval.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use island_core::{Body, Hash, PublicKey, Record, StreamId};
+use island_core::{Answered, Body, Hash, Record, StreamId, VesselId};
+pub use island_core::{effect_key, request_hash};
 
-/// The stream the marks live on.
-pub const STREAM: &str = StreamId::PLAN;
-/// The key of an approval.
-pub const APPROVE: &str = "approve";
-/// The key of a decline.
-pub const DECLINE: &str = "decline";
-/// The key of a sender's record that it sent an effect.
-pub const SENT: &str = "sent";
-/// The BLAKE3 derive-key context of a request hash.
-pub const REQUEST_DOMAIN: &str = "island.effect-request.v1";
+/// The stream approvals and dispatches live on.
+pub const STREAM: &str = StreamId::APPROVALS;
 
-/// The hash an approval names: of the provider and the exact request
-/// bytes, as a Vessel declared them to Taso.
-pub fn request_hash(provider: &str, request: &[u8]) -> Hash {
-    let mut bytes = Vec::with_capacity(8 + provider.len() + request.len());
-    bytes.extend_from_slice(&(provider.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(provider.as_bytes());
-    bytes.extend_from_slice(request);
-    blake3::derive_key(REQUEST_DOMAIN, &bytes)
-}
-
-/// The value of a `sent` mark.
-pub fn sent_value(vessel: &str, op: u64, hash: &Hash, approval: u64) -> String {
-    format!("{vessel} {op} {} {approval}", hex(hash))
-}
-
-/// One Vessel effect, as the sender met it.
+/// One dispatch, as the log holds it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Sent {
-    /// The entry of the `sent` mark.
+    /// The entry of the `dispatch`.
     pub entry: u64,
-    /// The approval it consumed.
+    /// The approval it used.
     pub approval: u64,
 }
 
-/// What the marks in a log say, so far.
+/// What the approvals and dispatches in a log say, so far.
 #[derive(Clone, Debug, Default)]
 pub struct Marks {
-    approvers: BTreeSet<PublicKey>,
-    sender: Option<PublicKey>,
     /// Approvals by request hash, oldest first.
     approvals: BTreeMap<Hash, Vec<u64>>,
-    /// Declines by request hash: the first one.
+    /// Declines by request hash: the newest.
     declines: BTreeMap<Hash, u64>,
-    /// Sends by (vessel, op).
-    sent: BTreeMap<(String, u64), Sent>,
-    /// Approvals a send has consumed.
-    consumed: BTreeSet<u64>,
+    /// Dispatches by (vessel, action key).
+    sent: BTreeMap<(VesselId, Hash), Sent>,
+    /// Approvals a dispatch used.
+    used: BTreeSet<u64>,
 }
 
 impl Marks {
-    /// Marks that count approvals and declines from `approvers` and
-    /// sends from `sender`.
-    pub fn new(approvers: impl IntoIterator<Item = PublicKey>, sender: Option<PublicKey>) -> Self {
-        Self {
-            approvers: approvers.into_iter().collect(),
-            sender,
-            ..Self::default()
-        }
+    /// Nothing yet.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Take in one record of a verified log. Anything that is not a mark
-    /// from a trusted key is ignored, and so is a malformed value.
+    /// Take in one record of a verified log; anything that is not an
+    /// approval or a dispatch is ignored.
     pub fn note(&mut self, record: &Record) {
-        let entry = &record.entry;
-        let submission = &entry.submission;
-        if submission.stream.as_bytes() != STREAM.as_bytes() {
-            return;
-        }
-        let Body::Preference(preference) = &submission.body else {
-            return;
-        };
-        let from_approver = self.approvers.contains(&submission.writer);
-        let from_sender = self.sender == Some(submission.writer);
-        match preference.key.as_str() {
-            APPROVE if from_approver => {
-                if let Some(hash) = unhex(preference.value.trim()) {
-                    self.approvals.entry(hash).or_default().push(entry.seq);
+        let seq = record.entry.seq;
+        match &record.entry.submission.body {
+            Body::Approval(approval) => match approval.verdict {
+                Answered::Approve => self
+                    .approvals
+                    .entry(approval.request)
+                    .or_default()
+                    .push(seq),
+                Answered::Decline => {
+                    self.declines.insert(approval.request, seq);
                 }
-            }
-            DECLINE if from_approver => {
-                if let Some(hash) = unhex(preference.value.trim()) {
-                    self.declines.entry(hash).or_insert(entry.seq);
-                }
-            }
-            SENT if from_sender => {
-                let parts: Vec<&str> = preference.value.split(' ').collect();
-                if let [vessel, op, _hash, approval] = parts[..]
-                    && let (Ok(op), Ok(approval)) = (op.parse(), approval.parse())
-                {
-                    self.consumed.insert(approval);
-                    self.sent.entry(((*vessel).to_owned(), op)).or_insert(Sent {
-                        entry: entry.seq,
-                        approval,
+            },
+            Body::Dispatch(dispatch) => {
+                self.used.insert(dispatch.approval);
+                self.sent
+                    .entry((dispatch.vessel, dispatch.key))
+                    .or_insert(Sent {
+                        entry: seq,
+                        approval: dispatch.approval,
                     });
-                }
             }
             _ => {}
         }
     }
 
-    /// Whether this Vessel's op was sent, and by which mark.
-    pub fn sent(&self, vessel: &str, op: u64) -> Option<Sent> {
-        self.sent.get(&(vessel.to_owned(), op)).copied()
+    /// Whether this Vessel's action was dispatched, and by which entry.
+    pub fn sent(&self, vessel: &VesselId, key: &Hash) -> Option<Sent> {
+        self.sent.get(&(*vessel, *key)).copied()
     }
 
-    /// The first decline of this request hash.
-    pub fn declined(&self, hash: &Hash) -> Option<u64> {
-        self.declines.get(hash).copied()
+    /// The newest decline of this request hash.
+    pub fn declined(&self, request: &Hash) -> Option<u64> {
+        self.declines.get(request).copied()
     }
 
-    /// The oldest approval of this request hash that no send has consumed.
-    pub fn approval(&self, hash: &Hash) -> Option<u64> {
+    /// The oldest approval of this request hash that no dispatch used and
+    /// no later decline overrides: the one a dispatch may name.
+    pub fn approval(&self, request: &Hash) -> Option<u64> {
+        let declined = self.declined(request);
         self.approvals
-            .get(hash)?
+            .get(request)?
             .iter()
             .copied()
-            .find(|seq| !self.consumed.contains(seq))
+            .find(|seq| !self.used.contains(seq) && declined.is_none_or(|at| at < *seq))
     }
 }
 
 /// What to do with one released effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// Already sent (a mark exists): report Applied, send nothing.
+    /// Already dispatched: report Applied, send nothing.
     AlreadySent(Sent),
-    /// Declined: report NotApplied.
-    Decline(u64),
-    /// Approved by this entry and not sent: send, then report Applied.
+    /// Approved by this entry and not dispatched: dispatch, then report
+    /// Applied.
     Send(u64),
+    /// Declined, and no approval after the decline: report NotApplied.
+    Decline(u64),
     /// Not approved, and its outcome was lost in a Warden restart: report
     /// NotApplied ("lapsed"), so the Vessel gets its effect authority
-    /// back and proposes it again (decision D1's lapse rule).
+    /// back and proposes it again.
     Lapse,
     /// Not approved yet: leave it on the Open list.
     Wait,
 }
 
-/// The decision for one released effect. The order is the rule: a send
-/// already made is final; then a decline; then an approval; then the
-/// lapse rule; otherwise wait.
-pub fn decide(marks: &Marks, vessel: &str, op: u64, hash: &Hash, unknown: bool) -> Decision {
-    if let Some(sent) = marks.sent(vessel, op) {
+/// The decision for one released effect. The order is the rule: a
+/// dispatch already made is final; then an approval the gate would take;
+/// then a decline; then the lapse rule; otherwise wait.
+pub fn decide(
+    marks: &Marks,
+    vessel: &VesselId,
+    key: &Hash,
+    request: &Hash,
+    unknown: bool,
+) -> Decision {
+    if let Some(sent) = marks.sent(vessel, key) {
         return Decision::AlreadySent(sent);
     }
-    if let Some(seq) = marks.declined(hash) {
-        return Decision::Decline(seq);
-    }
-    if let Some(seq) = marks.approval(hash) {
+    if let Some(seq) = marks.approval(request) {
         return Decision::Send(seq);
+    }
+    if let Some(seq) = marks.declined(request) {
+        return Decision::Decline(seq);
     }
     if unknown {
         return Decision::Lapse;
@@ -186,12 +152,12 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A 32-byte value from 64 hex digits.
-pub fn unhex(text: &str) -> Option<Hash> {
-    if text.len() != 64 || !text.is_ascii() {
+/// `N` bytes from `2N` hex digits.
+pub fn unhex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != 2 * N || !text.is_ascii() {
         return None;
     }
-    let mut out = [0_u8; 32];
+    let mut out = [0_u8; N];
     for (i, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok()?;
     }
@@ -201,13 +167,11 @@ pub fn unhex(text: &str) -> Option<Hash> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use island_core::{Entry, Preference, Submission};
+    use island_core::{Approval, Dispatch, Entry, Preference, Submission};
 
-    const APPROVER: PublicKey = [1; 32];
-    const SENDER: PublicKey = [2; 32];
-    const STRANGER: PublicKey = [3; 32];
+    const V: VesselId = [7; 16];
 
-    fn mark(seq: u64, writer: PublicKey, stream: &str, key: &str, value: &str) -> Record {
+    fn record(seq: u64, stream: &str, body: Body) -> Record {
         Record {
             entry: Entry {
                 seq,
@@ -216,12 +180,9 @@ mod tests {
                 prev: [0; 32],
                 submission: Submission {
                     stream: StreamId::from(stream),
-                    writer,
+                    writer: [1; 32],
                     counter: seq,
-                    body: Body::Preference(Preference {
-                        key: key.to_owned(),
-                        value: value.to_owned(),
-                    }),
+                    body,
                 },
                 sig_writer: [0; 64],
             },
@@ -230,8 +191,35 @@ mod tests {
         }
     }
 
+    fn answer(seq: u64, request: Hash, verdict: Answered) -> Record {
+        record(
+            seq,
+            STREAM,
+            Body::Approval(Approval {
+                request,
+                verdict,
+                proof: None,
+            }),
+        )
+    }
+
+    fn dispatch(seq: u64, key: Hash, request: Hash, approval: u64) -> Record {
+        record(
+            seq,
+            STREAM,
+            Body::Dispatch(Dispatch {
+                vessel: V,
+                op: seq,
+                key,
+                request,
+                approval,
+                counter: 0,
+            }),
+        )
+    }
+
     fn marks(records: &[Record]) -> Marks {
-        let mut m = Marks::new([APPROVER], Some(SENDER));
+        let mut m = Marks::new();
         for r in records {
             m.note(r);
         }
@@ -239,94 +227,91 @@ mod tests {
     }
 
     #[test]
-    fn request_hash_is_stable_and_binds_the_provider() {
-        // Changing this vector changes every approval ever written.
-        assert_eq!(
-            hex(&request_hash("island", b"s2 turn 1 effect 1 (nem)")),
-            hex(&blake3::derive_key(
-                REQUEST_DOMAIN,
-                &[
-                    &6_u64.to_le_bytes()[..],
-                    b"island",
-                    b"s2 turn 1 effect 1 (nem)"
-                ]
-                .concat()
-            ))
-        );
-        assert_ne!(request_hash("island", b"x"), request_hash("mail", b"x"));
-        assert_ne!(request_hash("is", b"landx"), request_hash("island", b"x"));
-    }
-
-    #[test]
     fn nothing_approved_waits_and_a_lost_outcome_lapses() {
         let m = marks(&[]);
-        let h = request_hash("island", b"r");
-        assert_eq!(decide(&m, "v", 1, &h, false), Decision::Wait);
-        assert_eq!(decide(&m, "v", 1, &h, true), Decision::Lapse);
+        let (h, k) = (request_hash("island", b"r"), effect_key(b"k"));
+        assert_eq!(decide(&m, &V, &k, &h, false), Decision::Wait);
+        assert_eq!(decide(&m, &V, &k, &h, true), Decision::Lapse);
     }
 
     #[test]
     fn an_approval_sends_once() {
-        let h = request_hash("island", b"r");
-        let approve = mark(10, APPROVER, STREAM, APPROVE, &hex(&h));
+        let (h, k) = (request_hash("island", b"r"), effect_key(b"k"));
+        let approve = answer(10, h, Answered::Approve);
         assert_eq!(
-            decide(&marks(std::slice::from_ref(&approve)), "v", 1, &h, false),
+            decide(&marks(std::slice::from_ref(&approve)), &V, &k, &h, false),
             Decision::Send(10)
         );
-        let sent = mark(11, SENDER, STREAM, SENT, &sent_value("v", 1, &h, 10));
-        let m = marks(&[approve, sent]);
+        let m = marks(&[approve, dispatch(11, k, h, 10)]);
         let done = Decision::AlreadySent(Sent {
             entry: 11,
             approval: 10,
         });
-        assert_eq!(decide(&m, "v", 1, &h, false), done);
-        // After a Warden restart the same op comes back unknown: still sent.
-        assert_eq!(decide(&m, "v", 1, &h, true), done);
-        // An identical request from another op needs its own approval.
-        assert_eq!(decide(&m, "v", 2, &h, false), Decision::Wait);
+        assert_eq!(decide(&m, &V, &k, &h, false), done);
+        // After a Warden restart the same action comes back unknown.
+        assert_eq!(decide(&m, &V, &k, &h, true), done);
+        // An identical request with another key needs its own approval.
+        assert_eq!(
+            decide(&m, &V, &effect_key(b"k2"), &h, false),
+            Decision::Wait
+        );
+        // The same key from another Vessel is another action.
+        assert_eq!(decide(&m, &[8; 16], &k, &h, false), Decision::Wait);
     }
 
     #[test]
-    fn a_decline_wins_over_an_approval_but_not_over_a_send() {
-        let h = request_hash("island", b"r");
-        let approve = mark(10, APPROVER, STREAM, APPROVE, &hex(&h));
-        let decline = mark(12, APPROVER, STREAM, DECLINE, &hex(&h));
+    fn a_decline_overrides_earlier_approvals_only() {
+        let (h, k) = (request_hash("island", b"r"), effect_key(b"k"));
+        let approve = answer(10, h, Answered::Approve);
+        let decline = answer(12, h, Answered::Decline);
+        let m = marks(&[approve.clone(), decline.clone()]);
+        assert_eq!(decide(&m, &V, &k, &h, false), Decision::Decline(12));
+        assert_eq!(decide(&m, &V, &k, &h, true), Decision::Decline(12));
+        // Approved again after the decline: the new approval counts.
+        let again = answer(13, h, Answered::Approve);
         assert_eq!(
             decide(
-                &marks(&[approve.clone(), decline.clone()]),
-                "v",
-                1,
+                &marks(&[approve.clone(), decline.clone(), again]),
+                &V,
+                &k,
                 &h,
                 false
             ),
-            Decision::Decline(12)
+            Decision::Send(13)
         );
-        let sent = mark(11, SENDER, STREAM, SENT, &sent_value("v", 1, &h, 10));
+        // A dispatch already made stands.
         assert!(matches!(
-            decide(&marks(&[approve, sent, decline]), "v", 1, &h, false),
+            decide(
+                &marks(&[approve, dispatch(11, k, h, 10), decline]),
+                &V,
+                &k,
+                &h,
+                false
+            ),
             Decision::AlreadySent(_)
         ));
     }
 
     #[test]
-    fn marks_count_only_from_trusted_keys_on_the_plan_stream() {
-        let h = request_hash("island", b"r");
-        let m = marks(&[
-            mark(10, STRANGER, STREAM, APPROVE, &hex(&h)),
-            mark(11, SENDER, STREAM, APPROVE, &hex(&h)),
-            mark(12, APPROVER, "island", APPROVE, &hex(&h)),
-            mark(13, APPROVER, STREAM, APPROVE, "not hex"),
-            mark(14, STRANGER, STREAM, SENT, &sent_value("v", 1, &h, 99)),
-            mark(15, APPROVER, STREAM, SENT, &sent_value("v", 1, &h, 99)),
-        ]);
-        assert_eq!(decide(&m, "v", 1, &h, false), Decision::Wait);
+    fn only_approvals_and_dispatches_count() {
+        let (h, k) = (request_hash("island", b"r"), effect_key(b"k"));
+        let m = marks(&[record(
+            10,
+            StreamId::PLAN,
+            Body::Preference(Preference {
+                key: "approve".into(),
+                value: hex(&h),
+            }),
+        )]);
+        assert_eq!(decide(&m, &V, &k, &h, false), Decision::Wait);
     }
 
     #[test]
     fn hex_round_trips() {
         let h = request_hash("p", b"q");
-        assert_eq!(unhex(&hex(&h)), Some(h));
-        assert_eq!(unhex("zz"), None);
-        assert_eq!(unhex(&"é".repeat(32)), None);
+        assert_eq!(unhex::<32>(&hex(&h)), Some(h));
+        assert_eq!(unhex::<16>(&hex(&[3; 16])), Some([3; 16]));
+        assert_eq!(unhex::<32>("zz"), None);
+        assert_eq!(unhex::<32>(&"é".repeat(32)), None);
     }
 }

@@ -4,9 +4,9 @@
 //! verify them against the pinned root; open the Vessel's sender socket
 //! and list the released effects; for each, follow the approval rule
 //! (island-client's `approval` module): send what is approved (append a
-//! `sent` mark), decline what is declined, lapse what was lost in a Warden
-//! restart and never approved, and leave the rest. One JSON line per
-//! effect goes to standard output.
+//! `dispatch` entry naming the approval), decline what is declined, lapse
+//! what was lost in a Warden restart and never approved, and leave the
+//! rest. One JSON line per effect goes to standard output.
 //!
 //! Runs as root: the sender socket is the Warden's, mode 0600.
 //!
@@ -22,17 +22,18 @@ use std::time::Duration;
 use clap::Parser;
 use island_client::approval::{self, Decision, Marks};
 use island_client::{Broker, Writer};
-use island_core::{PublicKey, public_key};
+use island_core::{Body, Dispatch, PublicKey, StreamId, public_key};
 use island_env::keyfile;
 use island_log::Chain;
-use island_sender::{SenderConn, outcome, plan, vessel_of};
+use island_sender::{Planned, SenderConn, outcome, plan, vessel_of};
 use serde_json::json;
 
 /// Taso's sender for one Vessel: sends only what the Island log approves.
 #[derive(Parser)]
 #[command(name = "island-sender", version)]
 struct Args {
-    /// The Vessel's sender socket: <run_dir>/senders/<vessel-id>.sock.
+    /// The Vessel's sender socket: <run_dir>/senders/<vessel-id>.sock,
+    /// the id in 32 hex digits.
     #[arg(long)]
     socket: PathBuf,
     /// The broker, for example http://10.77.0.1:4747.
@@ -41,14 +42,11 @@ struct Args {
     /// The pinned root public key, in hex. The log is verified against it.
     #[arg(long, value_parser = parse_key)]
     root: PublicKey,
-    /// This sender's key file: it signs the `sent` marks. Its grant must
-    /// cover `preference` on the `plan` stream.
+    /// This sender's key file: it signs the `dispatch` entries. Its grant
+    /// must cover `dispatch` on the `approvals` stream. Whose approvals
+    /// count is the grants' business: `approval` on `approvals`.
     #[arg(long)]
     key: PathBuf,
-    /// A key whose approvals and declines count, in hex. May be given more
-    /// than once; at least once.
-    #[arg(long = "approver", value_parser = parse_key, required = true)]
-    approvers: Vec<PublicKey>,
     /// One pass, then exit; waits up to --wait for the socket first.
     #[arg(long)]
     once: bool,
@@ -59,7 +57,7 @@ struct Args {
     #[arg(long, default_value_t = 500)]
     interval_ms: u64,
     /// Fault injection for spike S2: exit with code 3 right after the
-    /// first `sent` mark is in the log, before reporting to Taso, as a
+    /// first `dispatch` is in the log, before reporting to Taso, as a
     /// sender that crashes there would. The next run must not send again.
     #[arg(long, hide = true)]
     stop_after_send: bool,
@@ -96,11 +94,12 @@ struct Sender {
     public: PublicKey,
     chain: Chain,
     marks: Marks,
-    vessel: String,
+    vessel: island_core::VesselId,
 }
 
 impl Sender {
-    /// Pull and verify everything after the chain's head; note the marks.
+    /// Pull and verify everything after the chain's head; note the
+    /// approvals and dispatches.
     fn refresh(&mut self, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         loop {
             let after = self.chain.head().map(|head| head.seq);
@@ -119,31 +118,39 @@ impl Sender {
         }
     }
 
-    /// Append the `sent` mark for one op; its entry.
+    /// Append the `dispatch` for one effect; its entry.
     fn send(
         &mut self,
         runtime: &tokio::runtime::Runtime,
-        op: u64,
-        hash: &island_core::Hash,
+        planned: &Planned,
         approval: u64,
     ) -> Result<Result<u64, String>, String> {
         let counter = self
             .chain
             .next_counter(&self.public)
             .ok_or("the sender's key has no counter left")?;
-        let value = approval::sent_value(&self.vessel, op, hash, approval);
+        let body = Body::Dispatch(Dispatch {
+            vessel: self.vessel,
+            op: planned.effect.op,
+            key: planned.key,
+            request: planned.hash,
+            approval,
+            // Nothing is submitted after it yet: the providers that send a
+            // verse with the Vessel's key come later in slice 2.
+            counter: 0,
+        });
         let signed = self
             .writer
-            .preference(approval::STREAM, counter, approval::SENT, &value);
+            .submission(StreamId::from(approval::STREAM), counter, body);
         let answer = runtime
             .block_on(self.broker.append(&signed.submission, &signed.sig_writer))
-            .map_err(|error| format!("appending the sent mark: {error}"))?;
-        // Read it back, so the mark (and the consumed approval) count from
-        // here on, whatever the answer was.
+            .map_err(|error| format!("appending the dispatch: {error}"))?;
+        // Read it back, so the dispatch (and the approval it used) count
+        // from here on, whatever the answer was.
         self.refresh(runtime)?;
         Ok(match answer {
             Ok((seq, _)) => Ok(seq),
-            Err(refusal) => Err(format!("the gate refused the sent mark: {refusal:?}")),
+            Err(refusal) => Err(format!("the gate refused the dispatch: {refusal:?}")),
         })
     }
 }
@@ -151,7 +158,8 @@ impl Sender {
 fn run(runtime: &tokio::runtime::Runtime, args: &Args) -> Result<(), String> {
     let key = island_core::SigningKey::from_bytes(&keyfile::load(&args.key)?);
     let public = public_key(&key);
-    let vessel = vessel_of(&args.socket).ok_or("the socket's name is not <vessel-id>.sock")?;
+    let vessel = vessel_of(&args.socket)
+        .ok_or("the socket's name is not <vessel-id>.sock with a 32-digit hex id")?;
     let broker = runtime
         .block_on(Broker::connect(&args.broker))
         .map_err(|error| format!("{error}"))?;
@@ -160,7 +168,7 @@ fn run(runtime: &tokio::runtime::Runtime, args: &Args) -> Result<(), String> {
         writer: Writer::new(key),
         public,
         chain: Chain::new(args.root),
-        marks: Marks::new(args.approvers.iter().copied(), Some(public)),
+        marks: Marks::new(),
         vessel,
     };
     let interval = Duration::from_millis(args.interval_ms.max(50));
@@ -200,10 +208,11 @@ fn pass(runtime: &tokio::runtime::Runtime, sender: &mut Sender, args: &Args) -> 
         let planned = plan(&sender.marks, &sender.vessel, effect);
         let op = planned.effect.op;
         let mut line = json!({
-            "vessel": sender.vessel,
+            "vessel": approval::hex(&sender.vessel),
             "op": op,
             "provider": planned.effect.provider,
             "request_hash": approval::hex(&planned.hash),
+            "key": approval::hex(&planned.key),
             "unknown": planned.effect.unknown,
         });
         let (action, sent_entry) = match planned.decision {
@@ -219,7 +228,7 @@ fn pass(runtime: &tokio::runtime::Runtime, sender: &mut Sender, args: &Args) -> 
             }
             Decision::Send(approval) => {
                 line["approved_at"] = json!(approval);
-                match sender.send(runtime, op, &planned.hash, approval)? {
+                match sender.send(runtime, &planned, approval)? {
                     Ok(seq) => {
                         line["sent_at"] = json!(seq);
                         ("send", Some(seq))

@@ -27,17 +27,27 @@ pub const APPENDER: u8 = 4;
 pub const KEYS: u8 = 5;
 
 /// The streams an operation can name, by index.
-pub const STREAMS: [&str; 6] = ["island", "flare", "plan", "policy", "authority", "gate"];
+pub const STREAMS: [&str; 7] = [
+    "island",
+    "flare",
+    "plan",
+    "policy",
+    "authority",
+    "gate",
+    "approvals",
+];
 
-/// The kinds a grant's rights can name, by bit. The low three are the ones
-/// an ordinary grant may carry.
-pub const RIGHTS: [&str; 6] = [
+/// The kinds a grant's rights can name, by bit. Bits 0 to 2 and 6 to 7
+/// are kinds an ordinary grant may carry; 3 to 5 are not.
+pub const RIGHTS: [&str; 8] = [
     "verse",
     "preference",
     "policy",
     "grant",
     "revoke",
     "verdict",
+    "approval",
+    "dispatch",
 ];
 
 /// One step of a case.
@@ -177,6 +187,27 @@ pub enum What {
     },
     /// A verdict from outside. Only the appender's own gate writes them.
     Verdict,
+    /// An approval or a decline of one of three request hashes.
+    Approve {
+        /// Which request (modulo 3).
+        request: u8,
+        /// A decline instead.
+        decline: bool,
+    },
+    /// A dispatch naming an approval.
+    Dispatch {
+        /// Which approval: 0 to 3 an index into the approvals in the log
+        /// so far, modulo their number; 4 the same over approvals and
+        /// declines; 5 a position holding neither.
+        approval: u8,
+        /// Which request: 0 is the one the named approval answers, 1 to 3
+        /// one of the three hashes.
+        request: u8,
+        /// Which of three action keys.
+        key: u8,
+        /// Which of two Vessels.
+        vessel: u8,
+    },
 }
 
 /// Who a bootstrap entry names as appender.
@@ -276,24 +307,32 @@ pub fn first_policy(invariants: u8) -> Op {
 
 /// The grants a properly started case gives its three writers, so that
 /// they differ in what they may do: writer 0 may write verses and
-/// preferences on both projects and the plan, writer 1 only verses on
-/// `island`, and writer 2 nothing at all.
-pub fn first_grants() -> [Op; 2] {
+/// preferences on both projects and the plan, and approvals; writer 1
+/// only verses on `island`; writer 2 only dispatches, like a sender.
+pub fn first_grants() -> [Op; 3] {
     [
         authority_write(
             ROOT,
             What::Grant {
                 holder: 0,
-                scope: 0b000_111,
-                rights: 0b000_011,
+                scope: 0b100_0111,
+                rights: 0b0100_0011,
             },
         ),
         authority_write(
             ROOT,
             What::Grant {
                 holder: 1,
-                scope: 0b000_001,
-                rights: 0b000_001,
+                scope: 0b000_0001,
+                rights: 0b0000_0001,
+            },
+        ),
+        authority_write(
+            ROOT,
+            What::Grant {
+                holder: 2,
+                scope: 0b100_0000,
+                rights: 0b1000_0000,
             },
         ),
     ]
@@ -310,6 +349,19 @@ fn home(what: &What) -> u8 {
         | What::Genesis { .. }
         | What::Bootstrap { .. } => 4,
         What::Verdict => 5,
+        What::Approve { .. } | What::Dispatch { .. } => 6,
+    }
+}
+
+/// The writer that usually writes a kind: root for what only root may
+/// write, writer 0 for approvals, writer 2 for dispatches; `None` for
+/// kinds any writer writes.
+fn usual(what: &What) -> Option<u8> {
+    match what {
+        What::Approve { .. } => Some(0),
+        What::Dispatch { .. } => Some(2),
+        _ if (3..=5).contains(&home(what)) => Some(ROOT),
+        _ => None,
     }
 }
 
@@ -327,8 +379,8 @@ fn twist() -> impl Strategy<Value = Twist> {
     prop_oneof![
         6 => Just(Twist::None),
         1 => (0..WRITERS).prop_map(|writer| Twist::OtherHolder { writer }),
-        1 => (0u8..6).prop_map(|stream| Twist::AddStream { stream }),
-        1 => (0u8..6).prop_map(|right| Twist::AddRight { right }),
+        1 => (0u8..7).prop_map(|stream| Twist::AddStream { stream }),
+        1 => (0u8..8).prop_map(|right| Twist::AddRight { right }),
     ]
 }
 
@@ -351,8 +403,8 @@ fn what() -> impl Strategy<Value = What> {
         // A new grant: mostly rights a grant may carry, sometimes any.
         2 => (
             0..WRITERS,
-            0u8..64,
-            prop_oneof![5 => 1u8..8, 1 => 0u8..64],
+            0u8..128,
+            prop_oneof![5 => 1u8..8, 2 => (0u8..8).prop_map(|low| low | 0b1100_0000), 1 => any::<u8>()],
         )
             .prop_map(|(holder, scope, rights)| What::Grant { holder, scope, rights }),
         3 => (0u8..10, any::<u8>(), any::<u8>(), twist()).prop_map(
@@ -368,6 +420,23 @@ fn what() -> impl Strategy<Value = What> {
         1 => (appenders(), 0u8..3)
             .prop_map(|(appenders, roots)| What::Bootstrap { appenders, roots }),
         1 => Just(What::Verdict),
+        // Approvals and declines of three requests, so that several meet.
+        6 => (0u8..3, prop::bool::weighted(0.4))
+            .prop_map(|(request, decline)| What::Approve { request, decline }),
+        // Dispatches: mostly naming an approval that exists, for its own
+        // request; the same key now and then, so that some repeat.
+        4 => (
+            0u8..6,
+            prop_oneof![4 => Just(0u8), 1 => 1u8..4],
+            0u8..3,
+            0u8..2,
+        )
+            .prop_map(|(approval, request, key, vessel)| What::Dispatch {
+                approval,
+                request,
+                key,
+                vessel,
+            }),
     ]
 }
 
@@ -375,13 +444,13 @@ fn write() -> impl Strategy<Value = Write> {
     (
         // Now and then the appender's own key, from outside.
         prop_oneof![24 => 0..WRITERS, 1 => Just(APPENDER)],
-        // What only root may write is mostly written by root.
+        // A kind is mostly written by its usual writer.
         prop::bool::weighted(0.8),
         prop_oneof![8 => Just(0i8), 2 => -3i8..=3],
         0u8..4,
         what(),
         // Mostly the stream the kind belongs on, sometimes any stream.
-        prop_oneof![6 => Just(None), 1 => (0u8..6).prop_map(Some)],
+        prop_oneof![6 => Just(None), 1 => (0u8..7).prop_map(Some)],
         prop_oneof![
             12 => Just(Sign::Good),
             1 => (0u16..512).prop_map(|bit| Sign::Flipped { bit }),
@@ -389,11 +458,10 @@ fn write() -> impl Strategy<Value = Write> {
         ],
     )
         .prop_map(
-            |(writer, as_root, counter, salt, what, stream, sign)| Write {
-                writer: if as_root && home(&what) >= 3 {
-                    ROOT
-                } else {
-                    writer
+            |(writer, as_usual, counter, salt, what, stream, sign)| Write {
+                writer: match usual(&what) {
+                    Some(usual) if as_usual => usual,
+                    _ => writer,
                 },
                 counter,
                 salt,

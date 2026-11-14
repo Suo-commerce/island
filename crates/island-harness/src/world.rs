@@ -27,14 +27,19 @@
 //!    (`ratchet.rs` checks the same on generated pairs of any policies.)
 //! 7. An exact resend returns the first answer and adds nothing: the
 //!    acknowledgement, or the refusal.
+//! 8. Every action let out was approved, once: each stored `dispatch`
+//!    names an earlier `approve` of its request that no earlier dispatch
+//!    used and no decline after it overrides, and no Vessel's action key
+//!    is dispatched twice. Worked out here from the stored entries,
+//!    without the gate, the state or the model.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use island_core::{
-    Body, Bootstrap, Evidence, Genesis, Grant, GrantId, Hash, Invariant, Kind, Policy, Preference,
-    PublicKey, Record, Refusal, Revoke, Role, Signature, SigningKey, StreamId, Submission, Verdict,
-    Verse, public_key, sign_hash,
+    Answered, Approval, Body, Bootstrap, Dispatch, Evidence, Genesis, Grant, GrantId, Hash,
+    Invariant, Kind, Policy, Preference, PublicKey, Record, Refusal, Revoke, Role, Signature,
+    SigningKey, StreamId, Submission, Verdict, Verse, VesselId, public_key, sign_hash,
 };
 use island_log::{Ack, Appender, Chain, Denied, Fault, Rejected, frame};
 use island_model::{Guard, Model, Outcome, Why};
@@ -46,7 +51,7 @@ use crate::sim::{SimClock, SimStorage};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failure {
     /// Which oracle: `1-chain`, `2-replay`, `3-model`, `4-durability`,
-    /// `5-grants`, `6-ratchet`, `7-retry` or `determinism`.
+    /// `5-grants`, `6-ratchet`, `7-retry`, `8-dispatch` or `determinism`.
     pub oracle: &'static str,
     /// The index of the operation after which it broke.
     pub step: usize,
@@ -103,14 +108,21 @@ fn stream(index: u8) -> StreamId {
 }
 
 /// The kinds a rights mask can name, in the order of `ops::RIGHTS`.
-const KINDS: [Kind; 6] = [
+const KINDS: [Kind; 8] = [
     Kind::Verse,
     Kind::Preference,
     Kind::Policy,
     Kind::Grant,
     Kind::Revoke,
     Kind::Verdict,
+    Kind::Approval,
+    Kind::Dispatch,
 ];
+
+/// The three request hashes approvals and dispatches name.
+fn request(index: u8) -> Hash {
+    [0xA0 + index % 3; 32]
+}
 
 fn short(bytes: &[u8]) -> String {
     bytes[..4]
@@ -135,6 +147,11 @@ struct Verified {
     /// How many policies and how many writes oracle 6 has already set
     /// against each other.
     ratcheted: (usize, usize),
+    /// Oracle 8's reading: every approval and decline by position, the
+    /// approvals a dispatch used, and every action dispatched.
+    answers: BTreeMap<u64, (Hash, Answered)>,
+    used: BTreeSet<u64>,
+    dispatched: BTreeSet<(VesselId, Hash)>,
 }
 
 impl Verified {
@@ -361,11 +378,11 @@ impl World {
                 rights,
             } => Body::Grant(Grant {
                 holder: public_key(&key(*holder)),
-                scope: (0u8..6)
+                scope: (0u8..7)
                     .filter(|bit| scope & (1 << bit) != 0)
                     .map(stream)
                     .collect(),
-                rights: (0..6)
+                rights: (0..8)
                     .filter(|bit| rights & (1 << bit) != 0)
                     .map(|bit| KINDS[bit])
                     .collect(),
@@ -456,6 +473,58 @@ impl World {
                     sig_writer: sign_hash(&key(0), &rejected.hash()),
                     rejected: Box::new(rejected),
                     reason: Refusal::Invariant(Invariant::VerseNamesEvidence),
+                })
+            }
+            What::Approve {
+                request: index,
+                decline,
+            } => Body::Approval(Approval {
+                request: request(*index),
+                verdict: if *decline {
+                    Answered::Decline
+                } else {
+                    Answered::Approve
+                },
+                proof: None,
+            }),
+            What::Dispatch {
+                approval,
+                request: which,
+                key,
+                vessel,
+            } => {
+                // The approvals and declines in the log so far, by
+                // position; one past the end is a position holding none.
+                // 0 to 3 pick among the approvals, 4 among approvals and
+                // declines alike, 5 names a position holding neither. Few
+                // to pick from, so that dispatches meet on one.
+                let answers: Vec<(u64, Hash)> = (0u64..)
+                    .zip(self.model.log())
+                    .filter_map(|(seq, entry)| match &entry.body {
+                        Body::Approval(given)
+                            if *approval == 4 || given.verdict == Answered::Approve =>
+                        {
+                            Some((seq, given.request))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let named = match (*approval, answers.len()) {
+                    (5, _) | (_, 0) => None,
+                    (index, len) => answers.get(usize::from(index) % len),
+                };
+                let (seq, answered) = named.copied().unwrap_or((1, request(0)));
+                Body::Dispatch(Dispatch {
+                    vessel: [*vessel % 2; 16],
+                    op: u64::from(write.salt),
+                    key: [*key % 3; 32],
+                    request: if *which == 0 {
+                        answered
+                    } else {
+                        request(*which - 1)
+                    },
+                    approval: seq,
+                    counter: 0,
                 })
             }
         };
@@ -569,6 +638,11 @@ impl World {
                     Body::Verse(_) if self.model.policy().is_some() => {
                         self.hit("verse:passed-the-gate");
                     }
+                    Body::Approval(approval) if approval.verdict == Answered::Decline => {
+                        self.hit("approval:declined");
+                    }
+                    Body::Approval(_) => self.hit("approval:approved"),
+                    Body::Dispatch(_) => self.hit("dispatch:let-out"),
                     _ => {}
                 }
                 if self.storage.synced_len() != self.storage.len() {
@@ -617,6 +691,10 @@ impl World {
                     Refusal::Invariant(Invariant::VerseTextMax { .. }) => "verdict:VerseTextMax",
                     Refusal::Invariant(Invariant::ArtefactHasRef) => "verdict:ArtefactHasRef",
                     Refusal::WeakerPolicy => "verdict:WeakerPolicy",
+                    Refusal::Unapproved => "verdict:Unapproved",
+                    Refusal::ApprovalUsed => "verdict:ApprovalUsed",
+                    Refusal::Declined => "verdict:Declined",
+                    Refusal::AlreadyDispatched => "verdict:AlreadyDispatched",
                 });
                 let Rejected::Refused { hash, .. } = refused else {
                     return Err(self.fail("3-model", format!("{refused:?} for a gate refusal")));
@@ -1044,6 +1122,53 @@ impl World {
             }
         }
         self.verified.ratcheted = (self.verified.policies.len(), self.writes.len());
+
+        // 8: every action let out was approved, once.
+        for record in &added {
+            let seq = record.entry.seq;
+            match &record.entry.submission.body {
+                Body::Approval(approval) => {
+                    self.verified
+                        .answers
+                        .insert(seq, (approval.request, approval.verdict));
+                }
+                Body::Dispatch(dispatch) => {
+                    let named = self.verified.answers.get(&dispatch.approval);
+                    let problem = if named != Some(&(dispatch.request, Answered::Approve)) {
+                        Some("names no approval of its request")
+                    } else if self.verified.used.contains(&dispatch.approval) {
+                        Some("uses an approval another dispatch used")
+                    } else if self
+                        .verified
+                        .answers
+                        .iter()
+                        .any(|(at, (request, verdict))| {
+                            *at > dispatch.approval
+                                && *request == dispatch.request
+                                && *verdict == Answered::Decline
+                        })
+                    {
+                        Some("comes after a decline of its request")
+                    } else if self
+                        .verified
+                        .dispatched
+                        .contains(&(dispatch.vessel, dispatch.key))
+                    {
+                        Some("lets out an action already let out")
+                    } else {
+                        None
+                    };
+                    if let Some(problem) = problem {
+                        return Err(self.fail("8-dispatch", format!("entry {seq} {problem}")));
+                    }
+                    self.verified.used.insert(dispatch.approval);
+                    self.verified
+                        .dispatched
+                        .insert((dispatch.vessel, dispatch.key));
+                }
+                _ => {}
+            }
+        }
 
         // 4: every acknowledged entry is there, unchanged.
         for (seq, hash) in &self.acked {

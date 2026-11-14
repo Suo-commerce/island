@@ -22,8 +22,8 @@ use std::fmt;
 
 use island_auth::{BootstrapError, Denied};
 use island_core::{
-    Answer, Body, Hash, Kind, Last, PublicKey, Record, Refusal, Role, Signature, State, StreamId,
-    Submission, VerifyError, state_hash, verify_hash,
+    Answer, Answered, Body, Given, Hash, Kind, Last, PublicKey, Record, Refusal, Role, Signature,
+    State, StreamId, Submission, VerifyError, state_hash, verify_hash,
 };
 use island_gate::judge;
 
@@ -516,6 +516,27 @@ impl Chain {
             self.state.policy = policy.clone();
             self.policy_seq = seq;
         }
+        if let Body::Approval(approval) = &submission.body {
+            self.state.approvals.insert(
+                seq,
+                Given {
+                    request: approval.request,
+                    verdict: approval.verdict,
+                    used_by: None,
+                },
+            );
+            if approval.verdict == Answered::Decline {
+                self.state.declined.insert(approval.request, seq);
+            }
+        }
+        if let Body::Dispatch(dispatch) = &submission.body {
+            if let Some(given) = self.state.approvals.get_mut(&dispatch.approval) {
+                given.used_by = Some(seq);
+            }
+            self.state
+                .dispatched
+                .insert((dispatch.vessel, dispatch.key));
+        }
         island_auth::apply(&mut self.state, seq, submission);
 
         self.head = Some(step.head);
@@ -552,11 +573,19 @@ fn record_faults(record: &Record) -> Result<(), VerifyError> {
 fn belongs(kind: Kind, stream: &StreamId) -> bool {
     let stream = stream.as_bytes();
     let is = |name: &str| stream == name.as_bytes();
-    let system = is(StreamId::POLICY) || is(StreamId::AUTHORITY) || is(StreamId::GATE);
+    let system = is(StreamId::POLICY)
+        || is(StreamId::AUTHORITY)
+        || is(StreamId::GATE)
+        || is(StreamId::REPOS)
+        || is(StreamId::ACCESS)
+        || is(StreamId::APPROVALS);
     match kind {
         Kind::Policy => is(StreamId::POLICY),
         Kind::Grant | Kind::Revoke | Kind::Genesis | Kind::Bootstrap => is(StreamId::AUTHORITY),
         Kind::Verdict => is(StreamId::GATE),
+        Kind::Receipt => is(StreamId::REPOS),
+        Kind::Access => is(StreamId::ACCESS),
+        Kind::Approval | Kind::Dispatch => is(StreamId::APPROVALS),
         // A project.
         Kind::Verse => !system && !is(StreamId::PLAN),
         // A project, or the plan.

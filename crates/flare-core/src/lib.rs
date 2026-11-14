@@ -18,7 +18,8 @@ pub mod session;
 use std::fmt;
 
 use island_core::{
-    Body, Evidence, Grant, Hash, Invariant, Kind, Policy, PublicKey, Record, Refusal,
+    AccessKind, Answered, Body, Evidence, Grant, Hash, Invariant, Kind, Policy, PublicKey, Record,
+    Refusal,
 };
 use island_log::Chain;
 
@@ -74,6 +75,16 @@ pub fn time(micros: u64) -> String {
     )
 }
 
+/// An access kind's name.
+fn access_name(what: AccessKind) -> &'static str {
+    match what {
+        AccessKind::Inference => "inference",
+        AccessKind::Read => "read",
+        AccessKind::Task => "task",
+        AccessKind::Note => "note",
+    }
+}
+
 /// A kind's name.
 pub fn kind_name(kind: Kind) -> &'static str {
     match kind {
@@ -83,8 +94,12 @@ pub fn kind_name(kind: Kind) -> &'static str {
         Kind::Verse => "verse",
         Kind::Preference => "preference",
         Kind::Verdict => "verdict",
+        Kind::Receipt => "receipt",
+        Kind::Access => "access",
         Kind::Genesis => "genesis",
         Kind::Bootstrap => "bootstrap",
+        Kind::Approval => "approval",
+        Kind::Dispatch => "dispatch",
     }
 }
 
@@ -107,6 +122,10 @@ fn refusal(reason: &Refusal) -> String {
     match reason {
         Refusal::Invariant(broken) => format!("it breaks {}", invariant(broken)),
         Refusal::WeakerPolicy => "the policy would be weaker than the one in force".to_owned(),
+        Refusal::Unapproved => "no approval of this request lets it out".to_owned(),
+        Refusal::ApprovalUsed => "its approval has already let an action out".to_owned(),
+        Refusal::Declined => "the request was declined after it was approved".to_owned(),
+        Refusal::AlreadyDispatched => "this action has already been let out".to_owned(),
     }
 }
 
@@ -160,6 +179,44 @@ pub fn content(body: &Body) -> String {
             kind_name(verdict.rejected.kind()),
             short(&verdict.rejected.writer),
             refusal(&verdict.reason)
+        ),
+        Body::Receipt(receipt) => format!(
+            "{} {} at {}, {} commit(s) since {}",
+            receipt.repo,
+            receipt.branch,
+            hex(&receipt.head),
+            receipt.commits,
+            receipt
+                .previous
+                .map_or("its first sighting".to_owned(), |previous| hex(&previous))
+        ),
+        Body::Access(access) => format!(
+            "vessel {} {} {}: {} call(s), {} bytes in, {} out",
+            hex(&access.vessel),
+            access_name(access.what),
+            if access.provider.is_empty() {
+                "-"
+            } else {
+                access.provider.as_str()
+            },
+            access.calls,
+            access.bytes_in,
+            access.bytes_out
+        ),
+        Body::Approval(approval) => format!(
+            "{} request {}",
+            match approval.verdict {
+                Answered::Approve => "approves",
+                Answered::Decline => "declines",
+            },
+            hex(&approval.request)
+        ),
+        Body::Dispatch(dispatch) => format!(
+            "lets out vessel {} op {} (request {}, approval {})",
+            hex(&dispatch.vessel),
+            dispatch.op,
+            hex(&dispatch.request),
+            dispatch.approval
         ),
         Body::Genesis(genesis) => format!("root {}", short(&genesis.root)),
         Body::Bootstrap(bootstrap) => bootstrap

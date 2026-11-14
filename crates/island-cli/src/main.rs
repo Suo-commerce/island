@@ -30,8 +30,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use island_core::{
-    Body, Evidence, Grant, GrantId, Hash, Invariant, Kind, Policy, Preference, PublicKey, Record,
-    Revoke, SigningKey, StreamId, Submission, Verse, public_key,
+    Answered, Approval, Body, Evidence, Grant, GrantId, Hash, Invariant, Kind, Policy, Preference,
+    PublicKey, Record, Revoke, SigningKey, StreamId, Submission, Verse, public_key,
 };
 use island_env::{FileStorage, OsRng, SystemClock};
 use island_log::{Ack, Appender, genesis};
@@ -184,16 +184,17 @@ enum Command {
         why: String,
     },
     /// Approve one released Taso effect by its request hash, as
-    /// `island-sender` prints it, or decline it with --decline. Spike S2's
-    /// stand-in for slice 2's approval kind: a preference on `plan` that
-    /// island-sender reads (island-client's `approval` module).
+    /// `island-sender` prints it, or decline it with --decline: an
+    /// `approval` entry on the `approvals` stream. The key's grant must
+    /// cover `approval` there. One approval lets one action out; a
+    /// decline stops every approval of the same request written before it.
     Approve {
         #[command(flatten)]
         writer: WriterArgs,
         /// The request hash, 64 hex digits.
         #[arg(value_parser = parse_hash)]
         request: Hash,
-        /// Decline it instead: it is never sent.
+        /// Decline it instead: nothing approved before it is sent.
         #[arg(long)]
         decline: bool,
     },
@@ -310,9 +311,13 @@ fn parse_kind(name: &str) -> Result<Kind, String> {
         "verdict" => Kind::Verdict,
         "genesis" => Kind::Genesis,
         "bootstrap" => Kind::Bootstrap,
+        "receipt" => Kind::Receipt,
+        "access" => Kind::Access,
+        "approval" => Kind::Approval,
+        "dispatch" => Kind::Dispatch,
         _ => {
             return Err(format!(
-                "`{name}` is not a kind (verse, preference, policy)"
+                "`{name}` is not a kind (verse, preference, policy, approval, dispatch, receipt, access)"
             ));
         }
     })
@@ -455,17 +460,16 @@ fn run(command: Command) -> Result<(), Stop> {
             request,
             decline,
         } => {
-            use island_client::approval;
-            let key = if decline {
-                approval::DECLINE
-            } else {
-                approval::APPROVE
-            };
-            let body = Body::Preference(Preference {
-                key: key.to_owned(),
-                value: hex(&request),
+            let body = Body::Approval(Approval {
+                request,
+                verdict: if decline {
+                    Answered::Decline
+                } else {
+                    Answered::Approve
+                },
+                proof: None,
             });
-            let ack = write_as_key(&writer, StreamId::from(approval::STREAM), body)?;
+            let ack = write_as_key(&writer, StreamId::from(StreamId::APPROVALS), body)?;
             let verb = if decline { "declined" } else { "approved" };
             println!("entry {}  {verb} request {}", ack.seq, hex(&request));
             Ok(())
