@@ -26,9 +26,6 @@ use taso_field::protocol::{
     OpenEffect, Outcome, ProtocolError, Reply, Request, VERSION, recv_reply, send_request,
 };
 
-/// The reason reported for an effect the lapse rule declines.
-pub const LAPSED: &str = "lapsed: Warden restarted before approval";
-
 /// A conversation on a Vessel's sender socket.
 pub struct SenderConn<S> {
     stream: S,
@@ -136,7 +133,7 @@ pub struct Planned {
 pub fn plan(marks: &Marks, vessel: &VesselId, effect: OpenEffect) -> Planned {
     let hash = approval::request_hash(&effect.provider, &effect.request);
     let key = action_key(&effect);
-    let decision = approval::decide(marks, vessel, &key, &hash, effect.unknown);
+    let decision = approval::decide(marks, vessel, &key, &hash);
     Planned {
         effect,
         hash,
@@ -162,9 +159,6 @@ pub fn action_key(effect: &OpenEffect) -> Hash {
 pub fn outcome(decision: Decision, sent_entry: Option<u64>) -> Option<Outcome> {
     match decision {
         Decision::Wait => None,
-        Decision::Lapse => Some(Outcome::NotApplied {
-            reason: LAPSED.to_owned(),
-        }),
         Decision::Decline(seq) => Some(Outcome::NotApplied {
             reason: format!("declined at Island entry {seq}"),
         }),
@@ -237,8 +231,6 @@ impl<S: Read + Write> Released<String> for SenderConn<S> {
 pub enum Action {
     /// Not approved: left waiting.
     Wait,
-    /// Lost in a Warden restart and never approved: reported not applied.
-    Lapse,
     /// Declined at this entry: reported not applied.
     Decline(u64),
     /// Dispatched before, at this entry: reported applied.
@@ -262,7 +254,6 @@ impl Action {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Wait => "wait",
-            Self::Lapse => "lapse",
             Self::Decline(_) => "decline",
             Self::AlreadySent(_) => "already-sent",
             Self::Sent { .. } => "send",
@@ -311,7 +302,6 @@ pub fn serve<E>(
         let planned = plan(ledger.marks(), &vessel, effect);
         let (action, sent_entry) = match planned.decision {
             Decision::Wait => (Action::Wait, None),
-            Decision::Lapse => (Action::Lapse, None),
             Decision::Decline(seq) => (Action::Decline(seq), None),
             Decision::AlreadySent(sent) => (Action::AlreadySent(sent.entry), None),
             Decision::Send(_) if refused.contains(&(vessel, planned.key)) => {
@@ -381,9 +371,10 @@ mod tests {
         assert_eq!(p.hash, approval::request_hash("island", b"req"));
         assert_eq!(p.key, approval::effect_key(&[3]));
         assert_eq!(p.decision, Decision::Wait);
+        // Unknown (a restart, or listed before): it still waits.
         assert_eq!(
             plan(&Marks::default(), &V, effect(3, b"req", true)).decision,
-            Decision::Lapse
+            Decision::Wait
         );
     }
 
@@ -399,12 +390,6 @@ mod tests {
     #[test]
     fn outcomes_follow_decisions() {
         assert_eq!(outcome(Decision::Wait, None), None);
-        assert_eq!(
-            outcome(Decision::Lapse, None),
-            Some(Outcome::NotApplied {
-                reason: LAPSED.to_owned()
-            })
-        );
         assert_eq!(
             outcome(Decision::Send(9), None),
             None,
@@ -482,17 +467,17 @@ mod tests {
         assert_eq!(conn.last_sealed_turn, Some(2));
         let open = conn.open().unwrap();
         assert_eq!(open, vec![effect(1, b"a", true)]);
-        let lapse = outcome(Decision::Lapse, None).unwrap();
-        assert_eq!(conn.report(1, lapse.clone()).unwrap(), None);
+        let decline = outcome(Decision::Decline(5), None).unwrap();
+        assert_eq!(conn.report(1, decline.clone()).unwrap(), None);
         assert_eq!(
-            conn.report(7, lapse).unwrap().as_deref(),
+            conn.report(7, decline).unwrap().as_deref(),
             Some("not released")
         );
         drop(conn);
         let seen = warden.await.unwrap();
         assert_eq!(seen.len(), 4);
         assert!(
-            matches!(&seen[2], Request::Outcome { op: 1, result: Outcome::NotApplied { reason } } if reason == LAPSED)
+            matches!(&seen[2], Request::Outcome { op: 1, result: Outcome::NotApplied { reason } } if reason == "declined at Island entry 5")
         );
     }
 }

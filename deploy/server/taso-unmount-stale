@@ -1,0 +1,32 @@
+#!/bin/sh
+# taso-unmount-stale: before the Warden starts, unmount the Vessels'
+# filesystems whose block device is gone.  Installed in
+# /usr/local/lib/island/ by scripts/node/install.sh; run by
+# taso-wardend.service (ExecStartPre).
+#
+# Why: when taso-blkd dies without `quit`, the Vessels' filesystems stay
+# mounted on ublk devices nobody serves.  The next taso-blkd deletes those
+# devices and serves the datasets on new ones, and the Warden refuses to
+# start while a dataset is still mounted from the old one ("... is mounted
+# from /dev/ublkb0, not /dev/ublkb1"; found on the server, 2026-11-14).
+# Taso does not clean this up itself (a wish to Taso).
+#
+# Only a mount under the Warden's mounts directory, and only one whose
+# source is no longer a block device with the mount's own device number,
+# is touched: a live dataset's mount is left alone.  The unmount is lazy:
+# a filesystem on a dead device cannot be flushed anyway.
+
+MNT=${1:-/var/lib/taso/mnt}
+
+findmnt -rn -o TARGET,SOURCE,MAJ:MIN | while read -r target source majmin; do
+    case $target in "$MNT"/*) ;; *) continue ;; esac
+    now=""
+    if [ -b "$source" ]; then
+        now=$(stat -L -c '%Hr:%Lr' "$source" 2>/dev/null)
+    fi
+    if [ "$now" != "$majmin" ]; then
+        echo "taso-unmount-stale: $target was mounted from $source ($majmin), which is gone: unmounting"
+        umount -l "$target" || echo "taso-unmount-stale: could not unmount $target"
+    fi
+done
+exit 0

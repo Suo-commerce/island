@@ -4,9 +4,8 @@
 //! verify them against the pinned root; open each Vessel's sender socket
 //! and list the released effects; for each, follow the approval rule
 //! (island-client's `approval` module): send what is approved (append a
-//! `dispatch` entry naming the approval), decline what is declined, lapse
-//! what was lost in a Warden restart and never approved, and leave the
-//! rest. One JSON line per effect goes to standard output.
+//! `dispatch` entry naming the approval), decline what is declined, and
+//! leave the rest waiting, unknown or not. One JSON line per effect goes to standard output.
 //!
 //! Two ways to run: `--socket` holds one Vessel's socket (the spikes and
 //! tests); `--senders` serves every `<vessel-id>.sock` in the Warden's
@@ -387,7 +386,7 @@ fn line(vessel: VesselId, step: &Step) -> (u64, String, String) {
             line["sent_at"] = json!(entry);
         }
         Action::SendRefused(why) => line["error"] = json!(why),
-        Action::Wait | Action::Lapse | Action::HeldAfterRefusal => {}
+        Action::Wait | Action::HeldAfterRefusal => {}
     }
     match &step.reported {
         None if matches!(step.action, Action::Sent { .. }) => {

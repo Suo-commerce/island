@@ -13,6 +13,9 @@ BindsTo=taso-blkd.service
 After=taso-blkd.service
 
 [Service]
+# A crash of the block log leaves the Vessels' filesystems mounted on dead
+# devices, and the Warden will not start over them: unmount those first.
+ExecStartPre=-/usr/local/lib/island/taso-unmount-stale /var/lib/taso/mnt
 ExecStart=/usr/local/bin/taso-wardend /etc/taso/warden.json
 Restart=always
 RestartSec=2

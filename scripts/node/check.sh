@@ -26,7 +26,12 @@ ROOT=$(sed -n 's/^ISLAND_ROOT=//p' /etc/island/island.env)
 BROKER=http://10.77.0.1:4747
 MNT=/var/lib/taso/mnt
 UNITS=(taso-blkd taso-wardend island-sender)
-IDLE_AT=4   # the plan's last step: mark, seal, effect, seal, idle
+# Where the plan in flare-home's entry idles: where a restart must resume.
+IDLE_AT=$(python3 -c '
+import json
+v = [v for v in json.load(open("/etc/taso/warden.json"))["vessels"] if v["subject"] == "flare-home"][0]
+args = v["runtime"]["args"]
+print(args[args.index("--prime") + 1].split(",").index("idle"))')
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
 [ -x "$CLI" ] || { echo "build first: scripts/node/install.sh" >&2; exit 2; }
@@ -81,8 +86,9 @@ state() {   # the plain checks
     check "$when: the Warden's sender socket for flare-home is there" \
         "$(ls /run/taso/run/senders/*.sock 2>/dev/null | wc -l)" 1
     check "$when: flare-home is at the end of its plan" "$(agent '[e["step"] for e in S][-1:]')" '["idle"]'
-    check "$when: it proposed its action once, in all its history" \
-        "$(agent 'len([e for e in d if e["step"] == "effect"])')" 1
+    check "$when: no turn in all its history proposed an action twice" \
+        "$(agent 'len([e for e in d if e["step"] == "effect"]) == len({(e["turn"], e["tag"]) for e in d if e["step"] == "effect"})')" true
+    note "$when: its actions: $(agent '[(e["turn"], e["tag"], e["result"], e.get("op")) for e in d if e["step"] == "effect"]')"
     check "$when: the dispatch entries for it in the log: at most one" \
         "$(dispatches | awk '{ print ($1 <= 1) ? "ok" : $1 }')" ok
     note "$when: flare-home's starts in its Seal's history and now: $(agent '[(e["start"], e["resume_at"], e["last_sealed"]) for e in d if e["step"] == "start"]')"

@@ -19,9 +19,14 @@
 //! 4. Each decision the pass made is the one a model of the rule, written
 //!    here without the sender's code, makes from the log at that moment;
 //!    the gate never refuses a dispatch the sender tried.
-//! 5. After any history and two clean passes, nothing is lost: no released
-//!    action is unknown, every one still released is waiting for an
-//!    approval, and every dispatched action is reported applied.
+//! 5. After any history and two clean passes, nothing is lost: every
+//!    action still released is waiting for an answer, unknown or not, and
+//!    every dispatched action is reported applied.
+//!
+//! The stand-in Warden lists an effect as unknown after a restart and, as
+//! Taso does, whenever an earlier listing handed it out (`hand_out`): a
+//! sender that decided on that flag would cancel what it was told to wait
+//! for, as island-sender's lapse rule did until step 2.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -152,19 +157,11 @@ enum Model {
     AlreadySent(u64),
     Send(u64),
     Decline(u64),
-    Lapse,
     Wait,
 }
 
 /// The decision for one action from the first `upto` records.
-fn model(
-    log: &Log,
-    upto: usize,
-    vessel: VesselId,
-    key: Hash,
-    request: Hash,
-    unknown: bool,
-) -> Model {
+fn model(log: &Log, upto: usize, vessel: VesselId, key: Hash, request: Hash) -> Model {
     let records = &log.records[..upto];
     let mut answers = Vec::new();
     let mut used = BTreeSet::new();
@@ -188,11 +185,10 @@ fn model(
     let usable = answers.iter().find(|(seq, v)| {
         *v == Answered::Approve && !used.contains(seq) && last_decline.is_none_or(|d| d < *seq)
     });
-    match (usable, last_decline, unknown) {
-        (Some((seq, _)), _, _) => Model::Send(*seq),
-        (None, Some(seq), _) => Model::Decline(seq),
-        (None, None, true) => Model::Lapse,
-        (None, None, false) => Model::Wait,
+    match (usable, last_decline) {
+        (Some((seq, _)), _) => Model::Send(*seq),
+        (None, Some(seq)) => Model::Decline(seq),
+        (None, None) => Model::Wait,
     }
 }
 
@@ -210,6 +206,8 @@ struct Op {
     vessel: usize,
     action: u8,
     state: OpState,
+    /// Listed to a sender before (Taso's `handed_out`): unknown from then.
+    handed_out: bool,
 }
 
 #[derive(Default)]
@@ -220,7 +218,7 @@ struct Warden {
 
 impl Warden {
     fn effect(op: u64, o: &Op) -> OpenEffect {
-        let OpState::Open { unknown } = o.state else {
+        let OpState::Open { unknown: restarted } = o.state else {
             unreachable!("only open ops are listed");
         };
         OpenEffect {
@@ -232,7 +230,7 @@ impl Warden {
             },
             consequence: Consequence::Irreversible,
             authority: b"history".to_vec(),
-            unknown,
+            unknown: restarted || o.handed_out,
         }
     }
 
@@ -321,13 +319,14 @@ struct SimWarden<'a> {
 
 impl Released<&'static str> for SimWarden<'_> {
     fn open(&mut self) -> Result<Vec<OpenEffect>, &'static str> {
-        Ok(self
-            .warden
-            .ops
-            .iter()
-            .filter(|(_, o)| o.vessel == self.vessel && matches!(o.state, OpState::Open { .. }))
-            .map(|(op, o)| Warden::effect(*op, o))
-            .collect())
+        let mut listed = Vec::new();
+        for (op, o) in self.warden.ops.iter_mut() {
+            if o.vessel == self.vessel && matches!(o.state, OpState::Open { .. }) {
+                listed.push(Warden::effect(*op, o));
+                o.handed_out = true;
+            }
+        }
+        Ok(listed)
     }
 
     fn report(&mut self, op: u64, result: Outcome) -> Result<Option<String>, &'static str> {
@@ -430,6 +429,7 @@ impl World {
                         vessel,
                         action,
                         state: OpState::Open { unknown: false },
+                        handed_out: false,
                     },
                 );
             }
@@ -518,7 +518,6 @@ impl World {
         let (upto, got) = match &step.action {
             Action::Sent { entry, approval } => (*entry as usize, Model::Send(*approval)),
             Action::Wait => (self.log.records.len(), Model::Wait),
-            Action::Lapse => (self.log.records.len(), Model::Lapse),
             Action::Decline(seq) => (self.log.records.len(), Model::Decline(*seq)),
             Action::AlreadySent(seq) => (self.log.records.len(), Model::AlreadySent(*seq)),
             Action::SendRefused(why) => {
@@ -530,7 +529,10 @@ impl World {
                 return Err("oracle 4: an action held after a refusal".to_owned());
             }
         };
-        let want = model(&self.log, upto, vessel, key, request, effect.unknown);
+        if effect.unknown {
+            self.hit(format!("unknown:{}", step.action.name()));
+        }
+        let want = model(&self.log, upto, vessel, key, request);
         if got != want {
             return Err(format!(
                 "oracle 4: op {} decided {got:?}, the model says {want:?}",
@@ -596,26 +598,20 @@ impl World {
         for (op, o) in &self.warden.ops {
             let vessel = VESSELS[o.vessel];
             let key = effect_key(&raw_key(o.vessel, o.action));
-            match o.state {
-                OpState::Open { unknown: true } => {
-                    return Err(format!("oracle 5: op {op} is still unknown"));
-                }
-                OpState::Open { unknown: false } => {
-                    let want = model(
-                        &self.log,
-                        self.log.records.len(),
-                        vessel,
-                        key,
-                        request_of(o.action),
-                        false,
-                    );
-                    if want != Model::Wait {
-                        return Err(format!(
-                            "oracle 5: op {op} is still released, the model says {want:?}"
-                        ));
-                    }
-                }
-                _ => {}
+            if !matches!(o.state, OpState::Open { .. }) {
+                continue;
+            }
+            let want = model(
+                &self.log,
+                self.log.records.len(),
+                vessel,
+                key,
+                request_of(o.action),
+            );
+            if want != Model::Wait {
+                return Err(format!(
+                    "oracle 5: op {op} is still released, the model says {want:?}"
+                ));
             }
         }
         for (vessel, key) in sent {
@@ -683,7 +679,10 @@ fn the_generator_reaches_every_outcome() {
     println!("{coverage:#?}");
     let required = [
         "action:wait",
-        "action:lapse",
+        "unknown:wait",
+        "unknown:send",
+        "unknown:already-sent",
+        "unknown:decline",
         "action:decline",
         "action:already-sent",
         "action:send",

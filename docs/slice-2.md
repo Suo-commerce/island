@@ -29,7 +29,7 @@ The smallest path that touches every new part and is useful on its first day:
 - [ ] Every byte that crossed the island socket is counted in an `access` entry; no prompt or answer is in the Island log; the agent's transcript is in its Vessel's Chronicle
 - [ ] The observer writes a `receipt` when a repo's branch head moves; an artefact verse naming a commit without a receipt is refused with a `verdict`
 - [ ] The four new kinds have golden vectors; replay from genesis re-judges every verdict and reproduces the state hash with them
-- [ ] Harness: the approval-and-dispatch model agrees with `island-sender` on generated sequences with sender crashes, Warden restarts and lapses; an action is never sent unapproved and never twice
+- [ ] Harness: the approval-and-dispatch model agrees with `island-sender` on generated sequences with sender crashes, Warden restarts and repeated listings; an action is never sent unapproved and never twice
 - [ ] The server gate (`just vessel-gate`, grown from `s2-spike.sh`) passes with `flare-agent` driven by a scripted model
 - [ ] Flare's face exists as a second client of the same session, built from Jarmo's UX plan; the terminal still does everything
 - [ ] Used for real for two weeks: at least one repo verse a day drafted this way
@@ -138,7 +138,7 @@ The namespace is the one S2 used; on a node with one tenant it is only a name. S
 1. The prime writes the children's tasks to `/work/.flare/fork-tasks.json`, ends the turn, and asks `Fork` once per child, each from that same newest Seal. The Seal must be shipped first, or the fork is refused *(read)*; each reply names the child and, in its name, the slot.
 2. Each child starts, learns from `whoami` that it is a fork and in which slot, takes its task from the file by its place among the slots, does it, declares its actions (all held), ends its turn, posts a note (what it made, in at most 16 KiB, and that it is done) and exits. The task file stays in the child's files; the child removes it before its last Seal, so a promoted child's files carry no stale task.
 3. The prime, still in the turn that forked, reads the notes, chooses, and asks `Promote`. Taso ends the run for the adoption; with `restart: always` the Warden starts the agent again on the child's files, about two seconds later, with Hello's last sealed turn the child's *(ran: S4)*. The prime's unsealed files are gone.
-4. After the restart the child's adopted actions, and any action the prime released in the turn that promoted, are released and **unknown**, and the Vessel has no effect authority until they are settled *(ran: S4: "no effect authority: 2 unresolved effect(s)")*. `island-sender` lapses an unknown action that is not approved, so an adopted action is lost unless it was approved before the promotion. The agent therefore proposes each adopted action again after a promotion, with the same key and request: an approval given before or after counts for it, and one given before is sent at once. The prime releases nothing in the turn that promotes.
+4. After the restart the child's adopted actions, and any action the prime released in the turn that promoted, are released and **unknown**, and the Vessel has no effect authority until they are settled *(ran: S4: "no effect authority: 2 unresolved effect(s)")*. An unknown action waits for its answer like any other (the order of decisions, below): approved before or after the promotion, it is sent; declined, it is settled. Until all are answered the agent proposes nothing new, so after a promotion it tells Jarmo what is waiting. The prime releases nothing in the turn that promotes.
 5. Children not chosen stay as they are: sealed, held, sent nowhere. Their notes are dropped. To work on without promoting any, the prime ends its turn: the fork set is given up.
 6. A slot is used once, and a finished child's dataset stays mounted while the Warden runs *(ran: S4)*: `flare-home`'s eight fork slots are eight forks for the life of its config. Giving it more slots is a config change; reclaiming them is a wish to Taso (wish 5).
 
@@ -207,8 +207,9 @@ Both are declared `Irreversible`: said is said, and a log entry stays.
 1. Already dispatched, this op or an earlier op of the same Vessel with the same key: report applied, send nothing.
 2. Approved, or needing no approval: send, then report applied. An approval counts if no dispatch has used it and no decline of the same request came after it.
 3. Declined, with no approval after the decline: report not applied.
-4. Unapproved and its outcome was lost in a Warden restart: report not applied, "lapsed". The agent is told on its next `Result` and proposes it again; an approval given later still counts, because it names the request, not the attempt.
-5. Otherwise: leave it waiting. Nothing expires on its own: Jarmo declines what he does not want, and the cap of 16 waiting actions keeps the list short.
+4. Otherwise: leave it waiting, **whether Taso lists it as unknown or not**. Nothing expires on its own: Jarmo declines what he does not want, and the cap of 16 waiting actions keeps the list short. An unknown barrier that waits keeps the Vessel from releasing anything new, which is right: an action whose fate is open is answered before the next.
+
+*Changed in step 2.* There was a fourth rule: an unapproved action lost in a Warden restart was reported not applied ("lapsed"), to give the Vessel its effect authority back at once. Taso's `unknown` flag does not only mean a restart: it also marks every effect an earlier listing handed out (`effects.rs`, `hand_out`), so a sender that polls its socket sees it on every pass but the first. On the server, island-sender lapsed `flare-home`'s first action half a second after it was proposed. Only the log's dispatches say whether an action was let out; the flag decides nothing. The stand-in Warden in the tests and the sender-history harness now hand out as Taso does, and the harness catches the old rule.
 
 **The gate holds the same rule** (built in step 1). A `dispatch` is accepted only if, checked in this order: the same Vessel has not dispatched the same key (`AlreadyDispatched`); the entry it names is an `approval` that approves the same request (`Unapproved`); no earlier dispatch used that approval (`ApprovalUsed`); no decline of the request comes after that approval (`Declined`). A refusal is a `verdict` like any other. This differs from S2 in one place: a decline no longer stops the request forever, only the approvals before it, so Jarmo can change his mind by approving again. The rule is a structural rule of the log, as grants are, not an invariant of the policy: no policy can loosen it.
 
@@ -261,7 +262,7 @@ Version 1 keeps working; a client says which it speaks when it attaches.
 | `agent_state` | idle, working (task, turn), forked (children, slots left), waiting (for approval, for Jarmo) |
 | `fork_note` | child, text, done |
 | `action_waiting` | vessel, op, provider, request hash, the request decoded for reading, since when |
-| `action_settled` | request hash; sent (entry), declined (entry) or lapsed |
+| `action_settled` | request hash; sent (entry) or declined (entry) |
 | `nudge` | repo, branch, commits since the last verse, since when |
 
 `action_waiting` and `action_settled` are built by `flare-server` from `island-sender`'s reports and from the log. A client with a replica recomputes the request hash from the shown request and checks the settled entry in its own log, so "sent" is never taken on the server's word.
@@ -347,3 +348,5 @@ Island works on main as it is. These would make it better, in this order:
 5. **Slots that free:** a fork slot usable again once its child is promoted or purged, so a long-lived Vessel can fork for as long as it lives.
 6. **The inbox**: tasks then enter through Taso, and the island socket's task pull goes.
 7. A line in the docs: a socket placed in a Vessel's root filesystem is reachable, and its peer uid names the Vessel.
+8. **A Warden that starts after a crash of the block log** (found in step 2): `taso-blkd` killed without `quit` leaves the Vessels' filesystems mounted on deleted devices, and the Warden refuses to start while a dataset is mounted from another device than the one now serving it. Island's unit unmounts such mounts before the Warden starts (`deploy/server/taso-unmount-stale`).
+9. **A sender listing that says why an effect is unknown** (found in step 2): a restart, or only handed out before (`hand_out`). Island no longer needs it (it decides on the log), but a sender that does is easy to write wrong.

@@ -1,3 +1,4 @@
 /target
 /.island
 __pycache__/
+*.proptest-regressions

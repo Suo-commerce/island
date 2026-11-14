@@ -24,6 +24,7 @@
 #      enables them.  It starts nothing: that is the last command it prints.
 #
 # Environment: TASO (/root/taso)  SIZE_GIB (32: the block log, at init only)
+#              FLARE_HOME_PLAN (the stand-in agent's steps, comma-separated)
 #
 # It opens no port and adds no firewall rule; Taso adds none either.
 
@@ -104,7 +105,9 @@ taso-ctl init --data "$DATA" --size-gib "$SIZE_GIB" --rootfs "$IMAGE"
 # approve, then it waits.  Its place in that plan lives in its /work, so a
 # restart or a reboot carries on from the last Seal and never proposes the
 # action twice.
-PLAN="mark:flare-home,seal,effect:irr:hello-from-flare-home,seal,idle"
+# FLARE_HOME_PLAN replaces it; a running flare-home goes on from where
+# its last Seal left it in the new plan, at its next start.
+PLAN=${FLARE_HOME_PLAN:-mark:flare-home,seal,effect:irr:hello-from-flare-home,seal,idle}
 cp "$CONFIG" "$CONFIG.before-flare-home"
 python3 - "$CONFIG" "$NS" "$IMAGE" "$PLAN" <<'PY'
 import json, os, sys
@@ -155,6 +158,7 @@ SENDER_PUB=$("$ISLAND/target/release/island-cli" public "$SENDER_KEY")
 # ── 6. the units ───────────────────────────────────────────────────────
 install -m 644 "$ISLAND/deploy/server/taso-blkd.service" "$ISLAND/deploy/server/taso-wardend.service" \
     "$ISLAND/deploy/server/island-sender.service" /etc/systemd/system/
+install -D -m 755 "$ISLAND/deploy/server/taso-unmount-stale" /usr/local/lib/island/taso-unmount-stale
 systemctl daemon-reload
 systemctl enable -q taso-blkd taso-wardend island-sender
 say "units installed and enabled (not started): taso-blkd, taso-wardend, island-sender"

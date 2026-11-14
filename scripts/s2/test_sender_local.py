@@ -176,7 +176,7 @@ class Sender(unittest.TestCase):
         open(os.path.join(self.work, "sender-done"), "w").close()
         self.assertEqual(p.wait(10), 0)
 
-    def test_crash_after_send_does_not_send_twice_and_unapproved_lapses(self):
+    def test_crash_after_send_does_not_send_twice_and_unapproved_waits(self):
         s = StandIn(self.tmp)
         p = agent(s, self.work, ["effect:irr", "effect:irr", "seal", "report", "stall"])
         report(self.work)
@@ -190,11 +190,33 @@ class Sender(unittest.TestCase):
         self.stop_broker()     # and the broker restarts too
         self.start_broker()
         after = self.sender(s)
-        self.assertEqual([(x["op"], x["action"]) for x in after],
-                         [(first[0]["op"], "already-sent"), (first[1]["op"], "lapse")])
+        self.assertEqual([(x["op"], x["action"], x["unknown"]) for x in after],
+                         [(first[0]["op"], "already-sent", True), (first[1]["op"], "wait", True)])
         self.assertEqual(after[0]["sent_at"], crashed[0]["sent_at"], "the same dispatch, not a second send")
-        self.assertTrue(all(x["reported"] for x in after))
+        self.assertTrue(after[0]["reported"])
+        self.assertFalse(s.authority, "the unapproved barrier is still open: no effect authority")
+        # Waiting is not lapsing: an answer settles it, either way.
+        self.approve(after[1]["request_hash"], decline=True)
+        answered = self.sender(s)
+        self.assertEqual([(x["op"], x["action"], x["reported"]) for x in answered],
+                         [(first[1]["op"], "decline", True)])
         self.assertTrue(s.authority, "both barriers settled: effect authority is back")
+
+    def test_an_effect_listed_again_still_waits(self):
+        # Taso lists an effect as unknown once it was handed out before:
+        # a sender polling its socket sees that on every pass but the
+        # first. It must go on waiting (step 2's lapse rule cancelled it).
+        s = StandIn(self.tmp)
+        p = agent(s, self.work, ["effect:irr", "seal", "report", "wait:sender-done"])
+        report(self.work)
+        first = self.sender(s)
+        again = self.sender(s)
+        self.assertEqual([(x["action"], x["unknown"]) for x in first + again],
+                         [("wait", False), ("wait", True)])
+        self.approve(again[0]["request_hash"])
+        self.assertEqual([x["action"] for x in self.sender(s)], ["send"])
+        open(os.path.join(self.work, "sender-done"), "w").close()
+        self.assertEqual(p.wait(10), 0)
 
 
 if __name__ == "__main__":

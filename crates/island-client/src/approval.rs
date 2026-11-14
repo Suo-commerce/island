@@ -114,24 +114,26 @@ pub enum Decision {
     Send(u64),
     /// Declined, and no approval after the decline: report NotApplied.
     Decline(u64),
-    /// Not approved, and its outcome was lost in a Warden restart: report
-    /// NotApplied ("lapsed"), so the Vessel gets its effect authority
-    /// back and proposes it again.
-    Lapse,
-    /// Not approved yet: leave it on the Open list.
+    /// Not approved yet: leave it on the Open list, however long, until
+    /// Jarmo answers.
     Wait,
 }
 
 /// The decision for one released effect. The order is the rule: a
 /// dispatch already made is final; then an approval the gate would take;
-/// then a decline; then the lapse rule; otherwise wait.
-pub fn decide(
-    marks: &Marks,
-    vessel: &VesselId,
-    key: &Hash,
-    request: &Hash,
-    unknown: bool,
-) -> Decision {
+/// then a decline; otherwise wait.
+///
+/// Taso's `unknown` flag plays no part. It says an outcome may already
+/// exist: after a Warden restart, and also whenever an earlier listing
+/// handed the effect out, which a sender polling its socket does every
+/// pass (Taso `effects.rs`, `hand_out`). Whether the action was let out is
+/// what the log's dispatches say, and nothing else. An unknown action
+/// that is not approved waits like any other: until it is answered, the
+/// Vessel releases nothing new (Taso's barrier), which is the point. Up to
+/// step 2 an unknown, unapproved action was reported not applied
+/// ("lapsed"); with a polling sender that cancelled every action half a
+/// second after it was proposed.
+pub fn decide(marks: &Marks, vessel: &VesselId, key: &Hash, request: &Hash) -> Decision {
     if let Some(sent) = marks.sent(vessel, key) {
         return Decision::AlreadySent(sent);
     }
@@ -140,9 +142,6 @@ pub fn decide(
     }
     if let Some(seq) = marks.declined(request) {
         return Decision::Decline(seq);
-    }
-    if unknown {
-        return Decision::Lapse;
     }
     Decision::Wait
 }
@@ -227,11 +226,10 @@ mod tests {
     }
 
     #[test]
-    fn nothing_approved_waits_and_a_lost_outcome_lapses() {
+    fn nothing_approved_waits_even_unknown() {
         let m = marks(&[]);
         let (h, k) = (request_hash("island", b"r"), effect_key(b"k"));
-        assert_eq!(decide(&m, &V, &k, &h, false), Decision::Wait);
-        assert_eq!(decide(&m, &V, &k, &h, true), Decision::Lapse);
+        assert_eq!(decide(&m, &V, &k, &h), Decision::Wait);
     }
 
     #[test]
@@ -239,7 +237,7 @@ mod tests {
         let (h, k) = (request_hash("island", b"r"), effect_key(b"k"));
         let approve = answer(10, h, Answered::Approve);
         assert_eq!(
-            decide(&marks(std::slice::from_ref(&approve)), &V, &k, &h, false),
+            decide(&marks(std::slice::from_ref(&approve)), &V, &k, &h),
             Decision::Send(10)
         );
         let m = marks(&[approve, dispatch(11, k, h, 10)]);
@@ -247,16 +245,12 @@ mod tests {
             entry: 11,
             approval: 10,
         });
-        assert_eq!(decide(&m, &V, &k, &h, false), done);
-        // After a Warden restart the same action comes back unknown.
-        assert_eq!(decide(&m, &V, &k, &h, true), done);
+        // Again, as after a Warden restart: the dispatch decides.
+        assert_eq!(decide(&m, &V, &k, &h), done);
         // An identical request with another key needs its own approval.
-        assert_eq!(
-            decide(&m, &V, &effect_key(b"k2"), &h, false),
-            Decision::Wait
-        );
+        assert_eq!(decide(&m, &V, &effect_key(b"k2"), &h), Decision::Wait);
         // The same key from another Vessel is another action.
-        assert_eq!(decide(&m, &[8; 16], &k, &h, false), Decision::Wait);
+        assert_eq!(decide(&m, &[8; 16], &k, &h), Decision::Wait);
     }
 
     #[test]
@@ -265,8 +259,7 @@ mod tests {
         let approve = answer(10, h, Answered::Approve);
         let decline = answer(12, h, Answered::Decline);
         let m = marks(&[approve.clone(), decline.clone()]);
-        assert_eq!(decide(&m, &V, &k, &h, false), Decision::Decline(12));
-        assert_eq!(decide(&m, &V, &k, &h, true), Decision::Decline(12));
+        assert_eq!(decide(&m, &V, &k, &h), Decision::Decline(12));
         // Approved again after the decline: the new approval counts.
         let again = answer(13, h, Answered::Approve);
         assert_eq!(
@@ -274,8 +267,7 @@ mod tests {
                 &marks(&[approve.clone(), decline.clone(), again]),
                 &V,
                 &k,
-                &h,
-                false
+                &h
             ),
             Decision::Send(13)
         );
@@ -285,8 +277,7 @@ mod tests {
                 &marks(&[approve, dispatch(11, k, h, 10), decline]),
                 &V,
                 &k,
-                &h,
-                false
+                &h
             ),
             Decision::AlreadySent(_)
         ));
@@ -303,7 +294,7 @@ mod tests {
                 value: hex(&h),
             }),
         )]);
-        assert_eq!(decide(&m, &V, &k, &h, false), Decision::Wait);
+        assert_eq!(decide(&m, &V, &k, &h), Decision::Wait);
     }
 
     #[test]

@@ -21,14 +21,15 @@
 #      promoted child's two effects wait until one is approved and one
 #      declined; the approved one is sent once, the declined one never;
 #      then a sender that crashes right after its dispatch, a Warden
-#      kill and a broker restart: the next pass reports the same mark
-#      (no second send), lapses the unapproved effect, and the prime
-#      gets its effect authority back
+#      kill and a broker restart: the next pass reports the same dispatch
+#      (no second send) and the unapproved effect, unknown now, waits;
+#      declined, it is settled and the prime gets its effect authority
+#      back
 #   f  the prime has a released Irreversible effect and its Warden is
 #      killed before a sender reports: after the restart the effect is
 #      listed unknown, a new effect is refused (no effect authority), and
-#      the lapse rule of decision D1 (the sender reports NotApplied)
-#      restores authority
+#      the stand-in sender's lapse rule (it reports NotApplied) restores
+#      authority.  island-sender does not lapse (step 2): run s
 #   p  (spike S4, docs/slice-2.md) fork and promote asked for by the agent
 #      over the Field, on a prime with "restart": "always" and fork slots:
 #      the child learns it is a fork from the island socket's stand-in;
@@ -550,7 +551,7 @@ sent_marks() {   # sent_marks <vessel-id>: how many dispatch entries name this V
 }
 
 run_s() {
-    echo "-- s: island-sender: approvals, a crash after a send, the lapse rule"
+    echo "-- s: island-sender: approvals, a crash after a send, an unknown action waits"
     island_setup
 
     # s1: a promoted child's two effects; one approved, one declined
@@ -603,11 +604,17 @@ run_s() {
         "Refused: no effect authority"
     isend "$ERR" "$OUT/s2-pass2.jsonl"
     p2=$(lines "$OUT/s2-pass2.jsonl")
-    check s "the sent one is reported from its dispatch, the unapproved one lapses" \
+    check s "the sent one is reported from its dispatch, the unapproved one waits" \
         "$(jq_ "$p2" "[(x['action'], x['unknown'], x.get('reported')) for x in d]")" \
-        '[["already-sent", true, true], ["lapse", true, true]]'
+        '[["already-sent", true, true], ["wait", true, null]]'
     check s "the same dispatch as before the crash: no second send" \
         "$(jq_ "$p2" "d[0].get('sent_at')")" "$(jq_ "$crash" "d[0]['sent_at']")"
+    # Waiting is not lapsing: until it is answered the Vessel releases
+    # nothing new. Declined, it is settled and authority comes back.
+    iapprove "$(jq_ "$p2" "d[1]['request_hash']")" --decline
+    isend "$ERR" "$OUT/s2-pass2b.jsonl"
+    check s "declined after the restart, it is reported not applied" \
+        "$(jq_ "$(lines "$OUT/s2-pass2b.jsonl")" "[(x['action'], x.get('reported')) for x in d]")" '[["decline", true]]'
     go "$ERR" resumed
     rep=$(report_of "$ERR" 4)
     check s "effect authority is back: the next effect is released" \

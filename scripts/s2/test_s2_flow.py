@@ -48,6 +48,7 @@ class StandIn:
         self.last_sealed = last_sealed
         self.next_op = 1
         self.released = {}  # op -> (provider, request, key, consequence, unknown)
+        self.handed_out = set()  # ops listed before, by this Warden
         self.lock = threading.Lock()
         self.field_path = os.path.join(tmp, "field.sock")
         # Named like the Warden's: <vessel-id in 32 hex digits>.sock.
@@ -108,19 +109,25 @@ class StandIn:
                 if op not in self.released:
                     return _u8(5) + _u64(op) + _u8(1) + _b(b"not released")
                 del self.released[op]
-                self.authority = True
+                # Authority comes back once no unknown barrier is left.
+                self.authority = not any(c == f.IRREVERSIBLE and u for (_, _, _, c, u) in self.released.values())
                 return _u8(5) + _u64(op) + _u8(0)
             if tag == 5:
                 out = _u8(6) + _u64(len(self.released))
                 for op, (prov, req, key, cons, unknown) in sorted(self.released.items()):
                     c = {f.IRREVERSIBLE: _u8(0), f.NO_EXTERNAL_MUTATION: _u8(2)}[cons]
-                    out += _u64(op) + _b(prov.encode()) + _b(req) + _u8(0) + _b(key) + c + _b(b"s2") + _u8(int(unknown))
+                    # As Taso's hand_out: unknown after a restart, and also
+                    # once an earlier listing handed it out.
+                    seen = unknown or op in self.handed_out
+                    self.handed_out.add(op)
+                    out += _u64(op) + _b(prov.encode()) + _b(req) + _u8(0) + _b(key) + c + _b(b"s2") + _u8(int(seen))
                 return out
         raise AssertionError(f"tag {tag}")
 
     def crash(self):
         """What a restart does to a released barrier: unknown, no authority."""
         with self.lock:
+            self.handed_out.clear()  # a new Warden's engine; unknown stays
             for op, (p, q, k, c, _) in list(self.released.items()):
                 self.released[op] = (p, q, k, c, True)
                 if c == f.IRREVERSIBLE:
