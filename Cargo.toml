@@ -25,6 +25,7 @@ island-harness = { path = "crates/island-harness" }
 island-log = { path = "crates/island-log" }
 island-model = { path = "crates/island-model" }
 island-sender = { path = "crates/island-sender" }
+island-socket = { path = "crates/island-socket" }
 flare-core = { path = "crates/flare-core" }
 flare-link = { path = "crates/flare-link" }
 flare-server = { path = "crates/flare-server" }
@@ -46,6 +47,8 @@ tempfile = "3.27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.23"
+# island-socket's config file (docs/slice-2.md, "Providers").
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 
 # The broker's network face (docs/spec.md, "Interfaces"). rmcp is the MCP
 # SDK; each crate turns on the sides and transports it uses. reqwest comes

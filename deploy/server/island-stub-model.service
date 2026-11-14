@@ -1,0 +1,20 @@
+# A stub model for island-socket until real providers are configured
+# (docs/server.md, "7. The island socket"): an OpenAI-compatible endpoint
+# on loopback that answers with filler text, so the path from a Vessel to
+# a provider and back can be checked. Not a model. Remove it, and its
+# provider from /etc/island-socket/config.toml, once a real one is there.
+[Unit]
+Description=Island stub model (placeholder provider)
+
+[Service]
+DynamicUser=yes
+ExecStart=/usr/bin/python3 /usr/local/lib/island/stub-model.py --listen 127.0.0.1:8099 --bytes 2000 --pieces 20 --delay 0.01
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -172,13 +172,14 @@ fn body(body: &Body) -> String {
             receipt.commits
         ),
         Body::Access(access) => format!(
-            "vessel {} {:?} via {:?}, {} call(s), {} bytes in, {} out",
+            "vessel {} {:?} via {:?}, {} call(s), {} bytes in, {} out, digest {}",
             hex(&access.vessel),
             access.what,
             access.provider,
             access.calls,
             access.bytes_in,
-            access.bytes_out
+            access.bytes_out,
+            short(&access.digest)
         ),
         Body::Approval(approval) => format!(
             "{} request {}",

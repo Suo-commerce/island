@@ -79,6 +79,11 @@ s2-sender-test:
     cargo build --locked -p island-cli -p island-broker -p island-sender
     python3 -m unittest scripts/s2/test_sender_local.py
 
+# Step 3: island-socket against a real Island log and broker, with the stub model (no root needed).
+s3-test:
+    cargo build --locked -p island-cli -p island-broker -p island-socket
+    python3 -m unittest scripts/s3/test_socket_local.py
+
 # Spike S2 on the server, as root: Island's agent in Taso Vessels (runs a to h, and s: island-sender). TASO names the Taso checkout.
 s2-spike TASO="/root/taso":
     TASO={{TASO}} scripts/s2-spike.sh

@@ -150,7 +150,8 @@ HTTP over a Unix socket at `/run/island/island.sock` in the Vessels' root filesy
 
 | Request | Answer | Counted as |
 | --- | --- | --- |
-| `GET /whoami` | `{ vessel, subject, role: "prime" \| "fork", slot, forks_left }` | — |
+| `GET /whoami` | `{ vessel, subject, role: "prime" \| "fork", slot, prime, forks_left, default_model }` | — |
+| `GET /v1/models` | the models the agent may name, OpenAI's list shape | — |
 | `POST /v1/chat/completions` | the model's answer, streamed; the socket sets the credential and allows only the configured models | inference |
 | `GET /task?after=<id>` | the next message Jarmo addressed to the agent, or nothing | task |
 | `GET /log/head`, `/log/stream/<name>`, `/log/receipts` | records, verified by the agent's `island-client` against the pinned root | read |
@@ -161,7 +162,9 @@ HTTP over a Unix socket at `/run/island/island.sock` in the Vessels' root filesy
 
 - It answers; it never writes to the Island log on a caller's behalf. Its only writes are its own `access` entries.
 - A daily budget per Vessel, in calls and in bytes, set in its config. Over budget is refused, and the refusal is counted.
-- `access` entries are batched: one per Vessel and kind of request, at most every 30 seconds, with the number of calls, bytes each way, and one digest over the calls' digests. The agent records each model message in its Chronicle with the same digest, which ties the two.
+- `access` entries are batched: one per Vessel and kind of request, at most every 30 seconds, with the number of calls, bytes each way, and one digest over the calls' digests. The agent records each model message in its Chronicle with the same digest, which ties the two. *(Built in step 3.)* A call's digest is `blake3_derive_key("island.inference-call.v1", u64le(len request) || request || response)` over the body the agent sent and the body it received, byte for byte; an entry's is `blake3_derive_key("island.access-batch.v1", call₁ || call₂ || …)` in the order the calls ended. `island-socket call-digest` and `batch-digest` compute both from files. An entry whose answer was lost is sent again byte for byte, so it is never written twice.
+- A refusal over budget is counted in `island-socket`'s own state (`/var/lib/island-socket/usage.json`), not in an `access` entry, which has no field for it; it is in the journal as well. A provider that does not answer is a call, counted and digested over the error the agent received.
+- `forks_left` is the prime's fork slots less the slots that have called the socket: a child's first request is `whoami`, and a slot is never given twice.
 - Tasks are at-least-once. The agent's cursor is in its sealed state, so a rolled-back turn pulls its task again.
 - The providers, the models and the budgets are a config file read at start ("Providers").
 
@@ -190,6 +193,7 @@ models = ["model-a", "model-b"]
 - Each provider has its own daily budget, and the `access` entry names the provider, so the log shows which models were used and how much.
 - A provider must be reachable from the server: on the server, on `wg-island`, or over the internet. The host firewall does not limit what the server sends, but UpCloud's outer firewall (planned, stateless) lets in replies only from TCP ports 443 and 80. A provider on another port over the internet needs one more rule there, written down in `docs/server.md`.
 - A provider that is not natively OpenAI-compatible is reached through its own compatibility endpoint where it has one, or a small adapter in `island-socket`. Which providers need an adapter is checked when each is added, not assumed.
+- *(Step 3.)* `http://` providers only so far: the workspace's HTTP client has no TLS. TLS is added with the first hosted provider, and with it the licence review of its crates. Until a real provider is set, the node runs `island-stub-model`, filler text on loopback, so the path can be checked.
 
 ## Actions and the sender
 
@@ -321,6 +325,7 @@ On the server, once, as `docs/server.md` will list step by step:
 | S4 promotion over the Field | Fork and promote asked for by the agent, with `restart: always`: is the prime started again on the child's files? When it has written files since the fork's Seal, what does it start on? What becomes of a prime's released action when its turn never ended? How long does a Seal take with a real `/work`? How are a finished child's slot and dataset reclaimed, if at all? | 1 day | The forking steps above; how many slots to give; the turn length |
 | | **S4 ran (2026-11-14, `/root/island-s2-20261114-112820`).** Started again on the child's files: yes, at the child's turn. Files since the fork's Seal: a prime that sealed after the fork cannot promote (M7); unsealed files are gone. The unended turn's released action: unknown after the restart, with the adopted ones, and no effect authority until they are settled. Seals: 0.72 s after writing 200 MiB in 4000 files, 1.5 s after rewriting 40 of them, under 0.05 s for a small turn; a fork 0.02 s; promotion to the next start 2.3 s, so the two-minute turn stands. Slots are never given again and finished children's datasets stay mounted. | | Forking steps 1–6 above; eight slots |
 | S5 thinking through the socket | A streamed completion of realistic size from prime and child, through `island-socket`, to each configured provider (local, `wg-island`, hosted) | half a day | Whether streaming needs anything more than run h showed |
+| | *Built:* run m of `s2-spike.sh` (`ONLY=m`), with the stub model; each real provider is checked with `scripts/node/check.sh think` as it is added. | | |
 | S6 the Pi port | Which parts of Pi's loop are ported and which are left: sized by reading it, before any code | 1 day | The agent's milestones |
 
 ## Build order
@@ -329,7 +334,7 @@ Each step leaves something that runs, and ends with `git push origin main`.
 
 1. **The four kinds.** Types, encoding, golden vectors, replay, the model. `island-cli approve` writes an `approval`; the sender's rule moves from the stand-in to the kinds. Harness oracles for approval and dispatch.
 2. **The Taso node.** `init`, the units, `flare-home` running S2's scripted agent as a long-lived Vessel, `island-sender` as a service on the real log. Reboot and kill tests. Spike S4 here. *Built:* `scripts/node/install.sh` and `check.sh`, the units in `deploy/server/`, `docs/server.md` section 6; `island-sender --senders` serves the Warden's whole senders directory; spike S4 is run p of `s2-spike.sh`, its agent `scripts/s2/s4-agent.py`, which is also `flare-home`'s stand-in agent until step 4.
-3. **`island-socket`.** `whoami`, the model pass-through against a stub, then the providers of D2 one by one (S5), budgets, `access` entries.
+3. **`island-socket`.** `whoami`, the model pass-through against a stub, then the providers of D2 one by one (S5), budgets, `access` entries. *Built (3a):* `crates/island-socket` (`whoami`, `/v1/models`, the streamed pass-through, budgets that survive a restart, batched `access` entries), its tests against a stub provider in process and end to end (`just s3-test`), the units `island-socket` and `island-stub-model`, `docs/server.md` section 7, and spike S5 as run m of `s2-spike.sh`. *Next (3b):* the real providers, one by one.
 4. **`flare-agent`, first milestone.** The loop with file tools and `say`; tasks from the session; `flare-tui` gets `say`. First conversation with the agent.
 5. **The agent's verse.** `verse`, the `island.verse` provider, `action_waiting`, `approve` and `decline` in `flare-tui`. First approved agent verse in the real log.
 6. **Forks.** `fork`, notes, `promote`, the restart on the child's files; `vessel-gate` complete.

@@ -20,8 +20,12 @@
 #      older one), checked by Taso's own parser before it stays;
 #   5. makes island-sender's key, /etc/island/sender.key, if there is none,
 #      and prints its public key for the grant;
-#   6. installs the units taso-blkd, taso-wardend and island-sender and
-#      enables them.  It starts nothing: that is the last command it prints.
+#   6. island-socket (step 3): its user, its key and config under
+#      /etc/island-socket (written once; edited by hand after), and a stub
+#      model as its first provider;
+#   7. installs the units taso-blkd, taso-wardend, island-sender,
+#      island-socket and island-stub-model and enables them.  It starts
+#      nothing: that is the last command it prints.
 #
 # Environment: TASO (/root/taso)  SIZE_GIB (32: the block log, at init only)
 #              FLARE_HOME_PLAN (the stand-in agent's steps, comma-separated)
@@ -40,13 +44,15 @@ IMAGE=$DATA/agent-island
 CONFIG=/etc/taso/warden.json
 ENV=/etc/island/island.env
 SENDER_KEY=/etc/island/sender.key
+SOCKET_KEY=/etc/island-socket/socket.key
+SOCKET_CONFIG=/etc/island-socket/config.toml
 NS=151a4d00000000000000000000000052
 
 say() { echo "== $*"; }
 die() { echo "install.sh: $*" >&2; exit 2; }
 
 [ "$(id -u)" = 0 ] || die "run as root"
-for t in runc ldd python3 cargo systemctl; do command -v "$t" >/dev/null || die "$t is missing"; done
+for t in runc ldd python3 cargo systemctl useradd runuser; do command -v "$t" >/dev/null || die "$t is missing"; done
 [ -f "$TASO/Cargo.toml" ] || die "no Taso checkout at $TASO (set TASO)"
 [ -f "$ENV" ] || die "$ENV is missing: the broker is not set up (docs/server.md, 3)"
 grep -q '^ISLAND_ROOT=[0-9a-f]\{64\}$' "$ENV" || die "$ENV has no ISLAND_ROOT"
@@ -55,11 +61,16 @@ grep -q '^ISLAND_ROOT=[0-9a-f]\{64\}$' "$ENV" || die "$ENV has no ISLAND_ROOT"
 say "building Taso (release) at $(git -C "$TASO" log -1 --format='%h %s' 2>/dev/null || echo '?')"
 (cd "$TASO" && cargo build --release -q -p taso-warden -p taso-landlock \
     && cargo build --release -q -p taso-blk --bin taso-blkd)
-say "building island-sender and island-cli (release) at $(git -C "$ISLAND" log -1 --format='%h' 2>/dev/null || echo '?')"
-(cd "$ISLAND" && cargo build --release -q --locked -p island-sender -p island-cli)
+say "building island-sender, island-socket and island-cli (release) at $(git -C "$ISLAND" log -1 --format='%h' 2>/dev/null || echo '?')"
+(cd "$ISLAND" && cargo build --release -q --locked -p island-sender -p island-socket -p island-cli)
 install -m 755 "$TASO/target/release/taso-blkd" "$TASO/target/release/taso-wardend" \
-    "$TASO/target/release/taso-ctl" "$ISLAND/target/release/island-sender" /usr/local/bin/
-say "installed taso-blkd, taso-wardend, taso-ctl, island-sender in /usr/local/bin"
+    "$TASO/target/release/taso-ctl" "$ISLAND/target/release/island-sender" \
+    "$ISLAND/target/release/island-socket" /usr/local/bin/
+say "installed taso-blkd, taso-wardend, taso-ctl, island-sender, island-socket in /usr/local/bin"
+if ! id island-socket >/dev/null 2>&1; then
+    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin island-socket
+    say "made the user island-socket"
+fi
 
 # ── 2. the image ───────────────────────────────────────────────────────
 NEW=$IMAGE.new
@@ -85,6 +96,9 @@ install -D -m 644 "$S2/s2_field.py" "$NEW/usr/lib/flare/s2_field.py"
 install -D -m 755 "$S2/s4-agent.py" "$NEW/usr/lib/flare/s4-agent.py"
 mkdir -p "$NEW"/{proc,dev,sys,tmp,work,run/taso,run/island,etc}
 : > "$NEW/run/taso/field.sock"
+# island-socket places its socket here; the agents may only connect.
+chown island-socket:island-socket "$NEW/run/island"
+chmod 755 "$NEW/run/island"
 sed -n 's/^ISLAND_ROOT=//p' "$ENV" > "$NEW/etc/island-root.pub"
 git -C "$ISLAND" log -1 --format='island %H' > "$NEW/etc/flare-image"
 git -C "$TASO" log -1 --format='taso %H' >> "$NEW/etc/flare-image"
@@ -155,20 +169,69 @@ fi
 chmod 600 "$SENDER_KEY"
 SENDER_PUB=$("$ISLAND/target/release/island-cli" public "$SENDER_KEY")
 
-# ── 6. the units ───────────────────────────────────────────────────────
+# ── 6. island-socket ───────────────────────────────────────────────────
+# Its own user, its config and key under /etc/island-socket (the user
+# reads them; only root writes), and the stub model as its first provider
+# until a real one is configured (docs/server.md, 7).
+install -D -m 755 "$ISLAND/scripts/s3/stub-model.py" /usr/local/lib/island/stub-model.py
+install -d -m 750 -o root -g island-socket /etc/island-socket
+if [ ! -f "$SOCKET_KEY" ]; then
+    (umask 077; "$ISLAND/target/release/island-cli" keygen "$SOCKET_KEY" >/dev/null)
+    say "made $SOCKET_KEY"
+fi
+chown island-socket:island-socket "$SOCKET_KEY"
+chmod 600 "$SOCKET_KEY"
+SOCKET_PUB=$("$ISLAND/target/release/island-cli" public "$SOCKET_KEY")
+if [ ! -f "$SOCKET_CONFIG" ]; then
+    printf '%s\n' \
+        "# island-socket (docs/slice-2.md, \"Providers\"; docs/server.md, 7)." \
+        "socket = \"$IMAGE/run/island/island.sock\"" \
+        "warden_config = \"$CONFIG\"" \
+        "state_dir = \"/var/lib/island-socket\"" \
+        "broker = \"http://10.77.0.1:4747\"" \
+        "root = \"$(sed -n 's/^ISLAND_ROOT=//p' "$ENV")\"" \
+        "key = \"$SOCKET_KEY\"" \
+        "access_every_secs = 30" \
+        "default = \"stub\"" \
+        "" \
+        "# A placeholder: island-stub-model.service, filler text. Replace it" \
+        "# with real providers, then point default at one of them." \
+        "[provider.stub]" \
+        "base_url = \"http://127.0.0.1:8099/v1\"" \
+        "models = [\"stub\"]" \
+        "budget = { calls = 1000, bytes = 100000000 }" >"$SOCKET_CONFIG"
+    chown root:island-socket "$SOCKET_CONFIG"
+    chmod 640 "$SOCKET_CONFIG"
+    say "wrote $SOCKET_CONFIG (the stub provider only)"
+fi
+# It places its socket in the image, through /var/lib/taso.
+runuser -u island-socket -- test -w "$IMAGE/run/island" \
+    || die "island-socket cannot write $IMAGE/run/island (a directory above it is closed to it)"
+# It reads the Vessels from Taso's config.
+if ! runuser -u island-socket -- test -r "$CONFIG"; then
+    chmod 644 "$CONFIG"
+    say "made $CONFIG readable: island-socket reads who the Vessels are from it"
+fi
+
+# ── 7. the units ───────────────────────────────────────────────────────
 install -m 644 "$ISLAND/deploy/server/taso-blkd.service" "$ISLAND/deploy/server/taso-wardend.service" \
-    "$ISLAND/deploy/server/island-sender.service" /etc/systemd/system/
+    "$ISLAND/deploy/server/island-sender.service" "$ISLAND/deploy/server/island-socket.service" \
+    "$ISLAND/deploy/server/island-stub-model.service" /etc/systemd/system/
 install -D -m 755 "$ISLAND/deploy/server/taso-unmount-stale" /usr/local/lib/island/taso-unmount-stale
 systemctl daemon-reload
-systemctl enable -q taso-blkd taso-wardend island-sender
-say "units installed and enabled (not started): taso-blkd, taso-wardend, island-sender"
+systemctl enable -q taso-blkd taso-wardend island-sender island-socket island-stub-model
+say "units installed and enabled (not started): taso-blkd, taso-wardend, island-sender, island-socket, island-stub-model"
 
 cat <<END
 
 Next:
 
-1. On the laptop, grant island-sender's key 'dispatch' on 'approvals'
-   (its public key: $SENDER_PUB).
-2. Start the node:  systemctl start taso-blkd taso-wardend island-sender
+1. On the laptop, the grants each key needs, if it has none yet:
+   island-sender  $SENDER_PUB  'dispatch' on 'approvals'
+   island-socket  $SOCKET_PUB  'access' on 'access'
+2. Start, or restart what changed:
+   systemctl restart island-stub-model island-socket island-sender
+   systemctl start taso-blkd taso-wardend
+   A new image reaches flare-home at its next start: systemctl restart taso-wardend
 3. Check it:        scripts/node/check.sh
 END

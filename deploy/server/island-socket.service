@@ -1,0 +1,30 @@
+# island-socket on the Island server: the island socket the Vessels' agents
+# ask (docs/slice-2.md, "The island socket"), served in the agents' image
+# at /var/lib/taso/agent-island/run/island/island.sock. Installed by
+# scripts/node/install.sh; see docs/server.md, "7. The island socket".
+#
+# Its own user. It holds the model providers' keys and its writer key
+# (one grant: `access` on `access`), all under /etc/island-socket, and
+# keeps the day's usage in /var/lib/island-socket. When a new image
+# replaces the socket's directory it exits, and is started again here.
+[Unit]
+Description=Island socket
+After=network-online.target island-broker.service taso-wardend.service
+Wants=network-online.target
+
+[Service]
+User=island-socket
+Group=island-socket
+ExecStart=/usr/local/bin/island-socket serve --config /etc/island-socket/config.toml
+Restart=always
+RestartSec=2
+StateDirectory=island-socket
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=-/var/lib/taso/agent-island/run/island
+
+[Install]
+WantedBy=multi-user.target

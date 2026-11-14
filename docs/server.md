@@ -288,6 +288,61 @@ reboot is a crash it recovers from: each Vessel starts again at its last
 Seal. To stop the node, `systemctl stop taso-blkd` (the Warden goes with
 it).
 
+## 7. The island socket
+
+`island-socket` answers what a Vessel's agent may ask Island: who it is,
+and model calls passed to the configured providers, within each Vessel's
+daily budget (docs/slice-2.md, "The island socket"). It serves HTTP on a
+Unix socket in the agents' image, `/var/lib/taso/agent-island/run/island/
+island.sock`, which is `/run/island/island.sock` inside a Vessel. The
+caller is the connection's peer uid; no request carries a token. It runs
+as its own user, `island-socket`, and writes only its `access` entries to
+the log: one per Vessel and provider every 30 seconds at most, with the
+calls, the bytes and a digest over the calls.
+
+`scripts/node/install.sh` sets it up with the rest of the node: the user,
+`/etc/island-socket/socket.key`, `/etc/island-socket/config.toml` (written
+once, then edited by hand) and the units `island-socket` and
+`island-stub-model`. The stub model is a placeholder provider on
+`127.0.0.1:8099` that answers with filler text, so the path can be
+checked before a real provider is configured.
+
+On the laptop, one grant: the socket's key may write `access` on
+`access` (the install prints its public key):
+
+```sh
+cd /srv/oc-projects/island
+island-cli grant --broker http://10.77.0.1:4747 --root-key .island/root.key \
+    --holder SOCKET_PUBLIC_KEY --scope access --rights access
+```
+
+On the server:
+
+```sh
+systemctl restart island-stub-model island-socket
+scripts/node/check.sh think
+```
+
+`check.sh` asks the socket as flare-home's uid (`setpriv`), the way the
+agent does, and checks that root is refused; `think` also makes one model
+call and finds its `access` entry in the log.
+
+**Providers** are `[provider.<name>]` tables in the config, each an
+OpenAI-compatible API (`base_url` ending before `/chat/completions`), its
+`models`, an optional `key_file` (readable by `island-socket` only), and a
+daily `budget` per Vessel in calls and bytes. `default` names the provider
+used when the agent names no model. After an edit,
+`systemctl restart island-socket`; the agent and its Vessel are untouched.
+Only `http://` providers for now: on the server, or on `wg-island`. A
+hosted `https://` provider needs TLS in `island-socket`, which comes with
+the first one. A provider over the internet on a port other than 443 or
+80 also needs an incoming rule in UpCloud's firewall for its replies.
+
+A new agents' image (`install.sh` again) replaces the socket's directory:
+`island-socket` notices within five seconds, exits, and is started again
+on the new one. A running agent keeps the old directory until its next
+start: `systemctl restart taso-wardend`.
+
 ## Updating the server
 
 `islander.sh update` updates only the laptop. After merging a bundle, the

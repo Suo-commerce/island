@@ -40,6 +40,12 @@
 #      action in a turn that never ended, how long Seals take on a /work
 #      of S4_BULK files (FILES:MIB), and which slot a second fork takes.
 #      Not in the default ONLY: run it with ONLY=p.
+#   m  (spike S5) thinking through island-socket: a prime and its fork
+#      child each ask whoami and stream one chat completion from a stub
+#      model (scripts/s3/stub-model.py) through the real island-socket on
+#      the Vessels' root filesystem; the throwaway log gets one `access`
+#      entry per Vessel whose digest matches the agent's own bodies.
+#      Notes time the first byte and the whole.  Run it with ONLY=m.
 #
 # Each run has its own Vessels under its own root.  The script starts its
 # own block log, mounts and coordinator in a work directory, as Taso's
@@ -53,6 +59,7 @@
 #   TASO=/root/taso scripts/s2-spike.sh
 #   ONLY="a f" TASO=/root/taso scripts/s2-spike.sh     some runs only
 #   ONLY=p TASO=/root/taso scripts/s2-spike.sh         spike S4
+#   ONLY=m TASO=/root/taso scripts/s2-spike.sh         spike S5
 #
 # Environment: TASO (/root/taso)  ONLY (a b c d e f s)  LANDLOCK (1)
 #              S4_BULK (4000:200: run p's /work, files:MiB)
@@ -81,16 +88,17 @@ for t in runc ldd python3 cargo mountpoint; do
 done
 [ -f "$TASO/Cargo.toml" ] || { echo "no Taso checkout at $TASO (set TASO)" >&2; exit 2; }
 for r in $ONLY; do
-    case $r in a|b|c|d|e|f|s|p) ;; *) echo "ONLY: unknown run $r (a b c d e f s p; b also does g and h)" >&2; exit 2 ;; esac
+    case $r in a|b|c|d|e|f|s|p|m) ;; *) echo "ONLY: unknown run $r (a b c d e f s p m; b also does g and h)" >&2; exit 2 ;; esac
 done
 
 echo "== building Taso (release) in $TASO at $(git -C "$TASO" log -1 --format='%h %s' 2>/dev/null || echo '?')"
 (cd "$TASO" && cargo build --release -q -p taso-warden -p taso-landlock \
     && cargo build --release -q -p taso-blk --bin taso-blkd)
 BIN=$TASO/target/release
-case " $ONLY " in *" s "*)
-    echo "== building island-cli, island-broker, island-sender (release) in $ISLAND"
-    (cd "$ISLAND" && cargo build --release -q --locked -p island-cli -p island-broker -p island-sender)
+case " $ONLY " in *" s "*|*" m "*)
+    echo "== building island-cli, island-broker, island-sender, island-socket (release) in $ISLAND"
+    (cd "$ISLAND" && cargo build --release -q --locked -p island-cli -p island-broker -p island-sender \
+        -p island-socket)
     ;;
 esac
 IBIN=$ISLAND/target/release
@@ -172,6 +180,7 @@ done
 install -D -m 644 "$S2/s2_field.py" "$ROOTFS/usr/lib/s2/s2_field.py"
 install -D -m 755 "$S2/s2-agent.py" "$ROOTFS/usr/lib/s2/s2-agent.py"
 install -D -m 755 "$S2/s4-agent.py" "$ROOTFS/usr/lib/s2/s4-agent.py"
+install -D -m 755 "$S2/s5-agent.py" "$ROOTFS/usr/lib/s2/s5-agent.py"
 mkdir -p "$ROOTFS"/{proc,dev,sys,tmp,work,run/taso}
 : > "$ROOTFS/run/taso/field.sock"
 LLM=/run/island/llm.sock   # where the agent sees the inference socket
@@ -513,19 +522,20 @@ island_up() {   # the broker on the throwaway log
 }
 island_down() { kill "$ISL_BROKER" 2>/dev/null || true; wait "$ISL_BROKER" 2>/dev/null || true; }
 island_setup() {
+    [ -n "${ISL_ROOT:-}" ] && return 0   # once, for every run that uses it
     ISL=$WORK/island
     mkdir -p "$ISL"
-    local who
-    for who in root appender approver sender; do "$IBIN/island-cli" keygen "$ISL/$who.key" >/dev/null; done
+    local who scope
+    for who in root appender approver sender socket; do "$IBIN/island-cli" keygen "$ISL/$who.key" >/dev/null; done
     ISL_ROOT=$("$IBIN/island-cli" public "$ISL/root.key")
     "$IBIN/island-cli" init --log "$ISL/island.log" --appender-key "$ISL/appender.key" \
         --root-key "$ISL/root.key" >"$OUT/island-init.out"
     local right
-    for who in approver:approval sender:dispatch; do
-        right=${who#*:} who=${who%%:*}
+    for who in approver:approvals:approval sender:approvals:dispatch socket:access:access; do
+        IFS=: read -r who scope right <<<"$who"
         "$IBIN/island-cli" grant --log "$ISL/island.log" --appender-key "$ISL/appender.key" \
             --root-key "$ISL/root.key" --holder "$("$IBIN/island-cli" public "$ISL/$who.key")" \
-            --scope approvals --rights "$right" >>"$OUT/island-init.out"
+            --scope "$scope" --rights "$right" >>"$OUT/island-init.out"
     done
     island_up
     note s "throwaway Island log $ISL/island.log, broker 127.0.0.1:$ISL_PORT"
@@ -762,6 +772,129 @@ run_p() {
     check p "S4 Q5: each fork takes the next slot, never one again" \
         "$(jx "$j" '[e["slot"] for e in d if e["step"] == "start" and e["role"] == "fork"]')" '[21, 22, 23]'
     note p "S4 Q5: after the run, datasets mounted under $MNT: $(mounts_under | wc -l); state entries: $(ls "$WORK/state" 2>/dev/null | tr '\n' ' ')"
+}
+
+# ── m: spike S5, thinking through island-socket ──────────────────────
+S5_PRIME=30
+
+# m_config <out>: the Warden config of run m: a prime with one fork slot
+m_config() {
+    python3 - "$1" "$SOCK" "$WORK" "$ROOTFS" "$NS" "$LANDLOCK" "$BLK_SOCK" "$MNT" "$S5_PRIME" <<'PY'
+import json, sys
+out, sock, work, rootfs, ns, landlock, blk_sock, mnt, slot = sys.argv[1:10]
+rt = {"rootfs": rootfs, "host_uid_base": 200000,
+      "args": ["/usr/bin/python3", "/usr/lib/s2/s5-agent.py"], "memory_bytes": 1073741824, "pids": 64}
+if landlock == "1":
+    rt["landlock_shim"] = "/usr/lib/taso/landlock"
+json.dump({
+    "warden": 1, "coordinator": {"remote": sock},
+    "storage": {"blk": {"socket": blk_sock, "mounts": mnt, "spool": f"{work}/spool"}},
+    "root": "s5/m", "state_dir": f"{work}/state", "store": f"{work}/store",
+    "prefix": "vessels", "run_dir": f"{work}/run", "runtime": rt,
+    "vessels": [{"namespace": ns, "subject": "m-prime", "uid_slot": int(slot), "effects": "hold",
+                 "forks": {"slots": [int(slot) + 1]}}],
+}, open(out, "w"), indent=1)
+PY
+}
+
+# m_socket_config <out> <stub port> <state dir>: island-socket's config
+m_socket_config() {
+    printf '%s\n' \
+        "socket = \"$ROOTFS/run/island/island.sock\"" \
+        "warden_config = \"$WORK/m.json\"" \
+        "state_dir = \"$3\"" \
+        "broker = \"http://127.0.0.1:$ISL_PORT\"" \
+        "root = \"$ISL_ROOT\"" \
+        "key = \"$ISL/socket.key\"" \
+        "access_every_secs = 2" \
+        "default = \"stub\"" \
+        "[provider.stub]" \
+        "base_url = \"http://127.0.0.1:$2/v1\"" \
+        "models = [\"stub-model\"]" \
+        "budget = { calls = 100, bytes = 100000000 }" >"$1"
+}
+
+# m_role <report>: "prime" or "fork" once that agent has thought (and the
+# prime has forked), else nothing
+m_role() {
+    jq_ "$1" "(d['whoami']['role'] if 'think' in d and (d['whoami']['role'] == 'fork' or 'fork' in d) else '')" 2>/dev/null || true
+}
+
+run_m() {
+    echo "-- m: spike S5, a prime and its child think through island-socket"
+    island_setup
+    local j=$OUT/m isock=$ROOTFS/run/island/island.sock port isocket_pid w ds prime="" child="" who dir vessel tail
+    mkdir -p "$j"
+    port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+    python3 "$ISLAND/scripts/s3/stub-model.py" --listen "127.0.0.1:$port" --bytes 400000 --pieces 800 \
+        --delay 0.002 --requests "$j/stub-requests.jsonl" 2>"$j/stub.err" &
+    BG_PIDS+=("$!")
+    # The Warden config first: island-socket reads its callers from it.
+    m_config "$WORK/m.json"
+    m_socket_config "$j/socket.toml" "$port" "$j/state"
+    "$IBIN/island-socket" serve --config "$j/socket.toml" 2>"$j/socket.err" &
+    isocket_pid=$!
+    BG_PIDS+=("$isocket_pid")
+    for _ in $(seq 100); do [ -S "$isock" ] && break; sleep 0.05; done
+    [ -S "$isock" ] || { echo "island-socket did not start; see $j/socket.err" >&2; return 1; }
+
+    start m "$WORK/m.json"
+    w=$PID
+    # Two reports: the prime's (it thought and forked) and the child's.
+    for _ in $(seq 1200); do
+        for ds in $(grep -o ': dataset [^ ]*$' "$ERR" 2>/dev/null | sed 's/: dataset //' | sort -u); do
+            [ -f "$MNT/$ds/s5-report.json" ] || continue
+            case $(m_role "$MNT/$ds/s5-report.json") in
+                prime) prime=$MNT/$ds ;;
+                fork) child=$MNT/$ds ;;
+            esac
+        done
+        [ -n "$prime" ] && [ -n "$child" ] && break
+        sleep 0.1
+    done
+    sleep 3   # one access flush and a half
+    killw "$w"
+    kill "$isocket_pid" 2>/dev/null || true
+    wait "$isocket_pid" 2>/dev/null || true
+    if [ -z "$prime" ] || [ -z "$child" ]; then
+        check m "both the prime and its child report" "prime=${prime:-none} child=${child:-none}" both
+        note m "Warden: $(tail -n 5 "$ERR" | tr '\n' ' ')"
+        note m "island-socket: $(tail -n 5 "$j/socket.err" | tr '\n' ' ')"
+        return 0
+    fi
+    for who in prime child; do
+        if [ "$who" = prime ]; then dir=$prime; else dir=$child; fi
+        cp "$dir/s5-report.json" "$j/$who.json"
+        cp "$dir/s5-request.json" "$j/$who-request.json"
+        cp "$dir/s5-response.bin" "$j/$who-response.bin"
+        "$IBIN/island-socket" call-digest --request "$j/$who-request.json" \
+            --response "$j/$who-response.bin" >"$j/$who-call"
+        "$IBIN/island-socket" batch-digest "$(cat "$j/$who-call")" >"$j/$who-batch"
+    done
+    check m "whoami: the prime, in its slot, with its one fork left" \
+        "$(jq_ "$j/prime.json" "[d['whoami'][k] for k in ('status', 'role', 'slot', 'forks_left')]")" \
+        "[200, \"prime\", $S5_PRIME, 1]"
+    check m "whoami: the child learns it is the fork, in the next slot" \
+        "$(jq_ "$j/child.json" "[d['whoami'][k] for k in ('status', 'role', 'slot', 'prime')]")" \
+        "[200, \"fork\", $((S5_PRIME + 1)), \"m-prime\"]"
+    check m "whoami: the prime's id is the one the Warden names its dataset with" \
+        "$(jq_ "$j/prime.json" "d['whoami']['vessel']")" "${prime##*/v-}"
+    for who in prime child; do
+        check m "$who: the streamed answer arrives whole, from the stub provider" \
+            "$(jq_ "$j/$who.json" "[d['think'][k] for k in ('status', 'provider', 'done')]")" '[200, "stub", true]'
+        check m "$who: it arrives in pieces, as it is made" \
+            "$(jq_ "$j/$who.json" "d['think']['reads'] > 20 and d['think']['events'] > 700")" True
+        note m "$who: first byte $(jq_ "$j/$who.json" "d['think']['first_byte_s']") s, whole $(jq_ "$j/$who.json" "d['think']['total_s']") s, $(jq_ "$j/$who.json" "d['think']['response_bytes']") bytes in $(jq_ "$j/$who.json" "d['think']['reads']") reads; request $(jq_ "$j/$who.json" "d['think']['request_bytes']") bytes"
+    done
+    tail=$("$IBIN/island-cli" tail --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" -n 50)
+    for who in prime child; do
+        vessel=$(jq_ "$j/$who.json" "d['whoami']['vessel']")
+        check m "$who: one access entry, its bytes and digest the agent's own" \
+            "$(grep -c " access .*vessel $vessel Inference via \"stub\", 1 call(s), $(jq_ "$j/$who.json" "d['think']['request_bytes']") bytes in, $(jq_ "$j/$who.json" "d['think']['response_bytes']") out, digest $(cut -c1-8 "$j/$who-batch")" <<<"$tail" || true)" 1
+    done
+    check m "the provider was sent no key" \
+        "$(python3 -c 'import json, sys; print(sorted({r["auth"] for r in map(json.loads, open(sys.argv[1]))}, key=str))' "$j/stub-requests.jsonl")" \
+        "[None]"
 }
 
 for r in $ONLY; do "run_$r"; done

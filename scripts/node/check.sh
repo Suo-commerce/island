@@ -7,12 +7,20 @@
 #                                  plan; its one action proposed once and
 #                                  dispatched at most once
 #   scripts/node/check.sh kills    the same, then each kill in turn: the
-#                                  Warden, island-sender, the block log.
+#                                  Warden, island-sender, island-socket,
+#                                  the block log.
 #                                  After each, everything is running again,
 #                                  flare-home started again at its last Seal,
 #                                  and nothing was proposed or sent twice
 #
+#   scripts/node/check.sh think    the same, then one model call through the
+#                                  island socket as flare-home, and its
+#                                  `access` entry in the log (within 45 s)
+#
 # After a reboot, the plain check is the reboot test: a reboot is a crash.
+#
+# The island socket is asked as flare-home's own uid (setpriv), the way its
+# agent reaches it from inside the Vessel; root is no Vessel and is refused.
 #
 # The stand-in agent journals to /work/.flare-journal.jsonl in its dataset,
 # under /var/lib/taso/mnt.  What it wrote after its last Seal goes at its
@@ -25,13 +33,27 @@ CLI=$ISLAND/target/release/island-cli
 ROOT=$(sed -n 's/^ISLAND_ROOT=//p' /etc/island/island.env)
 BROKER=http://10.77.0.1:4747
 MNT=/var/lib/taso/mnt
-UNITS=(taso-blkd taso-wardend island-sender)
+UNITS=(taso-blkd taso-wardend island-sender island-stub-model island-socket)
+ISOCK=/var/lib/taso/agent-island/run/island/island.sock
 # Where the plan in flare-home's entry idles: where a restart must resume.
 IDLE_AT=$(python3 -c '
 import json
 v = [v for v in json.load(open("/etc/taso/warden.json"))["vessels"] if v["subject"] == "flare-home"][0]
 args = v["runtime"]["args"]
 print(args[args.index("--prime") + 1].split(",").index("idle"))')
+# flare-home's first host uid: what the island socket sees when it asks.
+FLARE_UID=$(python3 -c '
+import json
+c = json.load(open("/etc/taso/warden.json"))
+v = [v for v in c["vessels"] if v["subject"] == "flare-home"][0]
+print(c["runtime"]["host_uid_base"] + v["uid_slot"] * 65536)')
+
+# island <path> [curl options]: ask the island socket as flare-home
+island() {
+    local path=$1; shift
+    setpriv --reuid="$FLARE_UID" --regid="$FLARE_UID" --clear-groups \
+        curl -sS --max-time 30 --unix-socket "$ISOCK" "$@" "http://island$path"
+}
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
 [ -x "$CLI" ] || { echo "build first: scripts/node/install.sh" >&2; exit 2; }
@@ -92,6 +114,12 @@ state() {   # the plain checks
     check "$when: the dispatch entries for it in the log: at most one" \
         "$(dispatches | awk '{ print ($1 <= 1) ? "ok" : $1 }')" ok
     note "$when: flare-home's starts in its Seal's history and now: $(agent '[(e["start"], e["resume_at"], e["last_sealed"]) for e in d if e["step"] == "start"]')"
+    wait_until 30 test -S "$ISOCK" || true
+    check "$when: the island socket says flare-home is flare-home" \
+        "$(island /whoami | python3 -c 'import json, sys; d = json.load(sys.stdin); print(d["subject"], d["role"], d["vessel"])' 2>/dev/null || echo no-answer)" \
+        "flare-home prime $(basename "$(ls /run/taso/run/senders/*.sock 2>/dev/null | head -1)" .sock)"
+    check "$when: the island socket refuses root, which is no Vessel" \
+        "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --unix-socket "$ISOCK" http://island/whoami || true)" 403
     note "$when: island-sender's last word on it: $(journalctl -u island-sender -o cat -n 200 --no-pager | grep '^{' | tail -1)"
 }
 
@@ -110,9 +138,9 @@ kill_one() {   # kill_one <unit>: SIGKILL it, then the plain checks
                 check "after killing $unit: flare-home started again" "no new start" "a new start"
             fi
             ;;
-        island-sender)
-            wait_until 60 systemctl is-active -q island-sender || true
-            check "after killing island-sender: flare-home's run went on" \
+        island-sender|island-socket)
+            wait_until 60 systemctl is-active -q "$unit" || true
+            check "after killing $unit: flare-home's run went on" \
                 "$(agent 'S[0]["start"] if S else ""')" "$before"
             ;;
     esac
@@ -125,7 +153,21 @@ case ${1:-} in
         ;;
     kills)
         state before
-        for unit in taso-wardend island-sender taso-blkd; do kill_one "$unit"; done
+        for unit in taso-wardend island-sender island-socket taso-blkd; do kill_one "$unit"; done
+        ;;
+    think)
+        state now
+        vessel=$(basename "$(ls /run/taso/run/senders/*.sock 2>/dev/null | head -1)" .sock)
+        before=$("$CLI" tail --broker "$BROKER" --root "$ROOT" -n 1000 | grep -c " access .*vessel $vessel " || true)
+        answer=$(island /v1/chat/completions -H 'content-type: application/json' \
+            -d '{"messages":[{"role":"user","content":"hello from check.sh"}]}' || true)
+        check "think: a model answers flare-home through the island socket" \
+            "$(python3 -c 'import json, sys; d = json.loads(sys.argv[1]); print("choices" in d)' "$answer" 2>/dev/null || echo "$answer" | head -c 200)" True
+        accessed() { [ "$("$CLI" tail --broker "$BROKER" --root "$ROOT" -n 1000 | grep -c " access .*vessel $vessel " || true)" -gt "$before" ]; }
+        wait_until 45 accessed || true
+        check "think: the call is in the log as an access entry for flare-home" \
+            "$("$CLI" tail --broker "$BROKER" --root "$ROOT" -n 1000 | grep -c " access .*vessel $vessel " || true)" "$((before + 1))"
+        note "think: $("$CLI" tail --broker "$BROKER" --root "$ROOT" -n 1000 | grep " access .*vessel $vessel " | tail -1)"
         ;;
     *)
         sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
