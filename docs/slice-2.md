@@ -1,6 +1,6 @@
 # Technical spec — slice 2: an agent's action end to end
 
-2026-11-13 · draft for Jarmo's review
+2026-11-13 · decisions 2026-11-14
 
 Slice 1 carried a verse Jarmo typed into the signed log and back. Slice 2 puts an agent beside him: Flare's agent lives in a Taso Vessel on the Island server, thinks with a model, tries alternatives in forks, and can act outward only through actions that Jarmo approves. It builds on slice 1 as merged and on spike S2, which ran every Taso behaviour this design leans on (`scripts/s2-spike.sh`, runs a to h and s, all passing on the server at Taso `c031ee5`).
 
@@ -36,18 +36,18 @@ The smallest path that touches every new part and is useful on its first day:
 
 **Left out on purpose:** mail and calendar, any provider besides the session and the Island log, Runo as an approver, Stormgate, review of a fork's exact actions before promotion, Taso's inbox, a second node, OpenBao Transit, shipping packs to object storage.
 
-## Decisions for Jarmo
+## Decisions
 
-Each has a recommendation the rest of the document assumes. Changing one changes the section named.
+Decided by Jarmo on 2026-11-14 (D1, D2, D3, D5); D4 and D6 as recommended, since Taso offers no alternative today.
 
-| | Decision | Recommended | Alternative |
-| --- | --- | --- | --- |
-| **D1** | Order of the three parts | Agent path first (it is what makes Island usable), then repos, with the face built beside both from your UX plan | Repos first: small, needs no Vessel, but no agent for longer |
-| **D2** | Which model endpoint the server calls | To settle before build step 3. The server cannot join another project's tailnet, so it needs an OpenAI-compatible endpoint reachable over public HTTPS, or one on `wg-island` | A GPU box of your own as a `wg-island` peer |
-| **D3** | What the agent may write | Its own stream `flare` only. A draft for a project stream comes back as a reply, and you sing it: "the verse is always his" stays true | Widen its grant to project streams: approved agent verses land there under the Vessel's key |
-| **D4** | How a parent learns what its forks made | A short note per child through the island socket, recorded as access. Works on Taso today | Wait for Taso: a `Proposals` or `Children` query for the parent |
-| **D5** | Who may approve | Any key holding the new `approval` right; first your laptop's daily key. The passkey arrives as a policy tightening (`ApprovalHasPasskey`) once spike S3 has run | Wait for the passkey before any approval |
-| **D6** | Where model conversations are kept | In the Vessel's Chronicle (Taso `Transcript` records), sealed with the turn. The Island log holds counts and digests only | Also keep them in files beside the log |
+| | Decision | Decided |
+| --- | --- | --- |
+| **D1** | Order of the three parts | Agent path first, then repos; the face is built beside both from Jarmo's UX plan (in Lovable) |
+| **D2** | Which model the server calls | Configurable providers, all speaking the OpenAI-compatible chat API: a local model, a hosted provider or Jarmo's own GPU, chosen in `island-socket`'s config and switchable without touching the agent ("Providers" below) |
+| **D3** | What the agent may write | Its own stream `flare` only. A draft for a project stream comes back as a reply, and Jarmo sings it: "the verse is always his" stays true |
+| **D4** | How a parent learns what its forks made | A short note per child through the island socket, counted as access, until Taso has a `Proposals` or `Children` query |
+| **D5** | Who may approve | Any key holding the `approval` right; first Jarmo's laptop daily key. The passkey arrives as a policy tightening (`ApprovalHasPasskey`) once spike S3 has run |
+| **D6** | Where model conversations are kept | In the Vessel's Chronicle (Taso `Transcript` records), sealed with the turn. The Island log holds counts and digests only |
 
 ## What S2 settled
 
@@ -160,7 +160,33 @@ HTTP over a Unix socket at `/run/island/island.sock` in the Vessels' root filesy
 - A daily budget per Vessel, in calls and in bytes, set in its config. Over budget is refused, and the refusal is counted.
 - `access` entries are batched: one per Vessel and kind of request, at most every 30 seconds, with the number of calls, bytes each way, and one digest over the calls' digests. The agent records each model message in its Chronicle with the same digest, which ties the two.
 - Tasks are at-least-once. The agent's cursor is in its sealed state, so a rolled-back turn pulls its task again.
-- The model endpoint, the allowed models and the budgets are a config file read at start (D2).
+- The providers, the models and the budgets are a config file read at start ("Providers").
+
+**Providers (D2).** The agent always speaks one API, OpenAI-compatible chat completions, to one place, the island socket. Which model answers is `island-socket`'s config, never the agent's:
+
+```toml
+default = "local"
+
+[provider.local]          # a model on the server itself
+base_url = "http://127.0.0.1:8080/v1"
+models = ["qwen3.6-35b-a3b"]
+
+[provider.gpu]            # Jarmo's own GPU host, as a wg-island peer
+base_url = "http://10.77.0.4:8000/v1"
+models = ["glm-5.3"]
+
+[provider.hosted]         # any hosted OpenAI-compatible API
+base_url = "https://api.example.com/v1"
+key_file = "/etc/island-socket/hosted.key"
+models = ["model-a", "model-b"]
+```
+
+- The agent names a model; the socket finds the provider that lists it, or uses `default` when the agent names none. A model no provider lists is refused.
+- Keys live in files readable by `island-socket` only; the agent never sees one.
+- Switching provider is a config change and a restart of `island-socket`; the agent and its Vessel are untouched.
+- Each provider has its own daily budget, and the `access` entry names the provider, so the log shows which models were used and how much.
+- A provider must be reachable from the server: on the server, on `wg-island`, or over the internet. The host firewall does not limit what the server sends, but UpCloud's outer firewall (planned, stateless) lets in replies only from TCP ports 443 and 80. A provider on another port over the internet needs one more rule there, written down in `docs/server.md`.
+- A provider that is not natively OpenAI-compatible is reached through its own compatibility endpoint where it has one, or a small adapter in `island-socket`. Which providers need an adapter is checked when each is added, not assumed.
 
 ## Actions and the sender
 
@@ -194,7 +220,7 @@ Four kinds join the eight of slice 1. Encoding, hashing and signatures are uncha
 | Tag | Kind | Stream | Body |
 | --- | --- | --- | --- |
 | 6 | `receipt` | `repos` | `{ repo: String, branch: String, head: [u8;20], previous: Option<[u8;20]>, commits: u32, observed_at: u64 }` |
-| 7 | `access` | `access` | `{ vessel: [u8;16], what: u8, calls: u32, bytes_in: u64, bytes_out: u64, digest: [u8;32] }`; `what`: inference 0, read 1, task 2, note 3 |
+| 7 | `access` | `access` | `{ vessel: [u8;16], what: u8, provider: String, calls: u32, bytes_in: u64, bytes_out: u64, digest: [u8;32] }`; `what`: inference 0, read 1, task 2, note 3; `provider` empty unless inference |
 | 10 | `approval` | `approvals` | `{ request: [u8;32], verdict: u8, proof: Option<Proof> }`; `verdict`: approve 0, decline 1; `proof` is empty until S3 fixes its form |
 | 11 | `dispatch` | `approvals` | `{ vessel: [u8;16], op: u64, key: [u8;32], request: [u8;32], approval: u64, counter: u64 }` |
 
@@ -282,7 +308,7 @@ On the server, once, as `docs/server.md` will list step by step:
 | --- | --- | --- | --- |
 | S3 passkey | Carried from slice 1: can the server supply the WebAuthn challenge derived from the request hash, and can the gate verify the assertion from the log alone? | half a day | The form of `proof` and of `ApprovalHasPasskey` |
 | S4 promotion over the Field | Fork and promote asked for by the agent, with `restart: always`: is the prime started again on the child's files? When it has written files since the fork's Seal, what does it start on? What becomes of a prime's released action when its turn never ended? How long does a Seal take with a real `/work`? How are a finished child's slot and dataset reclaimed, if at all? | 1 day | The forking steps above; how many slots to give; the turn length |
-| S5 thinking through the socket | A streamed completion of realistic size from prime and child, through `island-socket`, to the endpoint of D2 | half a day | Whether streaming needs anything more than run h showed |
+| S5 thinking through the socket | A streamed completion of realistic size from prime and child, through `island-socket`, to each configured provider (local, `wg-island`, hosted) | half a day | Whether streaming needs anything more than run h showed |
 | S6 the Pi port | Which parts of Pi's loop are ported and which are left: sized by reading it, before any code | 1 day | The agent's milestones |
 
 ## Build order
@@ -291,7 +317,7 @@ Each step leaves something that runs, and ends with `git push origin main`.
 
 1. **The four kinds.** Types, encoding, golden vectors, replay, the model. `island-cli approve` writes an `approval`; the sender's rule moves from the stand-in to the kinds. Harness oracles for approval and dispatch.
 2. **The Taso node.** `init`, the units, `flare-home` running S2's scripted agent as a long-lived Vessel, `island-sender` as a service on the real log. Reboot and kill tests. Spike S4 here.
-3. **`island-socket`.** `whoami`, the model pass-through against a stub and then the real endpoint (D2, S5), budgets, `access` entries.
+3. **`island-socket`.** `whoami`, the model pass-through against a stub, then the providers of D2 one by one (S5), budgets, `access` entries.
 4. **`flare-agent`, first milestone.** The loop with file tools and `say`; tasks from the session; `flare-tui` gets `say`. First conversation with the agent.
 5. **The agent's verse.** `verse`, the `island.verse` provider, `action_waiting`, `approve` and `decline` in `flare-tui`. First approved agent verse in the real log.
 6. **Forks.** `fork`, notes, `promote`, the restart on the child's files; `vessel-gate` complete.
