@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# s2-spike.sh: spike S2, stage S2.3. An Island agent in Taso Vessels on
+# s2-spike.sh: spikes S2 and S4. An Island agent in Taso Vessels on
 # this host, checked against what the S2 plan read in Taso's code.
 #
 #   a  the prime Vessel dispatches: 3 effects released, a sender applies
@@ -29,6 +29,15 @@
 #      listed unknown, a new effect is refused (no effect authority), and
 #      the lapse rule of decision D1 (the sender reports NotApplied)
 #      restores authority
+#   p  (spike S4, docs/slice-2.md) fork and promote asked for by the agent
+#      over the Field, on a prime with "restart": "always" and fork slots:
+#      the child learns it is a fork from the island socket's stand-in;
+#      after the promotion the prime is started again on the child's
+#      files.  Notes answer S4's questions: what of the prime's files
+#      written after the fork Seal survives, what becomes of a released
+#      action in a turn that never ended, how long Seals take on a /work
+#      of S4_BULK files (FILES:MIB), and which slot a second fork takes.
+#      Not in the default ONLY: run it with ONLY=p.
 #
 # Each run has its own Vessels under its own root.  The script starts its
 # own block log, mounts and coordinator in a work directory, as Taso's
@@ -41,8 +50,10 @@
 # Usage (root; needs runc, ublk_drv, cargo, python3, a Taso checkout):
 #   TASO=/root/taso scripts/s2-spike.sh
 #   ONLY="a f" TASO=/root/taso scripts/s2-spike.sh     some runs only
+#   ONLY=p TASO=/root/taso scripts/s2-spike.sh         spike S4
 #
-# Environment: TASO (/root/taso)  ONLY (a b c d e f)  LANDLOCK (1)
+# Environment: TASO (/root/taso)  ONLY (a b c d e f s)  LANDLOCK (1)
+#              S4_BULK (4000:200: run p's /work, files:MiB)
 #              OUT (/root/island-s2-<time>)  KEEP (0: 1 keeps the work
 #              directory and its block log)
 #
@@ -68,7 +79,7 @@ for t in runc ldd python3 cargo mountpoint; do
 done
 [ -f "$TASO/Cargo.toml" ] || { echo "no Taso checkout at $TASO (set TASO)" >&2; exit 2; }
 for r in $ONLY; do
-    case $r in a|b|c|d|e|f|s) ;; *) echo "ONLY: unknown run $r (a b c d e f s; b also does g and h)" >&2; exit 2 ;; esac
+    case $r in a|b|c|d|e|f|s|p) ;; *) echo "ONLY: unknown run $r (a b c d e f s p; b also does g and h)" >&2; exit 2 ;; esac
 done
 
 echo "== building Taso (release) in $TASO at $(git -C "$TASO" log -1 --format='%h %s' 2>/dev/null || echo '?')"
@@ -158,6 +169,7 @@ for lib in $(find "$ROOTFS$PY_LIB" -name '*.so' -exec ldd {} + 2>/dev/null | gre
 done
 install -D -m 644 "$S2/s2_field.py" "$ROOTFS/usr/lib/s2/s2_field.py"
 install -D -m 755 "$S2/s2-agent.py" "$ROOTFS/usr/lib/s2/s2-agent.py"
+install -D -m 755 "$S2/s4-agent.py" "$ROOTFS/usr/lib/s2/s4-agent.py"
 mkdir -p "$ROOTFS"/{proc,dev,sys,tmp,work,run/taso}
 : > "$ROOTFS/run/taso/field.sock"
 LLM=/run/island/llm.sock   # where the agent sees the inference socket
@@ -593,7 +605,7 @@ run_s() {
     check s "the sent one is reported from its dispatch, the unapproved one lapses" \
         "$(jq_ "$p2" "[(x['action'], x['unknown'], x.get('reported')) for x in d]")" \
         '[["already-sent", true, true], ["lapse", true, true]]'
-    check s "the same mark as before the crash: no second send" \
+    check s "the same dispatch as before the crash: no second send" \
         "$(jq_ "$p2" "d[0].get('sent_at')")" "$(jq_ "$crash" "d[0]['sent_at']")"
     go "$ERR" resumed
     rep=$(report_of "$ERR" 4)
@@ -608,14 +620,142 @@ run_s() {
     island_down
 }
 
+# ── p: spike S4, fork and promote over the Field ───────────────────────
+S4_BULK=${S4_BULK:-4000:200}
+# Slots 20 to 23: the same shape as flare-home's entry (prime 10, forks
+# from 11), on uid ranges no Vessel of the node's own config uses.
+S4_PRIME=20
+S4_FORKS="21 22 23"
+
+# cfg4 <out> <root> <subject> <prime steps> <fork steps>: a long-lived
+# prime with fork slots, as flare-home's entry will be
+cfg4() {
+    python3 - "$@" "$SOCK" "$WORK" "$ROOTFS" "$NS" "$LANDLOCK" "$BLK_SOCK" "$MNT" "$S4_PRIME" "$S4_FORKS" <<'PY'
+import json, sys
+out, root, subject, prime, fork = sys.argv[1:6]
+sock, work, rootfs, ns, landlock, blk_sock, mnt, slot, forks = sys.argv[6:15]
+rt = {"rootfs": rootfs, "host_uid_base": 200000,
+      "args": ["/usr/bin/python3", "/usr/lib/s2/s4-agent.py", "--prime", prime, "--fork", fork],
+      "memory_bytes": 1073741824, "pids": 64}
+if landlock == "1":
+    rt["landlock_shim"] = "/usr/lib/taso/landlock"
+vessel = {"namespace": ns, "subject": subject, "uid_slot": int(slot), "effects": "dispatch",
+          "restart": "always", "forks": {"slots": [int(s) for s in forks.split()]}}
+json.dump({
+    "warden": 1,
+    "coordinator": {"remote": sock},
+    "storage": {"blk": {"socket": blk_sock, "mounts": mnt, "spool": f"{work}/spool"}},
+    "root": root, "state_dir": f"{work}/state", "store": f"{work}/store",
+    "prefix": "vessels", "run_dir": f"{work}/run", "runtime": rt, "vessels": [vessel],
+}, open(out, "w"), indent=1)
+PY
+}
+
+# jwait <journal> <predicate over e> <seconds>: the first journal event that
+# holds, printed as JSON; fails after <seconds>
+jwait() {
+    python3 - "$@" <<'PY'
+import json, sys, time
+path, pred, secs = sys.argv[1], sys.argv[2], float(sys.argv[3])
+end = time.time() + secs
+while time.time() < end:
+    try:
+        with open(path) as fh:
+            for line in fh:
+                e = json.loads(line)
+                if eval(pred):
+                    print(json.dumps(e))
+                    sys.exit(0)
+    except FileNotFoundError:
+        pass
+    time.sleep(0.2)
+sys.exit(1)
+PY
+}
+
+# jx <journal> <expression over d, the events>: its value (JSON for lists)
+jx() {
+    python3 - "$@" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    d = [json.loads(line) for line in fh]
+P = [e for e in d if e["slot"] == 20]
+r = eval(sys.argv[2])
+print(json.dumps(r) if isinstance(r, (list, dict, bool)) or r is None else r)
+PY
+}
+
+run_p() {
+    echo "-- p: spike S4, fork and promote over the Field, restart always"
+    local j=$OUT/p-journal.jsonl island=$ROOTFS/run/island/island.sock
+    python3 "$S2/s4-host.py" --socket "$island" --journal "$j" --prime-slot "$S4_PRIME" \
+        2>"$OUT/s4-host.err" &
+    BG_PIDS+=("$!")
+    for _ in $(seq 100); do [ -S "$island" ] && break; sleep 0.05; done
+    [ -S "$island" ] || { echo "s4-host did not start; see $OUT/s4-host.err" >&2; return 1; }
+
+    local prime fork
+    prime="mark:prime-start,bulk:$S4_BULK,seal,touch:40,seal,mark:fork-task,seal"     # 0-6
+    prime+=",fork,rm:fork-task,mark:prime-after-fork,seal,waitnote:1"                # 7-11
+    prime+=",mark:prime-unsealed,effect:irr:unended,promote"                         # 12-14
+    prime+=",ls,result:unended,effect:irr:after,fork,seal,waitnote:2:120,idle"       # 15-22
+    fork="ls,rm:fork-task,mark:child-made,effect:irr:child-a,setprime:15,seal,note:done,exit"
+    cfg4 "$WORK/p.json" "s4/$STAMP/p" p-prime "$prime" "$fork"
+    start p "$WORK/p.json"
+    local w=$PID
+    if ! jwait "$j" 'e["slot"] == 20 and e["step"] == "idle"' 1800 >/dev/null; then
+        check p "the prime reaches the end of its plan" "no" "yes"
+        note p "journal tail: $(tail -n 5 "$j" 2>/dev/null | tr '\n' ' ')"
+        note p "Warden: $(tail -n 5 "$ERR" | tr '\n' ' ')"
+        killw "$w"
+        return 0
+    fi
+    jwait "$j" 'e["slot"] == 22 and e["step"] == "exit"' 120 >/dev/null || true
+    local s; s=$(sender_sock "$ERR")
+    python3 "$S2/s2-sender.py" --socket "$s" >"$OUT/p-open.json" 2>"$OUT/p-open.err" || true
+    killw "$w"
+
+    check p "the prime forks over the Field" "$(jx "$j" '[e["result"] for e in P if e["step"] == "fork"][0]')" Forked
+    check p "the child learns from whoami that it is a fork, in slot 21" \
+        "$(jx "$j" '[e["role"] for e in d if e["slot"] == 21 and e["step"] == "start"][:1]')" '["fork"]'
+    check p "the child starts on the fork Seal: the task there, later prime files not" \
+        "$(jx "$j" '[(("fork-task" in e["files"]), ("prime-after-fork" in e["files"])) for e in d if e["slot"] == 21 and e["step"] == "start"][:1]')" \
+        '[[true, false]]'
+    check p "the child's effect is held" \
+        "$(jx "$j" '[e["result"] for e in d if e["slot"] == 21 and e["step"] == "effect"]')" '["Held"]'
+    # The run may end before the agent journals the reply: the restart
+    # below is the proof; this is what the agent saw, if it saw it.
+    note p "promote reply: $(jx "$j" '[(e["result"], e.get("seal"), e.get("adopted"), e.get("reason"), e["seconds"]) for e in P if e["step"] == "promote"] or "not journalled before the run ended"')"
+    note p "forks: $(jx "$j" '[(e["result"], e.get("child"), e["refusals"]) for e in P if e["step"] == "fork"]')"
+    check p "the prime is started again, at the step its child left it" \
+        "$(jx "$j" '[e["resume_at"] for e in P if e["step"] == "start"]')" '[0, 15]'
+    check p "S4 Q1: it starts on the child's files (child-made there, fork-task gone)" \
+        "$(jx "$j" '[("child-made" in e["files"], "fork-task" in e["files"]) for e in P if e["step"] == "ls"]')" \
+        '[[true, false]]'
+    note p "S4 Q2: prime files after the fork Seal, sealed / unsealed, present after the promotion: $(jx "$j" '[("prime-after-fork" in e["files"], "prime-unsealed" in e["files"]) for e in P if e["step"] == "ls"]')"
+    note p "S4 Q2: Hello after the promotion, last sealed turn: $(jx "$j" '[e["last_sealed"] for e in P if e["step"] == "start"]')"
+    note p "S4 Q3: the unended turn's released action: declared $(jx "$j" '[(e["result"], e["op"]) for e in P if e["step"] == "effect" and e["tag"] == "unended"]'), after the restart $(jx "$j" '[(e["state"], e.get("reason")) for e in P if e["step"] == "result"]')"
+    note p "S4 Q3: a new Irreversible effect after the restart: $(jx "$j" '[(e["result"], e.get("reason")) for e in P if e["step"] == "effect" and e["tag"] == "after"]')"
+    local keys; keys=$(python3 -c 'import hashlib; print(" ".join(t + "=" + hashlib.sha256(("s4:" + t).encode()).digest()[:16].hex() for t in ("unended", "child-a", "after")))')
+    note p "S4 Q3: the prime's sender socket lists (op, key, unknown): $(jq_ "$OUT/p-open.json" "[(e['op'], e['retry'][1], e['unknown']) for e in d['before']]") with keys $keys"
+    check p "the adopted child effect is on the prime's sender socket" \
+        "$(jq_ "$OUT/p-open.json" "'$(cut -d' ' -f2 <<<"$keys" | cut -d= -f2)' in [e['retry'][1] for e in d['before']]")" True
+    note p "S4 Q4: bulk write $(jx "$j" '[(e["files"], e["bytes"], e["seconds"]) for e in P if e["step"] == "bulk"]'); seals (s): $(jx "$j" '[e["seconds"] for e in P if e["step"] == "seal"]') (bulk, touch, fork task, after fork, after restart); fork $(jx "$j" '[e["seconds"] for e in P if e["step"] == "fork"]') s"
+    note p "S4 Q4: promote reply to the next start: $(jx "$j" 'round([e["t"] for e in P if e["step"] == "start"][-1] - ([e["t"] for e in P if e["step"] == "promote"] or [e["t"] for e in P if e["step"] == "effect"])[0], 2)') s"
+    check p "S4 Q5: a second fork takes the next slot, never the first again" \
+        "$(jx "$j" '[e["slot"] for e in d if e["step"] == "start" and e["role"] == "fork"]')" '[21, 22]'
+    note p "S4 Q5: second fork $(jx "$j" '[(e["result"], e["child"], e.get("reason")) for e in P if e["step"] == "fork"][1:]')"
+    note p "S4 Q5: after the run, datasets mounted under $MNT: $(mounts_under | wc -l); state entries: $(ls "$WORK/state" 2>/dev/null | tr '\n' ' ')"
+}
+
 for r in $ONLY; do "run_$r"; done
 
 echo
 echo "== results ($OUT/results.tsv)"
 column -t -s $'\t' "$OUT/results.tsv" || cat "$OUT/results.tsv"
 if [ "$FAILS" -eq 0 ]; then
-    echo "S2 spike: PASS"
+    echo "spike: PASS"
 else
-    echo "S2 spike: FAIL ($FAILS check(s))"
+    echo "spike: FAIL ($FAILS check(s))"
     exit 1
 fi

@@ -301,7 +301,7 @@ On the server, once, as `docs/server.md` will list step by step:
 
 - `island-model` gains the four kinds and the approval-and-dispatch rule in a few dozen lines.
 - The log harness (built in step 1) generates approvals, declines and dispatches by the two writers granted them; oracle 8 checks from the stored entries alone that every accepted dispatch names an unused approval of its request with no later decline, and that no (Vessel, key) is dispatched twice. Coverage requires each of the four refusals.
-- A generator of sender histories (step 2, with the Taso node): actions released, approvals and declines in any order and number, sender deaths at every step (before the `dispatch`, between it and the verse, before the report), Warden restarts that mark actions unknown, turns redone with the same keys.
+- A generator of sender histories (built in step 2: `crates/island-sender/tests/history.rs`, on `island_sender::serve`, the pass the service runs): actions released, approvals and declines in any order and number, sender deaths at every step (before the `dispatch`, between it and the verse, before the report), Warden restarts that mark actions unknown, turns redone with the same keys.
 - Oracles: no action is sent without an approval that names it; none is sent twice; a declined one is never sent; an approval lets out one action; after any history every barrier action is settled or waiting, never lost; the model and `island-sender`'s decisions agree.
 - The agent loop runs against a scripted model (answers replayed from a file) and a stand-in Warden, so its turns, keys and restarts are tested without a GPU or Taso.
 
@@ -323,7 +323,7 @@ On the server, once, as `docs/server.md` will list step by step:
 Each step leaves something that runs, and ends with `git push origin main`.
 
 1. **The four kinds.** Types, encoding, golden vectors, replay, the model. `island-cli approve` writes an `approval`; the sender's rule moves from the stand-in to the kinds. Harness oracles for approval and dispatch.
-2. **The Taso node.** `init`, the units, `flare-home` running S2's scripted agent as a long-lived Vessel, `island-sender` as a service on the real log. Reboot and kill tests. Spike S4 here.
+2. **The Taso node.** `init`, the units, `flare-home` running S2's scripted agent as a long-lived Vessel, `island-sender` as a service on the real log. Reboot and kill tests. Spike S4 here. *Built:* `scripts/node/install.sh` and `check.sh`, the units in `deploy/server/`, `docs/server.md` section 6; `island-sender --senders` serves the Warden's whole senders directory; spike S4 is run p of `s2-spike.sh`, its agent `scripts/s2/s4-agent.py`, which is also `flare-home`'s stand-in agent until step 4.
 3. **`island-socket`.** `whoami`, the model pass-through against a stub, then the providers of D2 one by one (S5), budgets, `access` entries.
 4. **`flare-agent`, first milestone.** The loop with file tools and `say`; tasks from the session; `flare-tui` gets `say`. First conversation with the agent.
 5. **The agent's verse.** `verse`, the `island.verse` provider, `action_waiting`, `approve` and `decline` in `flare-tui`. First approved agent verse in the real log.

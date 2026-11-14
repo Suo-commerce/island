@@ -1,4 +1,4 @@
-"""Taso's Field protocol, version 2: the part spike S2 uses.
+"""Taso's Field protocol, version 2: the part spikes S2 and S4 use.
 
 The codec follows `taso-field/src/protocol.rs` (Taso c031ee5) and Taso's
 own reference relay, `scripts/p3-relay.py`, which the no-trace gate runs.
@@ -82,6 +82,29 @@ def outcome_not_applied(op, reason):
 
 def open_():
     return _u8(5)
+
+
+def _opt_u64(v):
+    return _u8(0) if v is None else _u8(1) + _u64(v)
+
+
+def fork(seal=None):
+    """Request::Fork (tag 6): a child from this Vessel's Seal (None: newest)."""
+    return _u8(6) + _opt_u64(seal)
+
+
+def promote(child, seal=None):
+    """Request::Promote (tag 7): adopt `child` at its Seal (None: newest)."""
+    return _u8(7) + _str(child) + _opt_u64(seal)
+
+
+def result(op):
+    """Request::Result (tag 8): what became of one of this Vessel's ops."""
+    return _u8(8) + _u64(op)
+
+
+OP_STATES = {0: "Pending", 1: "Held", 2: "Applied", 3: "NotApplied", 4: "Unknown",
+             5: "NotFound", 6: "AcceptedUnknown"}
 
 
 # ── reading ──────────────────────────────────────────────────────────
@@ -205,8 +228,38 @@ def decode_reply(body):
                 "unknown": r.boolean(),
             })
         reply = {"type": "Open", "effects": effects}
+    elif tag == 7:
+        t = r.u8()
+        if t == 0:
+            reply = {"type": "Fork", "result": "Forked", "child": r.string(), "seal": r.u64()}
+        elif t == 1:
+            reply = {"type": "Fork", "result": "Refused", "reason": r.string()}
+        else:
+            raise ValueError(f"bad fork result tag {t}")
+    elif tag == 8:
+        child = r.string()
+        t = r.u8()
+        if t == 0:
+            seal = r.u64()
+            adopted = [r.u64() for _ in range(r.u64())]
+            reply = {"type": "Promote", "child": child, "result": "Promoted", "seal": seal,
+                     "adopted": adopted}
+        elif t == 1:
+            reply = {"type": "Promote", "child": child, "result": "Refused", "reason": r.string()}
+        else:
+            raise ValueError(f"bad promote result tag {t}")
+    elif tag == 9:
+        op = r.u64()
+        t = r.u8()
+        if t not in OP_STATES:
+            raise ValueError(f"bad op state tag {t}")
+        reply = {"type": "Result", "op": op, "state": OP_STATES[t]}
+        if t == 2:
+            reply["receipt"] = r.raw().decode("utf-8", "replace")
+        elif t == 3:
+            reply["reason"] = r.string()
     else:
-        raise ValueError(f"reply tag {tag} is not one S2 uses")
+        raise ValueError(f"reply tag {tag} is not one the spikes use")
     r.finish()
     return reply
 

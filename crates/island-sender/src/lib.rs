@@ -16,6 +16,7 @@
 
 #![warn(missing_docs)]
 
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 
 use island_client::approval::{self, Decision, Marks};
@@ -178,6 +179,173 @@ fn applied(entry: u64) -> Outcome {
     }
 }
 
+/// The sender sockets in a Warden's senders directory, in name order: the
+/// entries named `<32 hex digits>.sock`, with the Vessel id each carries.
+/// A directory that is not there (no Vessel started yet) has none.
+pub fn sockets_in(dir: &std::path::Path) -> Vec<(std::path::PathBuf, VesselId)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            vessel_of(&path).map(|vessel| (path, vessel))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The log side of a pass: the approvals and dispatches read so far, and
+/// a way to append a dispatch. `island-sender` reads and appends through
+/// the broker; the sender-history harness through a log of its own.
+pub trait Ledger<E> {
+    /// The approvals and dispatches in the log, as of the last read.
+    fn marks(&self) -> &Marks;
+    /// Append the dispatch of `planned` under `approval`, then read the log
+    /// again. `Ok(Ok(seq))`: accepted at `seq`; `Ok(Err(why))`: the gate
+    /// refused it (a verdict); `Err`: not known whether it landed.
+    fn dispatch(
+        &mut self,
+        vessel: VesselId,
+        planned: &Planned,
+        approval: u64,
+    ) -> Result<Result<u64, String>, E>;
+}
+
+/// The Warden side of a pass: one Vessel's sender socket.
+pub trait Released<E> {
+    /// The released, unsettled effects, in op order.
+    fn open(&mut self) -> Result<Vec<OpenEffect>, E>;
+    /// Report an outcome: `Ok(None)` recorded, `Ok(Some(why))` refused.
+    fn report(&mut self, op: u64, result: Outcome) -> Result<Option<String>, E>;
+}
+
+impl<S: Read + Write> Released<String> for SenderConn<S> {
+    fn open(&mut self) -> Result<Vec<OpenEffect>, String> {
+        SenderConn::open(self).map_err(|error| error.to_string())
+    }
+
+    fn report(&mut self, op: u64, result: Outcome) -> Result<Option<String>, String> {
+        SenderConn::report(self, op, result).map_err(|error| error.to_string())
+    }
+}
+
+/// What a pass did with one effect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Not approved: left waiting.
+    Wait,
+    /// Lost in a Warden restart and never approved: reported not applied.
+    Lapse,
+    /// Declined at this entry: reported not applied.
+    Decline(u64),
+    /// Dispatched before, at this entry: reported applied.
+    AlreadySent(u64),
+    /// Dispatched now, at this entry, under the approval named.
+    Sent {
+        /// The dispatch.
+        entry: u64,
+        /// The approval it used.
+        approval: u64,
+    },
+    /// The gate refused the dispatch: nothing reported, not tried again by
+    /// this process.
+    SendRefused(String),
+    /// Refused earlier in this process: left as it is.
+    HeldAfterRefusal,
+}
+
+impl Action {
+    /// Its name in the sender's output.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Wait => "wait",
+            Self::Lapse => "lapse",
+            Self::Decline(_) => "decline",
+            Self::AlreadySent(_) => "already-sent",
+            Self::Sent { .. } => "send",
+            Self::SendRefused(_) => "send-refused",
+            Self::HeldAfterRefusal => "held-after-refusal",
+        }
+    }
+}
+
+/// One effect of a pass: what was decided, what was done, how the report
+/// went (`None`: nothing reported; `Some(None)`: recorded; `Some(Some(why))`:
+/// refused).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Step {
+    /// The effect and its decision.
+    pub planned: Planned,
+    /// What was done.
+    pub action: Action,
+    /// The report.
+    pub reported: Option<Option<String>>,
+}
+
+/// How a pass ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// Every listed effect was handled.
+    Done,
+    /// Stopped right after a dispatch, before its report (fault injection).
+    StoppedAfterSend,
+}
+
+/// One pass over one Vessel's released effects: decide each from the
+/// ledger's marks, dispatch what is approved, report what is settled.
+/// `refused` holds the actions whose dispatch the gate refused in this
+/// process; `each` sees every step as it ends. With `stop_after_send` the
+/// pass ends right after the first dispatch, before its report.
+pub fn serve<E>(
+    ledger: &mut impl Ledger<E>,
+    warden: &mut impl Released<E>,
+    vessel: VesselId,
+    refused: &mut BTreeSet<(VesselId, Hash)>,
+    stop_after_send: bool,
+    mut each: impl FnMut(&Step),
+) -> Result<Ended, E> {
+    for effect in warden.open()? {
+        let planned = plan(ledger.marks(), &vessel, effect);
+        let (action, sent_entry) = match planned.decision {
+            Decision::Wait => (Action::Wait, None),
+            Decision::Lapse => (Action::Lapse, None),
+            Decision::Decline(seq) => (Action::Decline(seq), None),
+            Decision::AlreadySent(sent) => (Action::AlreadySent(sent.entry), None),
+            Decision::Send(_) if refused.contains(&(vessel, planned.key)) => {
+                (Action::HeldAfterRefusal, None)
+            }
+            Decision::Send(approval) => match ledger.dispatch(vessel, &planned, approval)? {
+                Ok(entry) => (Action::Sent { entry, approval }, Some(entry)),
+                Err(why) => {
+                    refused.insert((vessel, planned.key));
+                    (Action::SendRefused(why), None)
+                }
+            },
+        };
+        let mut step = Step {
+            planned,
+            action,
+            reported: None,
+        };
+        if stop_after_send && sent_entry.is_some() {
+            each(&step);
+            return Ok(Ended::StoppedAfterSend);
+        }
+        let held = matches!(
+            step.action,
+            Action::SendRefused(_) | Action::HeldAfterRefusal
+        );
+        if let Some(result) = outcome(step.planned.decision, sent_entry).filter(|_| !held) {
+            step.reported = Some(warden.report(step.planned.effect.op, result)?);
+        }
+        each(&step);
+    }
+    Ok(Ended::Done)
+}
+
 /// The Vessel id a sender socket's name carries: `<32 hex digits>.sock`.
 pub fn vessel_of(socket: &std::path::Path) -> Option<VesselId> {
     let name = socket.file_name()?.to_str()?;
@@ -259,6 +427,24 @@ mod tests {
             None
         );
         assert_eq!(vessel_of(std::path::Path::new("/run/x")), None);
+    }
+
+    #[test]
+    fn the_senders_directory_lists_only_vessel_sockets() {
+        let dir = std::env::temp_dir().join(format!("island-sender-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            format!("{}.sock", "cd".repeat(16)),
+            format!("{}.sock", "ab".repeat(16)),
+            "ab12.sock".to_owned(),
+            format!("{}.lock", "ab".repeat(16)),
+        ] {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+        let found: Vec<VesselId> = sockets_in(&dir).into_iter().map(|(_, v)| v).collect();
+        assert_eq!(found, vec![[0xAB; 16], [0xCD; 16]]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(sockets_in(&dir).is_empty());
     }
 
     /// The conversation against a stand-in Warden on a socket pair.

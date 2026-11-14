@@ -1,5 +1,6 @@
 """Golden vectors for s2_field.py, made by Taso's own Rust codec
-(taso-field, Taso c031ee5) with the same values.  Run: python3 -m unittest
+(taso-field, Taso c031ee5) with the same values; Fork, Promote and
+Result added for spike S4.  Run: python3 -m unittest
 scripts/s2/test_s2_field.py, or `just s2-test`."""
 
 import os
@@ -64,6 +65,39 @@ VECTORS = {
         "0000000000000071001000000000000000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
         "cd000200000000000000733201"
     ),
+    "req_fork_newest": (
+        "0600"
+    ),
+    "req_fork_at": (
+        "06010c00000000000000"
+    ),
+    "req_promote": (
+        "070200000000000000633100"
+    ),
+    "req_result": (
+        "080900000000000000"
+    ),
+    "rep_forked": (
+        "0700020000000000000063310c00000000000000"
+    ),
+    "rep_fork_refused": (
+        "070107000000000000006e6f20736c6f74"
+    ),
+    "rep_promoted": (
+        "0802000000000000006331000700000000000000020000000000000004000000000000000500000000000000"
+    ),
+    "rep_promote_refused": (
+        "08020000000000000063310102000000000000006e6f"
+    ),
+    "rep_result_pending": (
+        "09090000000000000000"
+    ),
+    "rep_result_applied": (
+        "09090000000000000002010000000000000072"
+    ),
+    "rep_result_notapplied": (
+        "09090000000000000003010000000000000078"
+    ),
 }
 
 
@@ -82,6 +116,12 @@ class Requests(unittest.TestCase):
         self.assertEqual(f.outcome_not_applied(9, "lapsed"), v("req_notapplied"))
         self.assertEqual(f.open_(), v("req_open"))
 
+    def test_fork_promote_result_match_taso(self):
+        self.assertEqual(f.fork(), v("req_fork_newest"))
+        self.assertEqual(f.fork(12), v("req_fork_at"))
+        self.assertEqual(f.promote("c1"), v("req_promote"))
+        self.assertEqual(f.result(9), v("req_result"))
+
 
 class Replies(unittest.TestCase):
     def test_decodings_match_taso(self):
@@ -98,6 +138,23 @@ class Replies(unittest.TestCase):
             "op": 3, "provider": "island", "request": "q",
             "retry": ["ProviderDeduplicated", "cd" * 16], "consequence": f.IRREVERSIBLE,
             "authority": "s2", "unknown": True}]})
+
+    def test_fork_promote_result_decode(self):
+        self.assertEqual(f.decode_reply(v("rep_forked")),
+                         {"type": "Fork", "result": "Forked", "child": "c1", "seal": 12})
+        self.assertEqual(f.decode_reply(v("rep_fork_refused")),
+                         {"type": "Fork", "result": "Refused", "reason": "no slot"})
+        self.assertEqual(f.decode_reply(v("rep_promoted")),
+                         {"type": "Promote", "child": "c1", "result": "Promoted", "seal": 7,
+                          "adopted": [4, 5]})
+        self.assertEqual(f.decode_reply(v("rep_promote_refused")),
+                         {"type": "Promote", "child": "c1", "result": "Refused", "reason": "no"})
+        self.assertEqual(f.decode_reply(v("rep_result_pending")),
+                         {"type": "Result", "op": 9, "state": "Pending"})
+        self.assertEqual(f.decode_reply(v("rep_result_applied")),
+                         {"type": "Result", "op": 9, "state": "Applied", "receipt": "r"})
+        self.assertEqual(f.decode_reply(v("rep_result_notapplied")),
+                         {"type": "Result", "op": 9, "state": "NotApplied", "reason": "x"})
 
     def test_trailing_bytes_are_refused(self):
         with self.assertRaises(ValueError):

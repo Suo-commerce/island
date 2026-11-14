@@ -1,0 +1,24 @@
+# Taso's Warden on the Island server: runs the Vessels in
+# /etc/taso/warden.json (flare-home), and holds their Field and sender
+# sockets under /run/taso/run. Installed by scripts/node/install.sh; see
+# docs/server.md, "6. The Taso node".
+#
+# The Warden is built to be killed: every step is durable before it is
+# answered, and the next start finishes or drops what was in flight. A
+# stop is a crash; so is a reboot. Its agents' containers die with it, and
+# each Vessel starts again at its last Seal.
+[Unit]
+Description=Taso Warden
+BindsTo=taso-blkd.service
+After=taso-blkd.service
+
+[Service]
+ExecStart=/usr/local/bin/taso-wardend /etc/taso/warden.json
+Restart=always
+RestartSec=2
+KillMode=mixed
+RuntimeDirectory=taso
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -222,6 +222,72 @@ wg set wg-island peer "$PHONE" allowed-ips 10.77.0.3/32
 To take a device out, delete its `[Peer]` block and run
 `wg set wg-island peer KEY remove`.
 
+## 6. The Taso node
+
+Taso runs the Vessels: one for now, `flare-home`, Island's agent. Its
+block log, its Warden and `island-sender` are system services beside the
+broker and the session server (docs/slice-2.md, "The Taso node"). Until
+`flare-agent` exists (slice 2, step 4), `flare-home` runs a stand-in: one
+turn, one action to approve, then it waits.
+
+The new kinds must be in every program that reads the log before the
+first approval is written: the broker, `island-cli` and `flare-server` on
+the server ("Updating the server", below), and the laptop's
+(`./islander.sh update`).
+
+On the server, with `/root/taso` and `/root/island` up to date:
+
+```sh
+cd /root/island && git pull --ff-only origin main
+TASO=/root/taso scripts/node/install.sh
+```
+
+It builds and installs `taso-blkd`, `taso-wardend`, `taso-ctl` and
+`island-sender`; builds the agents' image in `/var/lib/taso/agent-island`;
+runs `taso-ctl init` once (the block log, 32 GiB, in `/var/lib/taso`);
+writes `flare-home`'s entry into `/etc/taso/warden.json`, checked by
+Taso's parser; makes `/etc/island/sender.key`; and installs and enables
+the three units. It starts nothing, and opens no port. It ends by printing
+the sender's public key.
+
+On the laptop, two grants, each signed with the root key: the sender may
+write `dispatch` on `approvals`, and the daily key may write `approval`
+there (decision D5; the passkey comes later):
+
+```sh
+cd /srv/oc-projects/island
+ROOT=$(island-cli public .island/root.key)
+island-cli grant --broker http://10.77.0.1:4747 --root-key .island/root.key \
+    --holder SENDER_PUBLIC_KEY --scope approvals --rights dispatch
+island-cli grant --broker http://10.77.0.1:4747 --root-key .island/root.key \
+    --holder "$(island-cli public .island/daily.key)" --scope approvals --rights approval
+```
+
+Then on the server:
+
+```sh
+systemctl start taso-blkd taso-wardend island-sender
+scripts/node/check.sh
+```
+
+`check.sh` says what runs and where `flare-home` is, and prints
+`island-sender`'s last line about its action, with the request hash. To
+let the action out, approve that hash on the laptop:
+
+```sh
+island-cli approve --broker http://10.77.0.1:4747 --root "$ROOT" --key .island/daily.key REQUEST_HASH
+```
+
+and `check.sh` again shows it sent: one `dispatch` entry in the log.
+`scripts/node/check.sh kills` kills the Warden, the sender and the block
+log in turn and checks that each comes back without proposing or sending
+anything twice. A reboot is the same test: after it, run `check.sh`.
+
+There is no shutdown step. The Warden is built to be killed, and a
+reboot is a crash it recovers from: each Vessel starts again at its last
+Seal. To stop the node, `systemctl stop taso-blkd` (the Warden goes with
+it).
+
 ## Updating the server
 
 `islander.sh update` updates only the laptop. After merging a bundle, the
@@ -235,7 +301,10 @@ ssh root@10.77.0.1 'install -m 755 /tmp/island-broker /tmp/island-cli /tmp/flare
 curl -s http://10.77.0.1:4747/head
 ```
 
-The head names the build it runs.
+The head names the build it runs. The Taso node's programs and image
+are built on the server: pull, then run `scripts/node/install.sh` again,
+and restart what changed (`systemctl restart island-sender`; a new image
+is used at the agent's next start).
 
 ## Later
 

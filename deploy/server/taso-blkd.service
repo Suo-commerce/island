@@ -1,0 +1,22 @@
+# Taso's block log on the Island server: the Vessels' datasets.
+# Installed by scripts/node/install.sh; see docs/server.md, "6. The Taso node".
+#
+# The log and its size are fixed at `taso-ctl init`. There is no shutdown
+# step: a stop, a kill and a reboot are all a crash the next start recovers
+# from (the log replays from its last checkpoint).
+[Unit]
+Description=Taso block log
+After=local-fs.target systemd-modules-load.service systemd-tmpfiles-setup.service
+# The Warden runs whenever the block log does: after a crash of the block
+# log the Warden is stopped with it (BindsTo, there) and started again here.
+Upholds=taso-wardend.service
+
+[Service]
+ExecStart=/usr/local/bin/taso-blkd /var/lib/taso/blk.log /run/taso/blk.sock
+Restart=always
+RestartSec=2
+RuntimeDirectory=taso
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

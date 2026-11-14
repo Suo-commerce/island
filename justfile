@@ -72,7 +72,7 @@ tui:
 
 # Spike S2: the agent and sender scripts against Taso's codec and a stand-in Warden (no root needed).
 s2-test:
-    python3 -m unittest scripts/s2/test_s2_field.py scripts/s2/test_s2_flow.py
+    python3 -m unittest scripts/s2/test_s2_field.py scripts/s2/test_s2_flow.py scripts/s2/test_s4_agent.py
 
 # Spike S2: island-sender against a real Island log and broker, with a stand-in Warden (no root needed).
 s2-sender-test:

@@ -1,0 +1,20 @@
+# island-sender on the Island server: serves every Vessel's sender socket
+# in the Warden's senders directory, and lets out only what the Island log
+# approves (a `dispatch` entry per action). Installed by
+# scripts/node/install.sh; see docs/server.md, "6. The Taso node".
+#
+# Root, because the sender sockets are the Warden's, mode 0600. Its key,
+# /etc/island/sender.key, holds one grant: `dispatch` on `approvals`.
+# Settings come from /etc/island/island.env: ISLAND_ROOT.
+[Unit]
+Description=Island sender
+After=taso-wardend.service island-broker.service
+
+[Service]
+EnvironmentFile=/etc/island/island.env
+ExecStart=/usr/local/bin/island-sender --senders /run/taso/run/senders --broker http://10.77.0.1:4747 --root ${ISLAND_ROOT} --key /etc/island/sender.key
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

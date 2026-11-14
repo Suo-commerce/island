@@ -1164,6 +1164,7 @@ dependencies = [
  "island-core",
  "island-env",
  "island-log",
+ "proptest",
  "serde_json",
  "taso-core",
  "taso-field",
