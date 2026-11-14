@@ -32,8 +32,9 @@
 #   p  (spike S4, docs/slice-2.md) fork and promote asked for by the agent
 #      over the Field, on a prime with "restart": "always" and fork slots:
 #      the child learns it is a fork from the island socket's stand-in;
-#      after the promotion the prime is started again on the child's
-#      files.  Notes answer S4's questions: what of the prime's files
+#      a promotion after the prime sealed again is refused (Taso's M7);
+#      after a promotion without one the prime is started again on the
+#      child's files.  Notes answer S4's questions: what of the prime's files
 #      written after the fork Seal survives, what becomes of a released
 #      action in a turn that never ended, how long Seals take on a /work
 #      of S4_BULK files (FILES:MIB), and which slot a second fork takes.
@@ -694,12 +695,17 @@ run_p() {
     for _ in $(seq 100); do [ -S "$island" ] && break; sleep 0.05; done
     [ -S "$island" ] || { echo "s4-host did not start; see $OUT/s4-host.err" >&2; return 1; }
 
+    # Taso's rule M7, found by the first run of p: a prime that seals
+    # again after a fork can no longer promote that child.  So the plan
+    # forks a first child and seals once more (that promotion must be
+    # refused), then forks a second from the newest Seal and promotes it
+    # without sealing in between.
     local prime fork
     prime="mark:prime-start,bulk:$S4_BULK,seal,touch:40,seal,mark:fork-task,seal"     # 0-6
-    prime+=",fork,rm:fork-task,mark:prime-after-fork,seal,waitnote:1"                # 7-11
-    prime+=",mark:prime-unsealed,effect:irr:unended,promote"                         # 12-14
-    prime+=",ls,result:unended,effect:irr:after,fork,seal,waitnote:2:120,idle"       # 15-22
-    fork="ls,rm:fork-task,mark:child-made,effect:irr:child-a,setprime:15,seal,note:done,exit"
+    prime+=",fork,mark:prime-after-fork,seal,waitnote:1,promote"                    # 7-11
+    prime+=",fork,waitnote:2,mark:prime-unsealed,effect:irr:unended,promote"         # 12-16
+    prime+=",ls,result:unended,effect:irr:after,fork,waitnote:3:120,idle"           # 17-22
+    fork="ls,rm:fork-task,mark:child-made,effect:irr:child-a,setprime:17,seal,note:done,exit"
     cfg4 "$WORK/p.json" "s4/$STAMP/p" p-prime "$prime" "$fork"
     start p "$WORK/p.json"
     local w=$PID
@@ -710,12 +716,14 @@ run_p() {
         killw "$w"
         return 0
     fi
-    jwait "$j" 'e["slot"] == 22 and e["step"] == "exit"' 120 >/dev/null || true
+    jwait "$j" 'e["slot"] == 23 and e["step"] == "exit"' 120 >/dev/null || true
     local s; s=$(sender_sock "$ERR")
     python3 "$S2/s2-sender.py" --socket "$s" >"$OUT/p-open.json" 2>"$OUT/p-open.err" || true
     killw "$w"
 
-    check p "the prime forks over the Field" "$(jx "$j" '[e["result"] for e in P if e["step"] == "fork"][0]')" Forked
+    check p "the prime forks over the Field, three times, one slot each" \
+        "$(jx "$j" '[e["result"] for e in P if e["step"] == "fork"]')" '["Forked", "Forked", "Forked"]'
+    note p "forks: $(jx "$j" '[(e["child"], e["seal"], e["refusals"], e["seconds"]) for e in P if e["step"] == "fork"]')"
     check p "the child learns from whoami that it is a fork, in slot 21" \
         "$(jx "$j" '[e["role"] for e in d if e["slot"] == 21 and e["step"] == "start"][:1]')" '["fork"]'
     check p "the child starts on the fork Seal: the task there, later prime files not" \
@@ -723,16 +731,18 @@ run_p() {
         '[[true, false]]'
     check p "the child's effect is held" \
         "$(jx "$j" '[e["result"] for e in d if e["slot"] == 21 and e["step"] == "effect"]')" '["Held"]'
-    # The run may end before the agent journals the reply: the restart
-    # below is the proof; this is what the agent saw, if it saw it.
-    note p "promote reply: $(jx "$j" '[(e["result"], e.get("seal"), e.get("adopted"), e.get("reason"), e["seconds"]) for e in P if e["step"] == "promote"] or "not journalled before the run ended"')"
-    note p "forks: $(jx "$j" '[(e["result"], e.get("child"), e["refusals"]) for e in P if e["step"] == "fork"]')"
-    check p "the prime is started again, at the step its child left it" \
-        "$(jx "$j" '[e["resume_at"] for e in P if e["step"] == "start"]')" '[0, 15]'
+    check p "S4 Q2 (M7): a promotion after the prime sealed again is refused" \
+        "$(jx "$j" '[("sealed again" in (e.get("reason") or "")) for e in P if e["step"] == "promote"][:1]')" '[true]'
+    # The run may end before the agent journals the second reply: the
+    # restart is the proof; this is what the agent saw, if it saw it.
+    note p "promote replies: $(jx "$j" '[(e.get("child"), e["result"], e.get("seal"), e.get("adopted"), e.get("reason")) for e in P if e["step"] == "promote"]')"
+    check p "the prime is started again after the second promotion, at the step its child left it" \
+        "$(jx "$j" '[e["resume_at"] for e in P if e["step"] == "start"]')" '[0, 17]'
     check p "S4 Q1: it starts on the child's files (child-made there, fork-task gone)" \
         "$(jx "$j" '[("child-made" in e["files"], "fork-task" in e["files"]) for e in P if e["step"] == "ls"]')" \
         '[[true, false]]'
-    note p "S4 Q2: prime files after the fork Seal, sealed / unsealed, present after the promotion: $(jx "$j" '[("prime-after-fork" in e["files"], "prime-unsealed" in e["files"]) for e in P if e["step"] == "ls"]')"
+    check p "S4 Q2: the prime's unsealed files are gone after the promotion" \
+        "$(jx "$j" '[("prime-unsealed" in e["files"]) for e in P if e["step"] == "ls"]')" '[false]'
     note p "S4 Q2: Hello after the promotion, last sealed turn: $(jx "$j" '[e["last_sealed"] for e in P if e["step"] == "start"]')"
     note p "S4 Q3: the unended turn's released action: declared $(jx "$j" '[(e["result"], e["op"]) for e in P if e["step"] == "effect" and e["tag"] == "unended"]'), after the restart $(jx "$j" '[(e["state"], e.get("reason")) for e in P if e["step"] == "result"]')"
     note p "S4 Q3: a new Irreversible effect after the restart: $(jx "$j" '[(e["result"], e.get("reason")) for e in P if e["step"] == "effect" and e["tag"] == "after"]')"
@@ -740,11 +750,10 @@ run_p() {
     note p "S4 Q3: the prime's sender socket lists (op, key, unknown): $(jq_ "$OUT/p-open.json" "[(e['op'], e['retry'][1], e['unknown']) for e in d['before']]") with keys $keys"
     check p "the adopted child effect is on the prime's sender socket" \
         "$(jq_ "$OUT/p-open.json" "'$(cut -d' ' -f2 <<<"$keys" | cut -d= -f2)' in [e['retry'][1] for e in d['before']]")" True
-    note p "S4 Q4: bulk write $(jx "$j" '[(e["files"], e["bytes"], e["seconds"]) for e in P if e["step"] == "bulk"]'); seals (s): $(jx "$j" '[e["seconds"] for e in P if e["step"] == "seal"]') (bulk, touch, fork task, after fork, after restart); fork $(jx "$j" '[e["seconds"] for e in P if e["step"] == "fork"]') s"
-    note p "S4 Q4: promote reply to the next start: $(jx "$j" 'round([e["t"] for e in P if e["step"] == "start"][-1] - ([e["t"] for e in P if e["step"] == "promote"] or [e["t"] for e in P if e["step"] == "effect"])[0], 2)') s"
-    check p "S4 Q5: a second fork takes the next slot, never the first again" \
-        "$(jx "$j" '[e["slot"] for e in d if e["step"] == "start" and e["role"] == "fork"]')" '[21, 22]'
-    note p "S4 Q5: second fork $(jx "$j" '[(e["result"], e["child"], e.get("reason")) for e in P if e["step"] == "fork"][1:]')"
+    note p "S4 Q4: bulk write $(jx "$j" '[(e["files"], e["bytes"], e["seconds"]) for e in P if e["step"] == "bulk"]'); seals (s): $(jx "$j" '[e["seconds"] for e in P if e["step"] == "seal"]') (bulk, touch, fork task, after fork)"
+    note p "S4 Q4: the second promote's declaration to the next start: $(jx "$j" 'round([e["t"] for e in P if e["step"] == "start"][-1] - [e["t"] for e in P if e["step"] == "effect" and e["tag"] == "unended"][0], 2)') s"
+    check p "S4 Q5: each fork takes the next slot, never one again" \
+        "$(jx "$j" '[e["slot"] for e in d if e["step"] == "start" and e["role"] == "fork"]')" '[21, 22, 23]'
     note p "S4 Q5: after the run, datasets mounted under $MNT: $(mounts_under | wc -l); state entries: $(ls "$WORK/state" 2>/dev/null | tr '\n' ' ')"
 }
 

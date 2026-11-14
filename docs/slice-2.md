@@ -133,11 +133,12 @@ The namespace is the one S2 used; on a node with one tenant it is only a name. S
 
 **Forking, step by step:**
 
-1. The prime writes the child's task to `/work/.flare/fork-task.json`, ends the turn, and asks `Fork` at that Seal. The Seal must be shipped first, or the fork is refused *(read)*. The reply names the child.
-2. It removes the file, ends the turn, and repeats for the next child.
-3. Each child starts, learns from `whoami` that it is a fork, does the task in the file, declares its actions (all held), ends its turn, posts a note (what it made, in at most 16 KiB, and that it is done) and exits.
-4. The prime reads the notes, chooses, and asks `Promote`. Taso ends the run for the adoption *(read)*; with `restart: always` the Warden starts the agent again on the child's files, with the child's actions released. Spike S4 runs this on the server before the agent is built on it.
-5. Children not chosen stay as they are: sealed, held, sent nowhere. Their notes are dropped.
+**A prime that seals after a fork cannot promote that child** *(ran: S4, first run; Taso's rule M7, "this vessel sealed again since the fork")*. The child's work continues the prime's state at the fork Seal; once the prime has moved on, it no longer does. So from the first fork to the promotion the prime ends no turn: it forks every child from one Seal, waits, and promotes. A crash in that window costs only the waiting, since every child is forked from the Seal it rolls back to. The two-minute turn rule pauses for it.
+
+1. The prime writes the children's tasks to `/work/.flare/fork-tasks.json`, ends the turn, and asks `Fork` once per child, each from that same newest Seal. The Seal must be shipped first, or the fork is refused *(read)*; each reply names the child and, in its name, the slot.
+2. Each child starts, learns from `whoami` that it is a fork and in which slot, takes its task from the file by its place among the slots, does it, declares its actions (all held), ends its turn, posts a note (what it made, in at most 16 KiB, and that it is done) and exits. The task file stays in the child's files; the child removes it before its last Seal, so a promoted child's files carry no stale task.
+3. The prime, still in the turn that forked, reads the notes, chooses, and asks `Promote`. Taso ends the run for the adoption *(read)*; with `restart: always` the Warden starts the agent again on the child's files, with the child's actions released. S4's second run checks this.
+4. Children not chosen stay as they are: sealed, held, sent nowhere. Their notes are dropped. To work on without promoting any, the prime ends its turn: the fork set is given up.
 
 **Limits.** 2 GiB of memory, 256 processes, no network *(ran)*. At most 16 actions waiting for approval; more are not proposed until some are answered, because Taso's outbox holds 8 MiB.
 

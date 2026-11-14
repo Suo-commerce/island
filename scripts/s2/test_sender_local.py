@@ -146,6 +146,7 @@ class Sender(unittest.TestCase):
         service = subprocess.Popen([os.path.join(BIN, "island-sender"), "--senders", os.path.dirname(s.sender_path),
                                     "--broker", self.broker_url, "--root", self.root, "--key", self.sender_key,
                                     "--interval-ms", "100"], stdout=out, stderr=err, text=True)
+        self.addCleanup(service.wait, 10)
         self.addCleanup(service.kill)
 
         def lines():

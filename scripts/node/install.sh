@@ -135,10 +135,8 @@ with open(tmp, "w") as out:
 os.replace(tmp, path)
 print("  flare-home's entry " + ("replaced" if had else "added"))
 PY
-set +e
-taso-ctl status "$CONFIG" >/tmp/taso-status.out 2>&1
-rc=$?
-set -e
+rc=0
+taso-ctl status "$CONFIG" >/tmp/taso-status.out 2>&1 || rc=$?
 if [ "$rc" = 2 ]; then
     cp "$CONFIG.before-flare-home" "$CONFIG"
     cat /tmp/taso-status.out >&2
