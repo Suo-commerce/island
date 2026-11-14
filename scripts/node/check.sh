@@ -75,9 +75,11 @@ state() {   # the plain checks
     local when=$1
     wait_until 60 all_active || true
     for u in "${UNITS[@]}"; do check "$when: $u is running" "$(systemctl is-active "$u" || true)" active; done
+    # The socket comes with the Vessel's start, after the units: wait for
+    # the agent first.
+    wait_until 180 at_idle || true
     check "$when: the Warden's sender socket for flare-home is there" \
         "$(ls /run/taso/run/senders/*.sock 2>/dev/null | wc -l)" 1
-    wait_until 180 at_idle || true
     check "$when: flare-home is at the end of its plan" "$(agent '[e["step"] for e in S][-1:]')" '["idle"]'
     check "$when: it proposed its action once, in all its history" \
         "$(agent 'len([e for e in d if e["step"] == "effect"])')" 1
