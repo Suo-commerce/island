@@ -306,6 +306,6 @@ mod tests {
             .iter()
             .map(|tool| tool["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["read", "write", "edit", "bash", "say"]);
+        assert_eq!(names, ["read", "write", "edit", "bash", "verse", "say"]);
     }
 }

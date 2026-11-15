@@ -60,7 +60,8 @@ def wait_for(what, ok, seconds=15.0):
 
 
 class ScriptedModel(http.server.BaseHTTPRequestHandler):
-    """A model that writes a file with a tool call, then says it did."""
+    """A model that writes a file with a tool call, then says it did; asked
+    for a verse, it proposes one."""
 
     requests = []
 
@@ -72,9 +73,18 @@ class ScriptedModel(http.server.BaseHTTPRequestHandler):
         ScriptedModel.requests.append(body)
         last_user = [m for m in body["messages"] if m["role"] == "user"][-1]["content"]
         tools_done = body["messages"][-1]["role"] == "tool"
-        if tools_done:
+        wants_verse = "propose a verse" in last_user.splitlines()[-1]
+        if tools_done and wants_verse:
+            chunks = [{"choices": [{"delta": {"content": "\n\nI proposed a verse; it waits for you."}}]},
+                      {"choices": [{"delta": {}, "finish_reason": "stop"}]}]
+        elif tools_done:
             chunks = [{"choices": [{"delta": {"content": f"I wrote hello.txt for: {last_user.splitlines()[-1]}"}}]},
                       {"choices": [{"delta": {}, "finish_reason": "stop"}]}]
+        elif wants_verse:
+            args = json.dumps({"evidence": "decision", "text": "Verses from the agent wait for approval"})
+            chunks = [{"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call-v", "function": {"name": "verse", "arguments": args}}]}}]},
+                {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}]
         else:
             args = json.dumps({"path": "hello.txt", "content": last_user.splitlines()[-1]})
             chunks = [{"choices": [{"delta": {"tool_calls": [
@@ -95,13 +105,19 @@ class Converse(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="s4-converse-")
         self.procs = {}
         k = lambda name: os.path.join(self.tmp, name + ".key")  # noqa: E731
-        for name in ("root", "appender", "socket", "sender"):
+        for name in ("root", "appender", "socket", "sender", "daily"):
             run("island-cli", "keygen", k(name))
+        os.makedirs(os.path.join(self.tmp, "vessels"))
+        vessel_key = os.path.join(self.tmp, "vessels", "0123456789abcdef0123456789abcdef.key")
+        run("island-cli", "keygen", vessel_key)
         self.root = run("island-cli", "public", k("root"))
         log = os.path.join(self.tmp, "island.log")
         run("island-cli", "init", "--log", log, "--appender-key", k("appender"), "--root-key", k("root"))
-        run("island-cli", "grant", "--log", log, "--appender-key", k("appender"), "--root-key", k("root"),
-            "--holder", run("island-cli", "public", k("socket")), "--scope", "access", "--rights", "access")
+        for holder, scope, rights in ((k("socket"), "access", "access"), (k("sender"), "approvals", "dispatch"),
+                                      (k("daily"), "approvals", "approval"), (vessel_key, "flare", "verse")):
+            run("island-cli", "grant", "--log", log, "--appender-key", k("appender"), "--root-key", k("root"),
+                "--holder", run("island-cli", "public", holder), "--scope", scope, "--rights", rights)
+        self.log, self.daily, self.vessel_key = log, k("daily"), vessel_key
         port = free_port()
         self.broker = f"http://127.0.0.1:{port}"
         self.spawn("island-broker", [os.path.join(BIN, "island-broker"), "--log", log, "--appender-key",
@@ -146,7 +162,8 @@ class Converse(unittest.TestCase):
         self.start_agent()
         self.spawn("island-sender", [os.path.join(BIN, "island-sender"), "--socket", self.warden.sender_path,
                                      "--broker", self.broker, "--root", self.root, "--key", k("sender"),
-                                     "--session-socket", self.agent_sock, "--interval-ms", "100"])
+                                     "--session-socket", self.agent_sock, "--interval-ms", "100",
+                                     "--vessel-keys", os.path.join(self.tmp, "vessels")])
 
     def start_agent(self):
         self.spawn("flare-agent", [os.path.join(BIN, "flare-agent"), "--field", self.warden.field_path,
@@ -170,14 +187,23 @@ class Converse(unittest.TestCase):
                 p.terminate()
                 p.wait(10)
 
-    def say(self, text):
-        out = subprocess.run(
-            [os.path.join(BIN, "flare-tui"), "--server", f"ws://127.0.0.1:{self.session_port}/session",
-             "--session", "main", "--client", "test", "--after", "999999", "--root", self.root,
-             "--broker", self.broker, "--replica", os.path.join(self.tmp, "replica.log"),
-             "--reply-wait", "60"],
-            input=f"say {text}\n", capture_output=True, text=True, timeout=90)
-        return out.stdout
+    def say(self, text, *extra, after="999999"):
+        argv = [os.path.join(BIN, "flare-tui"), "--server", f"ws://127.0.0.1:{self.session_port}/session",
+                "--session", "main", "--client", "test", "--root", self.root,
+                "--broker", self.broker, "--replica", os.path.join(self.tmp, "replica.log"),
+                "--reply-wait", "60", *extra]
+        if after is not None:
+            argv += ["--after", after]
+        out = subprocess.run(argv, input=f"{text}\n", capture_output=True, text=True, timeout=90)
+        return out.stdout + out.stderr
+
+    def tail(self):
+        return run("island-cli", "tail", "--broker", self.broker, "--root", self.root, "-n", "50")
+
+    def events(self, kind):
+        path = os.path.join(self.tmp, "flare", "sessions", "main.jsonl")
+        with open(path) as fh:
+            return [e for e in map(json.loads, fh) if e["kind"] == kind]
 
     def replies(self):
         path = os.path.join(self.tmp, "flare", "sessions", "main.jsonl")
@@ -218,6 +244,37 @@ class Converse(unittest.TestCase):
         self.assertEqual(len({r["key"] for r in self.replies()}), 2)
         starts = [e for e in self.agent_log() if e["event"] == "start"]
         self.assertEqual(starts[-1]["cursor"], 0)
+
+
+    def test_a_verse_waits_for_approval_and_is_written_once_signed_as_the_vessel(self):
+        out = self.say("please propose a verse about this")
+        self.assertIn("agent (to #0): I proposed a verse; it waits for you.", out, out)
+        wait_for("the action waiting", lambda: self.events("action_waiting"))
+        waiting = self.events("action_waiting")
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual(waiting[0]["payload"]["shown"],
+                         'a verse on flare: [decision] "Verses from the agent wait for approval"')
+        seq = waiting[0]["seq"]
+        # Nothing is written before it is approved.
+        self.assertFalse([line for line in self.tail().splitlines() if line.split()[2:3] == ["verse"]])
+
+        # Approved from the terminal, with a key that may approve.
+        out = self.say(f"/approve {seq}", "--key", self.daily, after=None)
+        self.assertIn(f"approve request {waiting[0]['payload']['request_hash'][:8]}", out, out)
+        wait_for("the action settled", lambda: self.events("action_settled"), seconds=20)
+        settled = self.events("action_settled")[0]["payload"]
+        self.assertEqual(settled["settled"], "sent", settled)
+        # In the log once, on flare, by the Vessel's key.
+        vessel_pub = run("island-cli", "public", self.vessel_key)[:8]
+        tail = self.tail()
+        verses = [line for line in tail.splitlines()
+                  if line.split()[2:5] == ["verse", "flare", vessel_pub]]
+        self.assertEqual(len(verses), 1, tail)
+        self.assertIn("Verses from the agent wait for approval", verses[0])
+        self.assertEqual(int(verses[0].split()[0]), settled["entry"])
+        # Approving again lets nothing more out: the action is settled.
+        time.sleep(1)
+        self.assertEqual(len(self.events("action_settled")), 1)
 
 
 if __name__ == "__main__":

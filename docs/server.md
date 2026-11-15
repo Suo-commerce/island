@@ -395,14 +395,35 @@ The pieces between them:
   in `/work/.flare/`, sealed with each turn, and notes its starts, tasks
   and turns in `/work/.flare/log.jsonl`, which `check.sh` reads.
 
-Talk to it from the laptop's terminal:
+Talk to it from the laptop's terminal (`./islander.sh`): anything typed
+is said to it; commands start with a slash (`/help` lists them). Or on
+the server, `scripts/node/check.sh converse "your message"`.
+
+**Its verses (step 5).** The agent may propose a verse on its own stream,
+`flare` (decision D3), with its tool `verse`. That is the action
+`island.verse`, and it waits for you: `flare-tui` shows it as `waiting
+for you` with its exact text, and `/waiting` lists what waits. `/approve
+N` or `/decline N` signs an `approval` with the terminal's key, after
+checking that the request it names is the one shown. Approved,
+`island-sender` appends the `dispatch`, then the verse, signed with
+`flare-home`'s own key in `/etc/island/vessels/<vessel-id>.key`, once;
+the session shows it `sent` with its entry. Declined, it is never
+written. Two grants, from the laptop with the root key, once: the
+terminal's key may write `approval` on `approvals` (the daily key has it
+since step 2), and `flare-home`'s key may write `verse` on `flare`
+(`install.sh` prints the public key):
 
 ```sh
-flare-tui --server ws://10.77.0.1:4749/session --session main --root "$ISLAND_ROOT"
-say what can you do?
+island-cli grant --broker http://10.77.0.1:4747 --root-key .island/root.key \
+    --holder FLARE_HOME_PUBLIC_KEY --scope flare --rights verse
 ```
 
-or on the server, `scripts/node/check.sh converse "your message"`.
+**Its instructions** (the system prompt) are
+`/etc/island-socket/instructions.md`, written once by `install.sh` from
+`deploy/server/agent-instructions.md` and then yours to edit: the island
+socket serves them fresh at every task, so an edit needs no restart.
+Each task's transcript records their digest and whether they came from
+the socket or, when the file is missing, are the agent's built-in copy.
 
 The model is `island-socket`'s default (section 7). Its answers, tool
 calls and their results are in `flare-home`'s Chronicle as transcript

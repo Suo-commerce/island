@@ -12,6 +12,7 @@
 //! key = "/etc/island-socket/socket.key"
 //! access_every_secs = 30
 //! tasks = "/run/flare-server/agent.sock"   # flare-server's agent socket
+//! instructions = "/etc/island-socket/instructions.md"   # the agent's system prompt
 //! default = "melious"
 //!
 //! [provider.melious]
@@ -54,10 +55,18 @@ pub struct Config {
     /// `flare-server`'s agent socket, where tasks come from.
     #[serde(default = "agent_socket")]
     pub tasks: PathBuf,
+    /// The agent's instructions (its system prompt), served at
+    /// `/instructions`; read at each request, so an edit needs no restart.
+    #[serde(default = "instructions")]
+    pub instructions: PathBuf,
 }
 
 fn thirty() -> u64 {
     30
+}
+
+fn instructions() -> PathBuf {
+    PathBuf::from("/etc/island-socket/instructions.md")
 }
 
 fn agent_socket() -> PathBuf {

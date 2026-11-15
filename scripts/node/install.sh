@@ -22,11 +22,14 @@
 #   4. writes flare-home's entry into /etc/taso/warden.json (replacing an
 #      older one): it runs flare-agent. Checked by Taso's own parser
 #      before it stays;
-#   5. makes island-sender's key, /etc/island/sender.key, if there is none,
-#      and prints its public key for the grant;
+#   5. makes island-sender's key, /etc/island/sender.key, and flare-home's
+#      writer key, /etc/island/vessels/<vessel-id>.key, if there are none,
+#      and prints their public keys for the grants;
 #   6. island-socket (step 3): its user, its key and config under
-#      /etc/island-socket (written once; edited by hand after), and a stub
-#      model as its first provider;
+#      /etc/island-socket (written once; edited by hand after), a stub
+#      model as its first provider, and the agent's instructions,
+#      /etc/island-socket/instructions.md (written once; edited by hand
+#      after, read at every task);
 #   7. installs the units taso-blkd, taso-wardend, island-sender,
 #      island-socket, island-stub-model and flare-server (with its agent
 #      socket, step 4) and enables them.  It starts nothing: that is the
@@ -191,6 +194,20 @@ fi
 chmod 600 "$SENDER_KEY"
 SENDER_PUB=$("$ISLAND/target/release/island-cli" public "$SENDER_KEY")
 
+# flare-home's own writer key (step 5): island-sender signs its approved
+# verses with it. Root only, one file per Vessel, named by its id.
+FLARE_HOME_ID=$("$ISLAND/target/release/island-socket" vessels --warden-config "$CONFIG" \
+    | awk '$2 == "flare-home" && $3 == "prime" { print $1 }')
+[ -n "$FLARE_HOME_ID" ] || die "no flare-home in $CONFIG"
+install -d -m 700 /etc/island/vessels
+VESSEL_KEY=/etc/island/vessels/$FLARE_HOME_ID.key
+if [ ! -f "$VESSEL_KEY" ]; then
+    (umask 077; "$ISLAND/target/release/island-cli" keygen "$VESSEL_KEY" >/dev/null)
+    say "made $VESSEL_KEY (flare-home's writer key)"
+fi
+chmod 600 "$VESSEL_KEY"
+VESSEL_PUB=$("$ISLAND/target/release/island-cli" public "$VESSEL_KEY")
+
 # ── 6. island-socket ───────────────────────────────────────────────────
 # Its own user, its config and key under /etc/island-socket (the user
 # reads them; only root writes), and the stub model as its first provider
@@ -226,6 +243,13 @@ if [ ! -f "$SOCKET_CONFIG" ]; then
     chmod 640 "$SOCKET_CONFIG"
     say "wrote $SOCKET_CONFIG (the stub provider only)"
 fi
+# The agent's instructions: written once, then edited by hand; island-socket
+# reads them at every task, so an edit needs no restart.
+INSTRUCTIONS=/etc/island-socket/instructions.md
+if [ ! -f "$INSTRUCTIONS" ]; then
+    install -m 640 -o root -g island-socket "$ISLAND/deploy/server/agent-instructions.md" "$INSTRUCTIONS"
+    say "wrote $INSTRUCTIONS (the agent's instructions; edit them there)"
+fi
 # It places its socket in the image, through /var/lib/taso.
 runuser -u island-socket -- test -w "$IMAGE/run/island" \
     || die "island-socket cannot write $IMAGE/run/island (a directory above it is closed to it)"
@@ -252,6 +276,7 @@ Next:
 1. On the laptop, the grants each key needs, if it has none yet:
    island-sender  $SENDER_PUB  'dispatch' on 'approvals'
    island-socket  $SOCKET_PUB  'access' on 'access'
+   flare-home     $VESSEL_PUB  'verse' on 'flare'
 2. Start, or restart what changed:
    systemctl restart flare-server island-stub-model island-socket island-sender
    systemctl start taso-blkd taso-wardend

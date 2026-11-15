@@ -1,6 +1,8 @@
 //! The agent's tools (docs/slice-2.md, "Tools of the loop"): `read`,
 //! `write`, `edit` and `bash` work in `/work` and leave the Vessel as
-//! nothing; `say` replies to Jarmo, as the action `flare.say`.
+//! nothing; `say` messages Jarmo, as the action `flare.say`; `verse`
+//! proposes a verse on the agent's own stream, as the action
+//! `island.verse`, which waits for his approval.
 //!
 //! The four file tools are ported from Pi's coding agent, with their
 //! descriptions and messages, so a model that knows Pi knows these.
@@ -116,6 +118,15 @@ pub const SAY_DESCRIPTION: &str = "Send a message to Jarmo now, while you keep w
 question, or progress on a long task. Your final answer is sent to him when you finish, so do \
 not repeat it here.";
 
+/// The description of `verse`.
+pub const VERSE_DESCRIPTION: &str = "Propose a verse on your own stream, flare, in Jarmo's \
+Island log: one short entry saying what was decided, made, measured or answered. It waits for \
+his approval; approved, it is written once, signed as you. You may write only to flare: a \
+verse for one of his projects you draft in your answer, and he writes it himself.";
+
+/// The stream the agent's verses go to (docs/slice-2.md, decision D3).
+pub const OWN_STREAM: &str = "flare";
+
 /// Every tool, as the model sees them.
 pub fn specs() -> Vec<Spec> {
     vec![
@@ -138,6 +149,27 @@ pub fn specs() -> Vec<Spec> {
             name: "bash",
             description: bash::description(),
             parameters: bash::parameters(),
+        },
+        Spec {
+            name: "verse",
+            description: VERSE_DESCRIPTION.to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "evidence": {
+                        "type": "string",
+                        "enum": ["decision", "artefact", "measurement", "closed-question"],
+                        "description": "What the verse rests on"
+                    },
+                    "text": { "type": "string", "description": "The verse, at most 2000 bytes" },
+                    "refs": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Hashes it points at, 64 hex digits each (an artefact needs one)"
+                    }
+                },
+                "required": ["evidence", "text"]
+            }),
         },
         Spec {
             name: "say",

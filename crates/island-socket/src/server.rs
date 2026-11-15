@@ -6,6 +6,7 @@
 //! | `GET /whoami`               | who the caller is                         |
 //! | `GET /v1/models`            | the models it may name                    |
 //! | `POST /v1/chat/completions` | the model's answer, streamed as it comes  |
+//! | `GET /instructions`         | the agent's instructions, from the config's file; 404 if there is none |
 //! | `GET /task?after=N`         | the next message said to the agent after N, from `flare-server`, or 204 after waiting up to 50 s (the prime only) |
 //!
 //! The rest of the table (tasks, log reads, repos, notes) comes with the
@@ -73,6 +74,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat))
         .route("/task", get(task))
+        .route("/instructions", get(instructions))
         .fallback(not_here)
         .layer(DefaultBodyLimit::max(MAX_REQUEST))
         .with_state(shared)
@@ -170,7 +172,7 @@ async fn not_here(ConnectInfo(_peer): ConnectInfo<Peer>) -> Response {
     error(
         StatusCode::NOT_FOUND,
         "not_found",
-        "not served (yet): this socket answers /whoami, /v1/models, /v1/chat/completions and /task",
+        "not served (yet): this socket answers /whoami, /v1/models, /v1/chat/completions, /task and /instructions",
     )
 }
 
@@ -430,4 +432,58 @@ fn serde_urlencoded_query(query: Option<&str>) -> Result<TaskQuery, String> {
         }
     }
     Ok(TaskQuery { after })
+}
+
+/// The agent's instructions: the file named in the config, read now, so
+/// an edit on the server takes effect at the agent's next task. Counted as
+/// a read; the agent records the text's digest in its transcript.
+async fn instructions(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+) -> Response {
+    let caller = match shared.caller(peer) {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    let text = match tokio::fs::read(&shared.config.instructions).await {
+        Ok(text) => text,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+            return error_response_not_found(&shared.config.instructions);
+        }
+        Err(why) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "instructions_unavailable",
+                format!("{}: {why}", shared.config.instructions.display()),
+            );
+        }
+    };
+    let target = b"/instructions";
+    let digest = crate::access::task_digest(target, &text);
+    shared.batches.lock().await.add(
+        caller.vessel,
+        island_core::AccessKind::Read,
+        "",
+        target.len() as u64,
+        text.len() as u64,
+        digest,
+        true,
+    );
+    let mut response = Response::new(Body::from(text));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+    response
+}
+
+fn error_response_not_found(path: &std::path::Path) -> Response {
+    error(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        format!(
+            "no instructions at {}: the agent uses its own",
+            path.display()
+        ),
+    )
 }

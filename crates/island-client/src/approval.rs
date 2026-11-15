@@ -33,6 +33,9 @@ pub struct Sent {
     pub entry: u64,
     /// The approval it used.
     pub approval: u64,
+    /// The counter the Vessel's key uses for what is sent after it (a
+    /// verse); 0 when nothing is.
+    pub counter: u64,
 }
 
 /// What the approvals and dispatches in a log say, so far.
@@ -76,6 +79,7 @@ impl Marks {
                     .or_insert(Sent {
                         entry: seq,
                         approval: dispatch.approval,
+                        counter: dispatch.counter,
                     });
             }
             _ => {}
@@ -144,6 +148,17 @@ pub fn decide(marks: &Marks, vessel: &VesselId, key: &Hash, request: &Hash) -> D
         return Decision::Decline(seq);
     }
     Decision::Wait
+}
+
+/// Bytes of any length from hex, or `None`.
+pub fn unhex_bytes(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).ok())
+        .collect()
 }
 
 /// Lowercase hex.
@@ -244,6 +259,7 @@ mod tests {
         let done = Decision::AlreadySent(Sent {
             entry: 11,
             approval: 10,
+            counter: 0,
         });
         // Again, as after a Warden restart: the dispatch decides.
         assert_eq!(decide(&m, &V, &k, &h), done);

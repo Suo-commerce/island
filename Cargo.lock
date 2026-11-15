@@ -577,6 +577,8 @@ dependencies = [
  "blake3",
  "clap",
  "flare-core",
+ "island-client",
+ "island-core",
  "serde",
  "serde_json",
  "taso-core",
@@ -1146,6 +1148,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "taso-core",
  "tokio",
 ]
 

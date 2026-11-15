@@ -30,9 +30,9 @@ use island_core::{Access, AccessKind, Body, Hash, PublicKey, StreamId, VesselId}
 pub const CALL_DOMAIN: &str = "island.inference-call.v1";
 /// The batch digest's domain.
 pub const BATCH_DOMAIN: &str = "island.access-batch.v1";
-/// A task request's digest domain: over the request's path and query as
-/// the agent sent them and the body it got back, laid out as a model
-/// call's.
+/// A task request's digest domain, and a read's (the instructions):
+/// over the request's path and query as the agent sent them and the body
+/// it got back, laid out as a model call's.
 pub const TASK_DOMAIN: &str = "island.task-call.v1";
 
 /// A task request's digest.

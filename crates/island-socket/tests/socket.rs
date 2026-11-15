@@ -114,13 +114,14 @@ async fn world(provider_url: &str, budget_calls: u64, stranger: bool) -> World {
     let config = format!(
         "socket = {socket:?}\nwarden_config = {warden:?}\nstate_dir = {state:?}\n\
          broker = \"http://127.0.0.1:9\"\nroot = \"{root}\"\nkey = \"/nonexistent\"\n\
-         default = \"local\"\ntasks = {tasks:?}\n\
+         default = \"local\"\ntasks = {tasks:?}\ninstructions = {instructions:?}\n\
          [provider.local]\nbase_url = \"{provider_url}\"\nmodels = [\"small\", \"large\"]\n\
          key_file = {key_file:?}\nbudget = {{ calls = {budget_calls}, bytes = 100000000 }}\n\
          [provider.down]\nbase_url = \"http://127.0.0.1:9/v1\"\nmodels = [\"nowhere\"]\n\
          budget = {{ calls = 10, bytes = 1000 }}\n",
         state = dir.path().join("state"),
         tasks = dir.path().join("agent.sock"),
+        instructions = dir.path().join("instructions.md"),
         root = "a3d2b14059647d18c5334b853e1f712e62d1ddae66f959a3224bf5130acf7e5d",
     );
     let config = island_socket::config::Config::parse(&config).unwrap();
@@ -421,5 +422,39 @@ async fn a_task_comes_from_the_session_server_and_is_counted() {
             island_socket::access::task_digest(b"/task", &body),
             island_socket::access::task_digest(b"/task?after=7", b""),
         ])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_instructions_come_from_their_file_as_it_is_now() {
+    let (url, _) = stub(1).await;
+    let world = world(&url, 10, false).await;
+    let file = world.socket.with_file_name("instructions.md");
+    let (status, _) = ask(&world.socket, "GET", "/instructions", b"").await;
+    assert_eq!(status, 404, "none yet: the agent uses its own");
+    std::fs::write(&file, "You are Flare's agent.\n").unwrap();
+    let (status, body) = ask(&world.socket, "GET", "/instructions", b"").await;
+    assert_eq!(
+        (status, body.as_slice()),
+        (200, &b"You are Flare's agent.\n"[..])
+    );
+    // Edited: the next request has the new text, no restart.
+    std::fs::write(&file, "Be brief.\n").unwrap();
+    let (_, body) = ask(&world.socket, "GET", "/instructions", b"").await;
+    assert_eq!(body, b"Be brief.\n");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let reads: Vec<_> = world
+        .shared
+        .batches
+        .lock()
+        .await
+        .take(false)
+        .into_iter()
+        .filter(|a| a.what == island_core::AccessKind::Read)
+        .collect();
+    assert_eq!(
+        (reads.len(), reads[0].calls),
+        (1, 2),
+        "two reads, counted at once"
     );
 }

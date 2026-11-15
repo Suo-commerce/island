@@ -25,7 +25,9 @@
 #                                  the same, then a conversation: TEXT said
 #                                  to the agent in the session main (with
 #                                  flare-tui), and its reply back as an
-#                                  agent_text, once
+#                                  agent_text, once. To have it propose a
+#                                  verse, say so in TEXT; approve it from
+#                                  the laptop's terminal with /approve
 #
 # After a reboot, the plain check is the reboot test: a reboot is a crash.
 #
@@ -90,12 +92,16 @@ print(json.dumps(r) if isinstance(r, (list, dict, bool)) or r is None else r)
 PY
 }
 
-# replies <expression over R (the agent_text payloads in the session)>
+# replies <expression over R (the agent_text payloads in the session), W and
+# A (the action_waiting and action_settled events)>
 replies() {
     [ -f "$SESSION" ] || { echo "no-session"; return 0; }
     python3 - "$SESSION" "$1" <<'PY'
 import json, sys
-R = [e["payload"] for e in map(json.loads, open(sys.argv[1])) if e.get("kind") == "agent_text"]
+E = [json.loads(line) for line in open(sys.argv[1])]
+R = [e["payload"] for e in E if e.get("kind") == "agent_text"]
+W = [e for e in E if e.get("kind") == "action_waiting"]
+A = [e for e in E if e.get("kind") == "action_settled"]
 r = eval(sys.argv[2])
 print(json.dumps(r) if isinstance(r, (list, dict, bool)) or r is None else r)
 PY
@@ -137,6 +143,9 @@ state() {   # the plain checks
         "$(dispatches | awk '{ print ($1 <= 1) ? "ok" : $1 }')" ok
     check "$when: every reply in the session once, by its key" \
         "$(replies 'len(R) == len({r["key"] for r in R})')" true
+    check "$when: every action waiting and settled at most once" \
+        "$(replies 'len(W) == len({e["payload"]["request_hash"] for e in W}) and len(A) == len({e["payload"]["request_hash"] for e in A})')" true
+    note "$when: actions: $(replies '[(e["seq"], e["payload"]["shown"][:60]) for e in W if e["payload"]["request_hash"] not in {a["payload"]["request_hash"] for a in A}]') waiting; $(replies 'len(A)') settled"
     wait_until 30 test -S "$ISOCK" || true
     check "$when: the island socket says flare-home is flare-home" \
         "$(island /whoami | python3 -c 'import json, sys; d = json.load(sys.stdin); print(d["subject"], d["role"], d["vessel"])' 2>/dev/null || echo no-answer)" \
@@ -203,7 +212,7 @@ print(d.get("model"), "said:", repr(d["choices"][0]["message"]["content"][:160])
         text=${2:-"check.sh asks: answer in one short sentence, what can you do?"}
         before=$(replies 'len(R)')
         inference=$("$CLI" tail --broker "$BROKER" --root "$ROOT" -n 1000 | grep -c ' access .*Inference' || true)
-        out=$(printf 'say %s\n' "$text" | timeout 300 "$TUI" --server ws://10.77.0.1:4749/session \
+        out=$(printf '/say %s\n' "$text" | timeout 300 "$TUI" --server ws://10.77.0.1:4749/session \
             --session main --client check --after 999999999 --root "$ROOT" --broker "$BROKER" \
             --replica /tmp/check-flare-replica.log --reply-wait 240 2>&1 || true)
         task=$(printf '%s\n' "$out" | sed -n 's/^#\([0-9]*\) .* check → agent: .*/\1/p' | tail -1)

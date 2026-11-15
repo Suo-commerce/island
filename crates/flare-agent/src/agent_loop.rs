@@ -45,6 +45,8 @@ pub trait Host {
     fn window(&self, history: &[Message]) -> Vec<Message>;
     /// Say something to Jarmo now (the tool `say`).
     fn say(&mut self, text: &str) -> Result<String, String>;
+    /// Propose a verse on the agent's own stream (the tool `verse`).
+    fn verse(&mut self, verse: island_core::Verse) -> Result<String, String>;
     /// Record a step in the Vessel's transcript.
     fn record(&mut self, entry: Value);
     /// A round of tool calls ended: the run may end a turn here.
@@ -142,6 +144,15 @@ fn call_tool(host: &mut dyn Host, tools: &[Spec], name: &str, arguments: &str) -
             ));
         }
     };
+    if name == "verse" {
+        return match verse_of(&args) {
+            Ok(verse) => match host.verse(verse) {
+                Ok(done) => Outcome::text(done),
+                Err(why) => Outcome::error(why),
+            },
+            Err(why) => Outcome::error(why),
+        };
+    }
     if name == "say" {
         return match args.get("text").and_then(Value::as_str) {
             Some(text) => match host.say(text) {
@@ -152,6 +163,43 @@ fn call_tool(host: &mut dyn Host, tools: &[Spec], name: &str, arguments: &str) -
         };
     }
     run_file_tool(name, &args).unwrap_or_else(|| Outcome::error(format!("Tool {name} not found")))
+}
+
+/// The verse the arguments of `verse` describe.
+fn verse_of(args: &Value) -> Result<island_core::Verse, String> {
+    use island_core::Evidence;
+    let evidence = match args.get("evidence").and_then(Value::as_str) {
+        Some("decision") => Evidence::Decision,
+        Some("artefact") => Evidence::Artefact,
+        Some("measurement") => Evidence::Measurement,
+        Some("closed-question" | "closed_question" | "closed question") => Evidence::ClosedQuestion,
+        other => {
+            return Err(format!(
+                "Validation failed for tool arguments: `evidence` must be decision, artefact, \
+                 measurement or closed-question, not {other:?}"
+            ));
+        }
+    };
+    let text = args
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or(
+            "Validation failed for tool arguments: `text` must be a string with something in it",
+        )?;
+    let refs = match args.get("refs") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(refs)) => refs
+            .iter()
+            .map(|r| {
+                r.as_str()
+                    .and_then(island_client::approval::unhex::<32>)
+                    .ok_or_else(|| format!("a ref is 64 hex digits, not {r}"))
+            })
+            .collect::<Result<_, _>>()?,
+        Some(other) => return Err(format!("`refs` must be a list of hashes, not {other}")),
+    };
+    Ok(island_core::Verse::new(evidence, text.trim(), refs))
 }
 
 /// Lowercase hex.
@@ -196,6 +244,10 @@ mod tests {
         fn say(&mut self, text: &str) -> Result<String, String> {
             self.said.push(text.to_owned());
             Ok("Sent.".to_owned())
+        }
+        fn verse(&mut self, verse: island_core::Verse) -> Result<String, String> {
+            self.said.push(format!("verse: {}", verse.text));
+            Ok("Proposed.".to_owned())
         }
         fn record(&mut self, entry: Value) {
             self.records.push(entry);
@@ -308,6 +360,35 @@ mod tests {
             run(&mut Scripted(Vec::new()), &mut host, &mut history, &specs()),
             Ended::Answered("Here.".into())
         );
+    }
+
+    #[test]
+    fn a_verse_is_read_from_its_arguments() {
+        let mut model = Scripted(vec![
+            answer(
+                "",
+                &[
+                    (
+                        "verse",
+                        r#"{"evidence":"decision","text":" keep it small "}"#,
+                    ),
+                    ("verse", r#"{"evidence":"opinion","text":"x"}"#),
+                    (
+                        "verse",
+                        r#"{"evidence":"artefact","text":"x","refs":["zz"]}"#,
+                    ),
+                ],
+                Stop::ToolUse,
+            ),
+            answer("ok", &[], Stop::Stop),
+        ]);
+        let mut host = Recorder::default();
+        let mut history = Vec::new();
+        run(&mut model, &mut host, &mut history, &specs());
+        assert_eq!(host.said, ["verse: keep it small"]);
+        let results = results(&history);
+        assert!(results[1].1 && results[1].0.contains("`evidence` must be"));
+        assert!(results[2].1 && results[2].0.contains("64 hex digits"));
     }
 
     #[test]

@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 flare-core = { workspace = true }
+island-client = { workspace = true }
+island-core = { workspace = true }
 taso-core = { workspace = true }
 taso-field = { workspace = true }
 blake3 = { workspace = true }

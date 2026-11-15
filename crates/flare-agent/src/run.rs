@@ -34,15 +34,13 @@ pub const KEEP: usize = 400;
 /// The provider of the agent's replies.
 pub const SAY: &str = "flare.say";
 
-/// What the agent is told it is.
-pub const SYSTEM: &str = "You are Flare's agent. You work for Jarmo, inside an isolated \
-Taso Vessel on his Island server. You have no network. Your files are in /work: they are kept \
-between turns, and after a crash they go back to the last turn that ended. You have tools: \
-read, write, edit and bash work in /work; say sends Jarmo a message at once. Jarmo talks to \
-you from Flare, his console. When you have done what he asked, answer him: your answer is \
-sent to him as your reply. Keep it plain and short, and say what you did. Island is his \
-signed log of decisions and work, in short entries called verses; you cannot write to it \
-yet, but you may draft a verse for him in your reply.";
+/// What the agent is told it is when Island has no instructions for it:
+/// the same text `scripts/node/install.sh` puts in
+/// `/etc/island-socket/instructions.md` the first time.
+pub const SYSTEM: &str = include_str!("../../../deploy/server/agent-instructions.md");
+
+/// The stream the agent's verses go to.
+pub use crate::tools::OWN_STREAM;
 
 /// What the agent keeps between turns.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +51,9 @@ pub struct State {
     pub working: Option<Task>,
     /// Messages said on it so far with `say`.
     pub says: u64,
+    /// Verses proposed on it so far.
+    #[serde(default)]
+    pub verses: u64,
 }
 
 /// An action's key: derived from the task, the purpose and an index,
@@ -202,15 +203,23 @@ impl<'a> Agent<'a> {
                     });
                     self.state.working = Some(task.clone());
                     self.state.says = 0;
+                    self.state.verses = 0;
                     task
                 }
             },
         };
         eprintln!("flare-agent: task #{} (turn {})", task.id, self.turn);
         note(json!({ "event": "task", "task": task.id, "turn": self.turn }));
-        let system = Message::System {
-            text: SYSTEM.to_owned(),
+        // The instructions as Island has them now, or the agent's own; their
+        // digest goes in the transcript, so each turn says which it ran on.
+        let (instructions, source) = match self.tasks.instructions() {
+            Some(text) => (text, "island-socket"),
+            None => (SYSTEM.to_owned(), "built-in"),
         };
+        let system = Message::System {
+            text: instructions.clone(),
+        };
+        let digest = blake3::hash(instructions.as_bytes());
         let mut host = TaskHost {
             field: &mut *self.field,
             task: &task,
@@ -220,9 +229,15 @@ impl<'a> Agent<'a> {
             system,
             patience: self.patience,
         };
+        host.record(json!({
+            "kind": "instructions",
+            "source": source,
+            "digest": digest.to_hex().as_str(),
+            "bytes": instructions.len(),
+        }));
         let ended = agent_loop::run(&mut *self.model, &mut host, &mut self.history, &self.tools);
         let reply = match ended {
-            Ended::Answered(text) if !text.trim().is_empty() => Some(text),
+            Ended::Answered(text) if !text.trim().is_empty() => Some(text.trim().to_owned()),
             // Everything was said with `say` already.
             Ended::Answered(_) if host.state.says > 0 => None,
             Ended::Answered(_) => Some("(The model gave no answer.)".to_owned()),
@@ -234,6 +249,7 @@ impl<'a> Agent<'a> {
         self.state.cursor = Some(task.id);
         self.state.working = None;
         self.state.says = 0;
+        self.state.verses = 0;
         self.end_turn()?;
         Ok(Some(task.id))
     }
@@ -303,6 +319,26 @@ impl Host for TaskHost<'_> {
         let index = self.state.says;
         self.state.says += 1;
         self.declare_say(text, "say", index)
+    }
+
+    fn verse(&mut self, verse: island_core::Verse) -> Result<String, String> {
+        let index = self.state.verses;
+        self.state.verses += 1;
+        let request = island_client::actions::verse_request(OWN_STREAM, &verse);
+        let key = action_key(self.task.id, "verse", index);
+        match self
+            .field
+            .declare(island_client::actions::VERSE, &request, &key)?
+        {
+            Declared::Released(op) => Ok(format!(
+                "Proposed (op {op}): it waits for Jarmo's approval in Flare. Tell him in your \
+                 answer what it says and why."
+            )),
+            Declared::Held(op) => Ok(format!(
+                "Held (op {op}): a fork's verse waits for its promotion."
+            )),
+            Declared::Refused(why) => Err(format!("not proposed: {why}")),
+        }
     }
 
     fn record(&mut self, entry: Value) {

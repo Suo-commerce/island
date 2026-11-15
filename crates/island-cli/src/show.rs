@@ -172,10 +172,14 @@ fn body(body: &Body) -> String {
             receipt.commits
         ),
         Body::Access(access) => format!(
-            "vessel {} {:?} via {:?}, {} call(s), {} bytes in, {} out, digest {}",
+            "vessel {} {:?}{}, {} call(s), {} bytes in, {} out, digest {}",
             hex(&access.vessel),
             access.what,
-            access.provider,
+            if access.provider.is_empty() {
+                String::new()
+            } else {
+                format!(" via {:?}", access.provider)
+            },
             access.calls,
             access.bytes_in,
             access.bytes_out,

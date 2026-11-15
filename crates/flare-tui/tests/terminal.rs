@@ -113,7 +113,7 @@ fn a_terminal_sees_proposes_and_a_second_one_shows_the_same_session() {
 
     let (code, out, error) = running.type_into(
         "laptop",
-        "help\nsee\nverse decision written from the terminal\nverse closed-question typed right after\nsee island 1\nverse opinion nope\nquit\n",
+        "/help\n/see\n/verse decision written from the terminal\n/verse closed-question typed right after\n/see island 1\n/verse opinion nope\n/quit\n",
         &[],
     );
     assert_eq!(code, 0, "{error}");
@@ -121,7 +121,7 @@ fn a_terminal_sees_proposes_and_a_second_one_shows_the_same_session() {
         out.contains("attached to session main: 0 events so far"),
         "{out}"
     );
-    assert!(out.contains("see STREAM [N]"), "{out}");
+    assert!(out.contains("/see STREAM [N]"), "{out}");
     let lines: Vec<&str> = out.lines().collect();
     let find = |needle: &str| {
         lines
@@ -180,7 +180,7 @@ fn a_terminal_sees_proposes_and_a_second_one_shows_the_same_session() {
     );
 
     // Without a key, the terminal sees and does not propose.
-    let (code, _, error) = running.type_into("phone", "verse decision no key\n", &[]);
+    let (code, _, error) = running.type_into("phone", "/verse decision no key\n", &[]);
     assert_eq!(code, 0);
     assert!(error.contains("no key to sign with"), "{error}");
     let _ = &running.runtime;
@@ -249,7 +249,7 @@ fn what_the_server_shows_is_checked_against_this_machines_replica() {
         .stdin
         .take()
         .expect("stdin")
-        .write_all(b"see island\n")
+        .write_all(b"/see island\n")
         .expect("typed");
     let output = child.wait_with_output().expect("it ends");
     let out = String::from_utf8(output.stdout).expect("UTF-8");

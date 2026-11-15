@@ -10,7 +10,8 @@
 #![warn(missing_docs)]
 
 use flare_core::session::{
-    AgentText, Event, EventKind, Problem, UserMessage, VerbCall, VerbResult,
+    ActionSettled, ActionWaiting, AgentText, Event, EventKind, Problem, Settled, UserMessage,
+    VerbCall, VerbResult,
 };
 use flare_core::time;
 use island_core::{Evidence, Hash, Verse};
@@ -34,10 +35,22 @@ pub enum Typed {
     },
     /// `again`: propose the last proposal again, exactly.
     Again,
-    /// `say TEXT`: tell the agent.
+    /// Text, or `/say TEXT`: tell the agent.
     Say {
         /// What to tell it, as typed.
         text: String,
+    },
+    /// `/waiting`: the actions waiting for an answer.
+    Waiting,
+    /// `/approve N`: approve the action shown as event N.
+    Approve {
+        /// The `action_waiting` event.
+        event: u64,
+    },
+    /// `/decline N`: decline it.
+    Decline {
+        /// The `action_waiting` event.
+        event: u64,
     },
     /// `help`.
     Help,
@@ -47,21 +60,24 @@ pub enum Typed {
     Nothing,
 }
 
-/// What `help` prints.
+/// What `/help` prints.
 pub const HELP: &str = "\
-commands:
-  see                              the overview of the log
-  see STREAM [N]                   the newest N entries of a stream (20)
-  verse EVIDENCE [ref=HASH] TEXT   propose a verse on the default stream:
-                                   EVIDENCE is decision, artefact,
-                                   measurement or closed-question;
-                                   HASH is 64 hex digits
-  verse @STREAM EVIDENCE ... TEXT  the same, on another stream
-  again                            propose the last proposal again, exactly
-  say TEXT                         tell the agent; its reply comes to the
-                                   session as `agent`
-  help                             this
-  quit                             leave; the session goes on
+Anything typed is said to the agent; its reply comes to the session as
+`agent`. Commands start with a slash:
+  /see                              the overview of the log
+  /see STREAM [N]                   the newest N entries of a stream (20)
+  /verse EVIDENCE [ref=HASH] TEXT   propose a verse on the default stream:
+                                    EVIDENCE is decision, artefact,
+                                    measurement or closed-question;
+                                    HASH is 64 hex digits
+  /verse @STREAM EVIDENCE ... TEXT  the same, on another stream
+  /again                            propose the last proposal again, exactly
+  /waiting                          the actions waiting for your answer
+  /approve N                        approve the action shown as #N
+  /decline N                        decline it
+  /say TEXT                         say TEXT, even if it starts with a slash
+  /help                             this
+  /quit                             leave; the session goes on
 ";
 
 fn evidence(name: &str) -> Option<Evidence> {
@@ -88,9 +104,28 @@ fn unhex(text: &str) -> Option<Hash> {
 /// Read one typed line. `stream` is the stream a verse goes to unless the
 /// line names another.
 pub fn parse(line: &str, stream: &str) -> Result<Typed, String> {
-    let mut words = line.split_whitespace();
-    let Some(first) = words.next() else {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
         return Ok(Typed::Nothing);
+    }
+    // Anything that is not a command is said to the agent.
+    let Some(command) = trimmed.strip_prefix('/') else {
+        return Ok(Typed::Say {
+            text: trimmed.to_owned(),
+        });
+    };
+    let mut words = command.split_whitespace();
+    let Some(first) = words.next() else {
+        return Err("a slash starts a command; /help lists them".to_owned());
+    };
+    let event = |words: &mut std::str::SplitWhitespace<'_>, verb: &str| -> Result<u64, String> {
+        let number = words.next().ok_or_else(|| {
+            format!("/{verb} needs the number of the action, as /waiting shows it")
+        })?;
+        number
+            .trim_start_matches('#')
+            .parse()
+            .map_err(|_| format!("`{number}` is not an action's number"))
     };
     match first {
         "see" => {
@@ -142,17 +177,24 @@ pub fn parse(line: &str, stream: &str) -> Result<Typed, String> {
         }
         "again" => Ok(Typed::Again),
         "say" => {
-            let text = line.trim_start()["say".len()..].trim();
+            let text = command["say".len()..].trim();
             if text.is_empty() {
-                return Err("say needs something to say".to_owned());
+                return Err("/say needs something to say".to_owned());
             }
             Ok(Typed::Say {
                 text: text.to_owned(),
             })
         }
+        "waiting" => Ok(Typed::Waiting),
+        "approve" => Ok(Typed::Approve {
+            event: event(&mut words, "approve")?,
+        }),
+        "decline" => Ok(Typed::Decline {
+            event: event(&mut words, "decline")?,
+        }),
         "help" | "?" => Ok(Typed::Help),
         "quit" | "exit" => Ok(Typed::Quit),
-        other => Err(format!("`{other}` is not a command; `help` lists them")),
+        other => Err(format!("`/{other}` is not a command; /help lists them")),
     }
 }
 
@@ -202,6 +244,41 @@ pub fn show(event: &Event) -> String {
                 Err(_) => format!("{head}  a message this terminal does not read"),
             }
         }
+        EventKind::ActionWaiting => {
+            match serde_json::from_value::<ActionWaiting>(event.payload.clone()) {
+                Ok(action) => format!(
+                    "{head}  waiting for you: Vessel {}'s {}\n    /approve {} or /decline {}",
+                    action.vessel.get(..8).unwrap_or(&action.vessel),
+                    action.shown,
+                    event.seq,
+                    event.seq
+                ),
+                Err(_) => format!("{head}  an action this terminal does not read"),
+            }
+        }
+        EventKind::ActionSettled => {
+            match serde_json::from_value::<ActionSettled>(event.payload.clone()) {
+                Ok(settled) => {
+                    let which = settled
+                        .request_hash
+                        .get(..8)
+                        .unwrap_or(&settled.request_hash);
+                    let at = settled
+                        .entry
+                        .map(|seq| format!(" at entry {seq}"))
+                        .unwrap_or_default();
+                    match settled.settled {
+                        Settled::Sent => format!("{head}  sent: request {which}, written{at}"),
+                        Settled::Declined => format!("{head}  declined: request {which}{at}"),
+                        Settled::Refused => format!(
+                            "{head}  refused when sent: request {which}: {}",
+                            settled.why.unwrap_or_default()
+                        ),
+                    }
+                }
+                Err(_) => format!("{head}  an action this terminal does not read"),
+            }
+        }
         EventKind::AgentText => match serde_json::from_value::<AgentText>(event.payload.clone()) {
             Ok(reply) => format!(
                 "{head}  agent (to #{}): {}",
@@ -230,22 +307,22 @@ mod tests {
     fn commands_are_read() {
         assert_eq!(parse("  ", "island"), Ok(Typed::Nothing));
         assert_eq!(
-            parse("see", "island"),
+            parse("/see", "island"),
             Ok(Typed::See {
                 stream: None,
                 entries: None
             })
         );
         assert_eq!(
-            parse("see island 5", "x"),
+            parse("/see island 5", "x"),
             Ok(Typed::See {
                 stream: Some("island".into()),
                 entries: Some(5)
             })
         );
-        assert!(parse("see island five", "x").is_err());
+        assert!(parse("/see island five", "x").is_err());
         assert_eq!(
-            parse("verse decision keep grant ids as pairs", "island"),
+            parse("/verse decision keep grant ids as pairs", "island"),
             Ok(Typed::Verse {
                 stream: "island".into(),
                 verse: Verse::new(Evidence::Decision, "keep grant ids as pairs", vec![]),
@@ -254,7 +331,7 @@ mod tests {
         let hash = "ab".repeat(32);
         assert_eq!(
             parse(
-                &format!("verse @flare artefact ref={hash} step 9 built"),
+                &format!("/verse @flare artefact ref={hash} step 9 built"),
                 "island"
             ),
             Ok(Typed::Verse {
@@ -264,24 +341,46 @@ mod tests {
         );
         // A ref after the text starts is text.
         assert_eq!(
-            parse("verse decision use ref=x here", "island").map(|typed| match typed {
+            parse("/verse decision use ref=x here", "island").map(|typed| match typed {
                 Typed::Verse { verse, .. } => verse.text,
                 _ => String::new(),
             }),
             Ok("use ref=x here".to_owned())
         );
-        assert!(parse("verse opinion it went well", "island").is_err());
-        assert!(parse("verse decision", "island").is_err());
-        assert!(parse("verse artefact ref=abc built", "island").is_err());
-        assert!(parse("dance", "island").is_err());
-        assert_eq!(parse("quit", "island"), Ok(Typed::Quit));
+        assert!(parse("/verse opinion it went well", "island").is_err());
+        assert!(parse("/verse decision", "island").is_err());
+        assert!(parse("/verse artefact ref=abc built", "island").is_err());
+        assert!(parse("/dance", "island").is_err());
         assert_eq!(
-            parse("  say draft the verse   for that ", "island"),
+            parse("dance with me", "island"),
+            Ok(Typed::Say {
+                text: "dance with me".into()
+            })
+        );
+        assert_eq!(
+            parse("/approve #12", "island"),
+            Ok(Typed::Approve { event: 12 })
+        );
+        assert_eq!(
+            parse("/decline 3", "island"),
+            Ok(Typed::Decline { event: 3 })
+        );
+        assert!(parse("/approve", "island").is_err());
+        assert_eq!(parse("/waiting", "island"), Ok(Typed::Waiting));
+        assert_eq!(parse("/quit", "island"), Ok(Typed::Quit));
+        assert_eq!(
+            parse("  draft the verse   for that ", "island"),
             Ok(Typed::Say {
                 text: "draft the verse   for that".into()
             })
         );
-        assert!(parse("say   ", "island").is_err());
+        assert_eq!(
+            parse("/say /see is a command", "island"),
+            Ok(Typed::Say {
+                text: "/see is a command".into()
+            })
+        );
+        assert!(parse("/say   ", "island").is_err());
     }
 }
 

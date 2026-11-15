@@ -89,6 +89,12 @@ pub enum Verb {
     Propose,
     /// Tell the agent something (version 2).
     Say,
+    /// Approve an action waiting for Jarmo: an `approval` the client
+    /// signed, relayed as `propose` relays (version 2). Arguments:
+    /// [`ProposeArgs`].
+    Approve,
+    /// Decline one, the same way.
+    Decline,
 }
 
 /// Arguments of `say`.
@@ -136,6 +142,80 @@ pub struct SayRequest {
     pub task: u64,
     /// The reply.
     pub text: String,
+}
+
+/// The payload of an `action_waiting`: an action a Vessel declared that
+/// needs Jarmo's approval. A client recomputes the request hash from
+/// `provider` and `request` before it signs an approval of it, so what is
+/// approved is what is shown, not the server's word.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionWaiting {
+    /// The Vessel, in hex.
+    pub vessel: String,
+    /// Its op in the Vessel's Chronicle.
+    pub op: u64,
+    /// The provider: `island.verse`.
+    pub provider: String,
+    /// The request hash an approval names, in hex.
+    pub request_hash: String,
+    /// The exact request bytes, in hex.
+    pub request: String,
+    /// The request as people read it.
+    pub shown: String,
+}
+
+/// How an action was settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Settled {
+    /// Sent: `entry` is what it wrote (a verse's entry).
+    Sent,
+    /// Declined: `entry` is the decline.
+    Declined,
+    /// Approved, but refused where it was sent: `why`.
+    Refused,
+}
+
+/// The payload of an `action_settled`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionSettled {
+    /// The request hash, in hex.
+    pub request_hash: String,
+    /// How.
+    pub settled: Settled,
+    /// The Island log's entry that says so, if there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<u64>,
+    /// Why it was refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+/// What `island-sender` tells `flare-server` about an action that needs
+/// approval, each time it changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionReport {
+    /// The Vessel, in hex.
+    pub vessel: String,
+    /// Its op.
+    pub op: u64,
+    /// The provider.
+    pub provider: String,
+    /// The request hash, in hex.
+    pub request_hash: String,
+    /// The request bytes, in hex.
+    pub request: String,
+    /// `waiting`, `sent`, `declined` or `refused`.
+    pub state: String,
+    /// The entry, for `sent` and `declined`.
+    #[serde(default)]
+    pub entry: Option<u64>,
+    /// Why, for `refused`.
+    #[serde(default)]
+    pub why: Option<String>,
 }
 
 /// A task as `flare-server` hands it to the island socket, and the
@@ -221,6 +301,10 @@ pub enum EventKind {
     UserMessage,
     /// The agent replied: [`AgentText`].
     AgentText,
+    /// An action waits for Jarmo's answer: [`ActionWaiting`].
+    ActionWaiting,
+    /// An action was answered and settled: [`ActionSettled`].
+    ActionSettled,
     /// A client asked for a verb.
     VerbCall,
     /// What came of it.

@@ -714,3 +714,97 @@ async fn say_is_refused_where_the_agent_does_not_listen_and_to_strangers() {
     .to_string();
     assert_eq!(agent_ask(&socket, "POST", "/say", &delivery).await.0, 403);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_action_waits_once_settles_once_and_only_an_approval_is_relayed_as_one() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(&dir.path().join("server"), started_log(), None).await;
+    let me = my_uid(dir.path());
+    let socket = dir.path().join("agent.sock");
+    agent_socket(running.server.clone(), &socket, me, me);
+    let (mut laptop, _) = Client::attach(&running.url, "main", None, "laptop").await;
+
+    let verse = island_core::Verse::new(Evidence::Decision, "agreed", Vec::new());
+    let request = island_client::actions::verse_request("flare", &verse);
+    let hash = island_client::approval::request_hash(island_client::actions::VERSE, &request);
+    let report = |state: &str, entry: Option<u64>| {
+        serde_json::json!({
+            "vessel": "914c503c980b8f7f1750c664b5743d2c", "op": 7, "provider": "island.verse",
+            "request_hash": island_client::approval::hex(&hash),
+            "request": island_client::approval::hex(&request),
+            "state": state, "entry": entry, "why": null,
+        })
+        .to_string()
+    };
+    let (status, body) = agent_ask(&socket, "POST", "/action", &report("waiting", None)).await;
+    assert_eq!(status, 200, "{body}");
+    let waiting = laptop.event().await;
+    assert_eq!(waiting.kind, EventKind::ActionWaiting);
+    assert_eq!(
+        waiting.payload["shown"],
+        "a verse on flare: [decision] \"agreed\""
+    );
+    // Told again (a sender restarted): no second event.
+    let (_, again) = agent_ask(&socket, "POST", "/action", &report("waiting", None)).await;
+    assert_eq!(again, "{\"event\":null}");
+    let (status, _) = agent_ask(&socket, "POST", "/action", &report("sent", Some(42))).await;
+    assert_eq!(status, 200);
+    let settled = laptop.event().await;
+    assert_eq!(settled.kind, EventKind::ActionSettled);
+    assert_eq!(
+        (
+            settled.payload["settled"].as_str(),
+            settled.payload["entry"].as_u64()
+        ),
+        (Some("sent"), Some(42))
+    );
+    let (_, again) = agent_ask(&socket, "POST", "/action", &report("sent", Some(42))).await;
+    assert_eq!(again, "{\"event\":null}");
+    assert_eq!(
+        agent_ask(&socket, "POST", "/action", &report("lost", None))
+            .await
+            .0,
+        422
+    );
+
+    // `approve` relays an approval, and nothing else.
+    laptop
+        .command("a-1", Verb::Approve, proposal(1, "not an approval"))
+        .await;
+    let refused = laptop.event().await;
+    assert_eq!(refused.kind, EventKind::Error);
+    assert!(
+        refused.payload.to_string().contains("not an approval"),
+        "{refused:?}"
+    );
+    let approval = Writer::new(broker::device()).submission(
+        island_core::StreamId::from(island_core::StreamId::APPROVALS),
+        1,
+        island_core::Body::Approval(island_core::Approval {
+            request: hash,
+            verdict: island_core::Answered::Decline,
+            proof: None,
+        }),
+    );
+    let args = {
+        let request = codec::append_request(&approval.submission, &approval.sig_writer);
+        serde_json::to_value(ProposeArgs {
+            submission: request.submission,
+            sig_writer: request.sig_writer,
+        })
+        .expect("JSON")
+    };
+    // A decline is not an approve.
+    laptop.command("a-2", Verb::Approve, args.clone()).await;
+    assert_eq!(laptop.event().await.kind, EventKind::Error);
+    laptop.command("a-3", Verb::Decline, args).await;
+    let call = call(&laptop.event().await);
+    assert!(
+        call.what.starts_with(&format!(
+            "decline request {}",
+            &island_client::approval::hex(&hash)[..8]
+        )),
+        "{}",
+        call.what
+    );
+}

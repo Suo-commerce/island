@@ -16,6 +16,7 @@
 
 #![warn(missing_docs)]
 
+pub mod actions;
 pub mod approval;
 #[cfg(feature = "net")]
 pub mod broker;

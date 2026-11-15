@@ -55,10 +55,37 @@ enum Command {
         #[arg(required = true)]
         calls: Vec<String>,
     },
+    /// The callers a Warden config names, one line each: Vessel id, subject,
+    /// role and slot.
+    Vessels {
+        /// Taso's Warden config.
+        #[arg(long, default_value = "/etc/taso/warden.json")]
+        warden_config: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
     match Args::parse().command {
+        Command::Vessels { warden_config } => {
+            match island_socket::callers::Callers::load(&warden_config) {
+                Ok(callers) => {
+                    for caller in callers.all() {
+                        println!(
+                            "{} {} {} {}",
+                            keyfile::hex(&caller.vessel),
+                            caller.subject,
+                            caller.role.name(),
+                            caller.slot
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("island-socket: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Command::BatchDigest { calls } => {
             let Some(calls) = calls
                 .iter()

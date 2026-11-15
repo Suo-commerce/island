@@ -53,6 +53,11 @@ pub struct Island {
 pub trait Tasks {
     /// The next task after `after`, waiting a while for one.
     fn next(&mut self, after: Option<u64>) -> Result<Option<Task>, String>;
+    /// The agent's instructions, if Island has some for it; `None`: it
+    /// uses its own.
+    fn instructions(&mut self) -> Option<String> {
+        None
+    }
 }
 
 impl Island {

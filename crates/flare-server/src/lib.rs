@@ -31,9 +31,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use flare_core::session::{
-    AgentText, ClientMessage, Event, EventKind, MAX_REPLY, MAX_SAY, Place, Problem, ProposeArgs,
-    RECENT, SESSION_VERSION, SayArgs, SayRequest, SeeArgs, ServerMessage, Task, UserMessage, Verb,
-    VerbCall, VerbResult, valid_session,
+    ActionReport, ActionSettled, ActionWaiting, AgentText, ClientMessage, Event, EventKind,
+    MAX_REPLY, MAX_SAY, Place, Problem, ProposeArgs, RECENT, SESSION_VERSION, SayArgs, SayRequest,
+    SeeArgs, ServerMessage, Settled, Task, UserMessage, Verb, VerbCall, VerbResult, valid_session,
 };
 use flare_core::{Overview, StreamView, content, hex, kind_name, short};
 use flare_link::{PullError, Replica, pull};
@@ -209,6 +209,45 @@ impl Server {
                 }
                 Err(error) => Err(format!("see: {error}")),
             },
+            Verb::Approve | Verb::Decline => match serde_json::from_value::<ProposeArgs>(args) {
+                Ok(args) => {
+                    let request = AppendRequest {
+                        submission: args.submission,
+                        sig_writer: args.sig_writer,
+                    };
+                    match codec::parse_append(&request) {
+                        Ok((submission, signature)) => match &submission.body {
+                            island_core::Body::Approval(approval)
+                                if (approval.verdict == island_core::Answered::Approve)
+                                    == (verb == Verb::Approve) =>
+                            {
+                                let what = format!(
+                                    "{} request {} by {}, counter {}",
+                                    if verb == Verb::Approve {
+                                        "approve"
+                                    } else {
+                                        "decline"
+                                    },
+                                    short(&approval.request),
+                                    short(&submission.writer),
+                                    submission.counter
+                                );
+                                Ok((what, Work::Propose(Box::new((submission, signature)))))
+                            }
+                            _ => Err(format!(
+                                "{}: the submission is not an approval that says so",
+                                if verb == Verb::Approve {
+                                    "approve"
+                                } else {
+                                    "decline"
+                                }
+                            )),
+                        },
+                        Err(malformed) => Err(format!("approve: {malformed}")),
+                    }
+                }
+                Err(error) => Err(format!("approve: {error}")),
+            },
             Verb::Propose => match serde_json::from_value::<ProposeArgs>(args) {
                 Ok(args) => {
                     let request = AppendRequest {
@@ -356,6 +395,75 @@ impl Server {
             })?;
         let _ = session.live.send(event.clone());
         Ok(event.seq)
+    }
+
+    /// Record what `island-sender` reported about an action that needs
+    /// approval: one `action_waiting` per request while it waits, one
+    /// `action_settled` once it is settled.
+    fn action(&self, report: ActionReport) -> Result<Option<u64>, Undeliverable> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Undeliverable::Down("the sessions are lost".to_owned()))?;
+        let name = self.config.agent_session.clone();
+        let session = self
+            .session(&mut sessions, &name)
+            .map_err(Undeliverable::Down)?;
+        let named = |kind: EventKind| {
+            session.store.events().iter().any(|event| {
+                event.kind == kind
+                    && event.payload.get("request_hash").and_then(|h| h.as_str())
+                        == Some(report.request_hash.as_str())
+            })
+        };
+        let (kind, payload) = match report.state.as_str() {
+            "waiting" => {
+                if named(EventKind::ActionWaiting) || named(EventKind::ActionSettled) {
+                    return Ok(None);
+                }
+                let shown = shown(&report.provider, &report.request);
+                let waiting = ActionWaiting {
+                    vessel: report.vessel,
+                    op: report.op,
+                    provider: report.provider,
+                    request_hash: report.request_hash,
+                    request: report.request,
+                    shown,
+                };
+                (EventKind::ActionWaiting, serde_json::to_value(waiting))
+            }
+            state => {
+                let settled = match state {
+                    "sent" => Settled::Sent,
+                    "declined" => Settled::Declined,
+                    "refused" => Settled::Refused,
+                    other => {
+                        return Err(Undeliverable::Malformed(format!(
+                            "an action is waiting, sent, declined or refused, not {other:?}"
+                        )));
+                    }
+                };
+                if named(EventKind::ActionSettled) {
+                    return Ok(None);
+                }
+                let settled = ActionSettled {
+                    request_hash: report.request_hash,
+                    settled,
+                    entry: report.entry,
+                    why: report.why,
+                };
+                (EventKind::ActionSettled, serde_json::to_value(settled))
+            }
+        };
+        let payload = payload.map_err(|error| Undeliverable::Down(error.to_string()))?;
+        let event = session
+            .store
+            .append((self.config.clock)(), kind, payload)
+            .map_err(|error| {
+                Undeliverable::Down(format!("{}: {error}", session.store.path().display()))
+            })?;
+        let _ = session.live.send(event.clone());
+        Ok(Some(event.seq))
     }
 
     /// `see`, from the replica, pulled first.
@@ -653,6 +761,22 @@ async fn attached(server: Arc<Server>, mut socket: WebSocket) {
     }
 }
 
+/// A request as people read it: a verse with its stream, evidence and
+/// text; anything else as its provider and size.
+pub fn shown(provider: &str, request_hex: &str) -> String {
+    let bytes = island_client::approval::unhex_bytes(request_hex);
+    if provider == island_client::actions::VERSE
+        && let Some(bytes) = &bytes
+        && let Ok((stream, verse)) = island_client::actions::parse_verse_request(bytes)
+    {
+        return format!(
+            "a verse on {stream}: {}",
+            content(&island_core::Body::Verse(verse))
+        );
+    }
+    format!("{provider}, {} bytes", bytes.map_or(0, |bytes| bytes.len()))
+}
+
 /// A `user_message` event as a task.
 fn task_of(event: &Event) -> Option<Task> {
     if event.kind != EventKind::UserMessage {
@@ -719,10 +843,12 @@ struct Agent {
 /// | --- | --- | --- |
 /// | `GET /task?after=N&wait=S` | [`AgentPeers::tasks`] | the next [`Task`] after N, waiting up to S seconds; 204: none |
 /// | `POST /say` `{ vessel, key, request }` | [`AgentPeers::replies`] | `{ event }`: the `agent_text`, recorded once per key |
+/// | `POST /action` [`ActionReport`] | [`AgentPeers::replies`] | `{ event }`: an `action_waiting` or `action_settled`, once per request; `null` if there was one |
 pub fn agent_router(server: Arc<Server>, peers: AgentPeers) -> Router {
     Router::new()
         .route("/task", get(agent_task))
         .route("/say", axum::routing::post(agent_say))
+        .route("/action", axum::routing::post(agent_action))
         .with_state(Agent { server, peers })
 }
 
@@ -809,6 +935,27 @@ async fn agent_say(
         &delivery.key.to_ascii_lowercase(),
         &delivery.request,
     ) {
+        Ok(event) => axum::Json(serde_json::json!({ "event": event })).into_response(),
+        Err(Undeliverable::Malformed(why)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, why).into_response()
+        }
+        Err(Undeliverable::Down(why)) => (StatusCode::SERVICE_UNAVAILABLE, why).into_response(),
+    }
+}
+
+async fn agent_action(
+    State(agent): State<Agent>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<Peer>,
+    axum::Json(report): axum::Json<ActionReport>,
+) -> Response {
+    if peer.uid != Some(agent.peers.replies) {
+        return (
+            StatusCode::FORBIDDEN,
+            "actions are reported by island-sender\n",
+        )
+            .into_response();
+    }
+    match agent.server.action(report) {
         Ok(event) => axum::Json(serde_json::json!({ "event": event })).into_response(),
         Err(Undeliverable::Malformed(why)) => {
             (StatusCode::UNPROCESSABLE_ENTITY, why).into_response()

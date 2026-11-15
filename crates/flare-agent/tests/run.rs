@@ -69,7 +69,7 @@ impl Model for Script {
     }
 }
 
-struct List(Vec<Task>, Vec<Option<u64>>);
+struct List(Vec<Task>, Vec<Option<u64>>, Option<String>);
 
 impl Tasks for List {
     fn next(&mut self, after: Option<u64>) -> Result<Option<Task>, String> {
@@ -79,6 +79,9 @@ impl Tasks for List {
             .iter()
             .find(|task| after.is_none_or(|after| task.id > after))
             .cloned())
+    }
+    fn instructions(&mut self) -> Option<String> {
+        self.2.clone()
     }
 }
 
@@ -143,7 +146,7 @@ fn a_task_is_worked_answered_and_sealed_and_the_next_start_goes_on_after_it() {
         ],
         Vec::new(),
     );
-    let mut tasks = List(vec![task(3, "draft the verse for that")], Vec::new());
+    let mut tasks = List(vec![task(3, "draft the verse for that")], Vec::new(), None);
     {
         let mut agent = Agent::new(&mut warden, &mut model, &mut tasks).unwrap();
         assert_eq!(agent.turn(), 7, "after the last sealed turn");
@@ -153,7 +156,8 @@ fn a_task_is_worked_answered_and_sealed_and_the_next_start_goes_on_after_it() {
             &State {
                 cursor: Some(3),
                 working: None,
-                says: 0
+                says: 0,
+                verses: 0
             }
         );
         assert_eq!(agent.step(), Ok(None), "no next task");
@@ -206,6 +210,7 @@ fn a_task_is_worked_answered_and_sealed_and_the_next_start_goes_on_after_it() {
     let mut tasks = List(
         vec![task(3, "draft"), task(5, "and is it done?")],
         Vec::new(),
+        None,
     );
     let mut warden = Warden {
         last_sealed: Some(7),
@@ -234,6 +239,7 @@ fn a_task_cut_by_a_crash_is_worked_again_with_the_same_keys() {
         cursor: Some(4),
         working: Some(task(8, "check the repo")),
         says: 1,
+        verses: 0,
     };
     let history = vec![Message::User {
         text: "[Task #8 from laptop]\ncheck the repo".into(),
@@ -252,7 +258,7 @@ fn a_task_cut_by_a_crash_is_worked_again_with_the_same_keys() {
         ],
         Vec::new(),
     );
-    let mut tasks = List(Vec::new(), Vec::new());
+    let mut tasks = List(Vec::new(), Vec::new(), None);
     let mut agent = Agent::new(&mut warden, &mut model, &mut tasks).unwrap();
     agent.patience = Duration::from_secs(10);
     assert_eq!(agent.step(), Ok(Some(8)));
@@ -272,7 +278,8 @@ fn a_task_cut_by_a_crash_is_worked_again_with_the_same_keys() {
         State {
             cursor: Some(8),
             working: None,
-            says: 0
+            says: 0,
+            verses: 0
         }
     );
 }
@@ -284,7 +291,7 @@ fn a_model_that_fails_still_gets_a_reply_to_jarmo() {
     set_work(dir.path());
     let mut warden = Warden::default();
     let mut model = Script(Vec::new(), Vec::new());
-    let mut tasks = List(vec![task(0, "hello")], Vec::new());
+    let mut tasks = List(vec![task(0, "hello")], Vec::new(), None);
     let mut agent = Agent::new(&mut warden, &mut model, &mut tasks).unwrap();
     assert_eq!(agent.turn(), 1);
     assert_eq!(agent.step(), Ok(Some(0)));
@@ -294,4 +301,55 @@ fn a_model_that_fails_still_gets_a_reply_to_jarmo() {
         "I could not finish this: the script ended"
     );
     assert_eq!(warden.turns, vec![1]);
+}
+
+#[test]
+fn a_verse_is_proposed_on_flare_and_the_instructions_come_from_island() {
+    let _one = WORK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    set_work(dir.path());
+    let mut warden = Warden::default();
+    let mut model = Script(
+        vec![
+            answer(
+                "",
+                &[(
+                    "verse",
+                    serde_json::json!({ "evidence": "decision", "text": "Step 5 verses wait for approval" }),
+                )],
+            ),
+            answer("  I proposed a verse.\n\n", &[]),
+        ],
+        Vec::new(),
+    );
+    let mut tasks = List(
+        vec![task(9, "write a verse")],
+        Vec::new(),
+        Some("Be brief.".into()),
+    );
+    let mut agent = Agent::new(&mut warden, &mut model, &mut tasks).unwrap();
+    assert_eq!(agent.step(), Ok(Some(9)));
+    drop(agent);
+    // The verse: on flare, with its key; then the reply, trimmed.
+    assert_eq!(warden.declared[0].0, "island.verse");
+    let (stream, verse) =
+        island_client::actions::parse_verse_request(&warden.declared[0].1).unwrap();
+    assert_eq!(
+        (stream.as_str(), verse.text.as_str()),
+        ("flare", "Step 5 verses wait for approval")
+    );
+    assert_eq!(warden.declared[0].2, action_key(9, "verse", 0));
+    assert_eq!(said(&warden.declared[1]).text, "I proposed a verse.");
+    // The model ran on Island's instructions, and the transcript says so.
+    assert!(matches!(&model.1[0][0], Message::System { text } if text == "Be brief."));
+    let noted = warden
+        .transcript
+        .iter()
+        .find(|e| e["step"]["kind"] == "instructions")
+        .unwrap();
+    assert_eq!(noted["step"]["source"], "island-socket");
+    assert_eq!(
+        noted["step"]["digest"],
+        blake3::hash(b"Be brief.").to_hex().as_str()
+    );
 }

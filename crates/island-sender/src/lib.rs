@@ -35,6 +35,16 @@ use taso_field::protocol::{
 /// sender"): delivered to the session, without approval.
 pub const SAY: &str = "flare.say";
 
+/// What came of submitting an approved verse with the Vessel's key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Versed {
+    /// In the log at this entry (now, or before: an exact resend gets the
+    /// first answer).
+    Written(u64),
+    /// The gate refused it: why, with the verdict's entry if there is one.
+    Refused(String),
+}
+
 /// What came of handing a reply to the session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Delivered {
@@ -226,6 +236,14 @@ pub trait Ledger<E> {
         planned: &Planned,
         approval: u64,
     ) -> Result<Result<u64, String>, E>;
+    /// Submit the verse of an approved [`VERSE`](island_client::actions::VERSE)
+    /// action, signed with the Vessel's key at `counter` (its dispatch's).
+    /// An `Err` ends the pass: nothing after it may take the next counter
+    /// while this one's fate is open.
+    fn verse(&mut self, vessel: VesselId, planned: &Planned, counter: u64) -> Result<Versed, E> {
+        let _ = (vessel, planned, counter);
+        Ok(Versed::Refused("this sender sends no verses".to_owned()))
+    }
     /// Hand a [`SAY`] action to the session. Without a session to hand it
     /// to, it waits.
     fn say(&mut self, vessel: VesselId, planned: &Planned) -> Result<Delivered, E> {
@@ -281,6 +299,16 @@ pub enum Action {
     Undeliverable(String),
     /// A reply the session did not take now: left waiting.
     NotDelivered(String),
+    /// A verse, dispatched at `dispatch` (now or before) and written at
+    /// `entry`.
+    Versed {
+        /// The dispatch.
+        dispatch: u64,
+        /// The verse.
+        entry: u64,
+    },
+    /// A verse the gate refused: reported not applied.
+    VerseRefused(String),
 }
 
 impl Action {
@@ -296,6 +324,8 @@ impl Action {
             Self::Delivered(_) => "delivered",
             Self::Undeliverable(_) => "undeliverable",
             Self::NotDelivered(_) => "not-delivered",
+            Self::Versed { .. } => "versed",
+            Self::VerseRefused(_) => "verse-refused",
         }
     }
 }
@@ -385,6 +415,34 @@ pub fn serve<E>(
         if stop_after_send && sent_entry.is_some() {
             each(&step);
             return Ok(Ended::StoppedAfterSend);
+        }
+        // A verse goes after its dispatch, with the counter the dispatch
+        // names: sent again byte for byte when the dispatch was made by an
+        // earlier pass that did not live to report.
+        let dispatched = match step.action {
+            Action::Sent { entry, .. } | Action::AlreadySent(entry) => Some(entry),
+            _ => None,
+        };
+        if step.planned.effect.provider == island_client::actions::VERSE
+            && let Some(dispatch) = dispatched
+        {
+            let counter = ledger
+                .marks()
+                .sent(&vessel, &step.planned.key)
+                .map_or(0, |sent| sent.counter);
+            let result = match ledger.verse(vessel, &step.planned, counter)? {
+                Versed::Written(entry) => {
+                    step.action = Action::Versed { dispatch, entry };
+                    applied(entry)
+                }
+                Versed::Refused(why) => {
+                    step.action = Action::VerseRefused(why.clone());
+                    Outcome::NotApplied { reason: why }
+                }
+            };
+            step.reported = Some(warden.report(step.planned.effect.op, result)?);
+            each(&step);
+            continue;
         }
         let held = matches!(
             step.action,
@@ -570,6 +628,197 @@ mod tests {
                 4,
                 Outcome::NotApplied {
                     reason: "not a reply".to_owned()
+                }
+            )]
+        );
+    }
+
+    /// A ledger of approvals and dispatches in memory, that writes verses.
+    struct Book {
+        marks: Marks,
+        next: u64,
+        counter: u64,
+        dispatched: Vec<u64>,
+        verses: Vec<(u64, Vec<u8>)>,
+        refuse_verse: bool,
+    }
+
+    fn record(seq: u64, body: island_core::Body) -> island_core::Record {
+        island_core::Record {
+            entry: island_core::Entry {
+                seq,
+                prev: [0; 32],
+                at: 0,
+                policy: 0,
+                submission: island_core::Submission {
+                    stream: island_core::StreamId::from(approval::STREAM),
+                    writer: [0; 32],
+                    counter: seq,
+                    body,
+                },
+                sig_writer: [0; 64],
+            },
+            hash: [0; 32],
+            sig_appender: [0; 64],
+        }
+    }
+
+    impl Ledger<String> for Book {
+        fn marks(&self) -> &Marks {
+            &self.marks
+        }
+        fn dispatch(
+            &mut self,
+            vessel: VesselId,
+            planned: &Planned,
+            approval: u64,
+        ) -> Result<Result<u64, String>, String> {
+            let seq = self.next;
+            self.next += 1;
+            self.marks.note(&record(
+                seq,
+                island_core::Body::Dispatch(island_core::Dispatch {
+                    vessel,
+                    op: planned.effect.op,
+                    key: planned.key,
+                    request: planned.hash,
+                    approval,
+                    counter: self.counter,
+                }),
+            ));
+            self.dispatched.push(seq);
+            Ok(Ok(seq))
+        }
+        fn verse(
+            &mut self,
+            _: VesselId,
+            planned: &Planned,
+            counter: u64,
+        ) -> Result<Versed, String> {
+            if self.refuse_verse {
+                return Ok(Versed::Refused("VerseTextMax".to_owned()));
+            }
+            // An exact resend gets the first answer.
+            if let Some(&(seq, _)) = self
+                .verses
+                .iter()
+                .find(|(_, bytes)| *bytes == planned.effect.request)
+            {
+                return Ok(Versed::Written(seq));
+            }
+            assert_eq!(counter, self.counter, "the dispatch's counter");
+            let seq = self.next;
+            self.next += 1;
+            self.verses.push((seq, planned.effect.request.clone()));
+            Ok(Versed::Written(seq))
+        }
+    }
+
+    #[test]
+    fn an_approved_verse_is_sent_after_its_dispatch_once_across_a_crash() {
+        let verse = island_core::Verse::new(island_core::Evidence::Decision, "agreed", vec![]);
+        let request = island_client::actions::verse_request("flare", &verse);
+        let mut effect = effect(5, &request, false);
+        effect.provider = island_client::actions::VERSE.to_owned();
+        let hash = approval::request_hash(island_client::actions::VERSE, &request);
+        let mut book = Book {
+            marks: Marks::default(),
+            next: 20,
+            counter: 3,
+            dispatched: vec![],
+            verses: vec![],
+            refuse_verse: false,
+        };
+        // Unapproved: it waits.
+        let mut warden = Listed(vec![effect.clone()], Vec::new());
+        let mut seen = Vec::new();
+        serve(
+            &mut book,
+            &mut warden,
+            V,
+            &mut BTreeSet::new(),
+            false,
+            |step| seen.push(step.action.clone()),
+        )
+        .unwrap();
+        assert_eq!(seen, vec![Action::Wait]);
+        // Approved at 19; the sender dies after the dispatch.
+        book.marks.note(&record(
+            19,
+            island_core::Body::Approval(island_core::Approval {
+                request: hash,
+                verdict: island_core::Answered::Approve,
+                proof: None,
+            }),
+        ));
+        let ended = serve(
+            &mut book,
+            &mut warden,
+            V,
+            &mut BTreeSet::new(),
+            true,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(ended, Ended::StoppedAfterSend);
+        assert!(book.verses.is_empty() && warden.1.is_empty());
+        // The next pass finds the dispatch and sends the verse, once.
+        let mut seen = Vec::new();
+        serve(
+            &mut book,
+            &mut warden,
+            V,
+            &mut BTreeSet::new(),
+            false,
+            |step| seen.push(step.action.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            seen,
+            vec![Action::Versed {
+                dispatch: 20,
+                entry: 21
+            }]
+        );
+        assert_eq!(
+            warden.1,
+            vec![(
+                5,
+                Outcome::Applied {
+                    receipt: b"island entry 21".to_vec()
+                }
+            )]
+        );
+        // Listed again (the report lost): the same verse, not a second one.
+        serve(
+            &mut book,
+            &mut warden,
+            V,
+            &mut BTreeSet::new(),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!((book.dispatched.len(), book.verses.len()), (1, 1));
+
+        // A verse the gate refuses is reported not applied.
+        book.refuse_verse = true;
+        let mut warden = Listed(vec![effect], Vec::new());
+        serve(
+            &mut book,
+            &mut warden,
+            V,
+            &mut BTreeSet::new(),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            warden.1,
+            vec![(
+                5,
+                Outcome::NotApplied {
+                    reason: "VerseTextMax".to_owned()
                 }
             )]
         );

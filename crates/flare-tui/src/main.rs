@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use flare_core::session::{
-    AgentText, ClientMessage, Event, EventKind, ProposeArgs, SayArgs, SeeArgs, ServerMessage,
-    UserMessage, Verb, VerbCall, VerbResult,
+    ActionSettled, ActionWaiting, AgentText, ClientMessage, Event, EventKind, ProposeArgs, SayArgs,
+    SeeArgs, ServerMessage, UserMessage, Verb, VerbCall, VerbResult,
 };
 use flare_core::{hex, short};
 use flare_link::replica::{self, Replica, ReplicaError};
@@ -188,6 +188,20 @@ impl Waiting {
             && self.replayed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Wait until the events from before the attach have all been shown,
+    /// for up to ten seconds.
+    async fn replayed(&self) {
+        let patience = tokio::time::sleep(Duration::from_secs(10));
+        tokio::pin!(patience);
+        while !self.replayed.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::select! {
+                () = self.answered.notified() => {}
+                () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                () = &mut patience => return,
+            }
+        }
+    }
+
     fn replay_done(&self) {
         self.replayed
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -242,11 +256,16 @@ async fn run(args: Args) -> Result<(), String> {
         plain: Plain::new(&args.broker).map_err(|error| error.to_string())?,
     });
 
+    // The actions waiting for an answer, by their event, as the session
+    // shows them.
+    let actions: Arc<std::sync::Mutex<BTreeMap<u64, ActionWaiting>>> = Arc::default();
+
     // Everything the server sends, printed as it comes.
     let after = args.after;
     let printer = {
         let waiting = waiting.clone();
         let checker = checker.clone();
+        let actions = actions.clone();
         tokio::spawn(async move {
             let mut verbs: BTreeMap<String, Verb> = BTreeMap::new();
             // The last event from before the attach, once it is known.
@@ -269,6 +288,24 @@ async fn run(args: Args) -> Result<(), String> {
                         }
                     }
                     Ok(ServerMessage::Event(event)) => {
+                        // What waits is known before anything else is done
+                        // with the event, so a command typed after it sees it.
+                        if let Ok(mut actions) = actions.lock() {
+                            if event.kind == EventKind::ActionWaiting
+                                && let Ok(action) =
+                                    serde_json::from_value::<ActionWaiting>(event.payload.clone())
+                            {
+                                actions.insert(event.seq, action);
+                            }
+                            if event.kind == EventKind::ActionSettled
+                                && let Ok(settled) =
+                                    serde_json::from_value::<ActionSettled>(event.payload.clone())
+                            {
+                                actions.retain(|_, action| {
+                                    action.request_hash != settled.request_hash
+                                });
+                            }
+                        }
                         println!("{}", show(&event));
                         if last_replayed.is_some_and(|last| event.seq >= last) {
                             last_replayed = None;
@@ -363,6 +400,81 @@ async fn run(args: Args) -> Result<(), String> {
                 last = Some(signed);
                 (Verb::Propose, value)
             }
+            Typed::Waiting => {
+                waiting.replayed().await;
+                let actions = actions.lock().map(|a| a.clone()).unwrap_or_default();
+                if actions.is_empty() {
+                    println!(
+                        "nothing waits for you (of what this terminal has seen since it attached)"
+                    );
+                }
+                for (seq, action) in actions {
+                    println!(
+                        "#{seq}  Vessel {}'s {}  (/approve {seq} or /decline {seq})",
+                        action.vessel.get(..8).unwrap_or(&action.vessel),
+                        action.shown
+                    );
+                }
+                continue;
+            }
+            Typed::Approve { event } | Typed::Decline { event } => {
+                let approve = matches!(typed, Typed::Approve { .. });
+                let Some(writer) = &writer else {
+                    eprintln!("flare-tui: no key to sign with; start with --key");
+                    continue;
+                };
+                waiting.replayed().await;
+                let action = actions.lock().ok().and_then(|a| a.get(&event).cloned());
+                let Some(action) = action else {
+                    eprintln!("flare-tui: no action waits as #{event}; /waiting lists them");
+                    continue;
+                };
+                // What is approved is what is shown: the hash is computed
+                // here, from the request's own bytes.
+                let Some(request) = island_client::approval::unhex_bytes(&action.request) else {
+                    eprintln!("flare-tui: action #{event}'s request is not hex; not signed");
+                    continue;
+                };
+                let hash = island_client::approval::request_hash(&action.provider, &request);
+                if hex(&hash) != action.request_hash {
+                    eprintln!(
+                        "flare-tui: action #{event}: the server's request hash is not the hash of \
+                         the request shown; not signed"
+                    );
+                    continue;
+                }
+                waiting.settle().await;
+                let counter = match next_counter(&mut broker, &args.broker, writer).await {
+                    Ok(counter) => counter,
+                    Err(error) => {
+                        eprintln!("flare-tui: not signed: {error}");
+                        continue;
+                    }
+                };
+                let body = island_core::Body::Approval(island_core::Approval {
+                    request: hash,
+                    verdict: if approve {
+                        island_core::Answered::Approve
+                    } else {
+                        island_core::Answered::Decline
+                    },
+                    proof: None,
+                });
+                let signed = writer.submission(
+                    island_core::StreamId::from(island_core::StreamId::APPROVALS),
+                    counter,
+                    body,
+                );
+                let value = proposal(&signed)?;
+                (
+                    if approve {
+                        Verb::Approve
+                    } else {
+                        Verb::Decline
+                    },
+                    value,
+                )
+            }
             Typed::Say { text } => {
                 waiting
                     .says
@@ -381,7 +493,7 @@ async fn run(args: Args) -> Result<(), String> {
             },
         };
         waiting.add(&id);
-        if verb == Verb::Propose {
+        if matches!(verb, Verb::Propose | Verb::Approve | Verb::Decline) {
             waiting.proposing(&id);
         }
         let command = ClientMessage::Command {

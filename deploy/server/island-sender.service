@@ -12,7 +12,7 @@ After=taso-wardend.service island-broker.service
 
 [Service]
 EnvironmentFile=/etc/island/island.env
-ExecStart=/usr/local/bin/island-sender --senders /run/taso/run/senders --broker http://10.77.0.1:4747 --root ${ISLAND_ROOT} --key /etc/island/sender.key
+ExecStart=/usr/local/bin/island-sender --senders /run/taso/run/senders --broker http://10.77.0.1:4747 --root ${ISLAND_ROOT} --key /etc/island/sender.key --vessel-keys /etc/island/vessels
 Restart=always
 RestartSec=5
 
