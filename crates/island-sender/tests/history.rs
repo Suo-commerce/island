@@ -528,6 +528,9 @@ impl World {
             Action::HeldAfterRefusal => {
                 return Err("oracle 4: an action held after a refusal".to_owned());
             }
+            Action::Delivered(_) | Action::Undeliverable(_) | Action::NotDelivered(_) => {
+                return Err("these histories hold no replies (flare.say)".to_owned());
+            }
         };
         if effect.unknown {
             self.hit(format!("unknown:{}", step.action.name()));

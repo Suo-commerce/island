@@ -1,7 +1,12 @@
 //! What the socket was asked, as `access` entries in the Island log
-//! (docs/slice-2.md, "The island socket", rules): batched, one per Vessel
-//! and provider at most every `access_every_secs`, with the number of
+//! (docs/slice-2.md, "The island socket", rules): batched, one per Vessel,
+//! kind and provider at most every `access_every_secs`, with the number of
 //! calls, bytes each way, and one digest over the calls' digests.
+//!
+//! A batch that carried something (a model call, a task handed out) goes
+//! out at the next flush. One that holds only task requests answered with
+//! nothing waits for the hourly flush, so an idle agent's polling is
+//! counted without writing an entry every half minute.
 //!
 //! A call's digest ties the entry to the agent's own record of the call:
 //!
@@ -25,6 +30,19 @@ use island_core::{Access, AccessKind, Body, Hash, PublicKey, StreamId, VesselId}
 pub const CALL_DOMAIN: &str = "island.inference-call.v1";
 /// The batch digest's domain.
 pub const BATCH_DOMAIN: &str = "island.access-batch.v1";
+/// A task request's digest domain: over the request's path and query as
+/// the agent sent them and the body it got back, laid out as a model
+/// call's.
+pub const TASK_DOMAIN: &str = "island.task-call.v1";
+
+/// A task request's digest.
+pub fn task_digest(target: &[u8], response: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new_derive_key(TASK_DOMAIN);
+    hasher.update(&(target.len() as u64).to_le_bytes());
+    hasher.update(target);
+    hasher.update(response);
+    *hasher.finalize().as_bytes()
+}
 
 /// A call's digest, computed as the bytes go by.
 #[derive(Clone)]
@@ -77,12 +95,14 @@ pub struct Pending {
     pub bytes_out: u64,
     /// Each call's digest, in the order the calls ended.
     pub digests: Vec<Hash>,
+    /// Whether it goes out at the next flush, not only the hourly one.
+    pub urgent: bool,
 }
 
 /// Every batch waiting, and the entry whose fate is not known.
 #[derive(Default)]
 pub struct Batches {
-    pending: BTreeMap<(VesselId, String), Pending>,
+    pending: BTreeMap<(VesselId, AccessKind, String), Pending>,
     /// Sent, but the answer was lost: sent again, byte for byte, before
     /// anything else (the broker answers an exact resend with the first
     /// answer).
@@ -90,33 +110,43 @@ pub struct Batches {
 }
 
 impl Batches {
-    /// One call ended.
+    /// One call ended. `urgent`: it carried something, and its batch goes
+    /// out at the next flush.
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &mut self,
         vessel: VesselId,
+        what: AccessKind,
         provider: &str,
         bytes_in: u64,
         bytes_out: u64,
         digest: Hash,
+        urgent: bool,
     ) {
         let pending = self
             .pending
-            .entry((vessel, provider.to_owned()))
+            .entry((vessel, what, provider.to_owned()))
             .or_default();
+        pending.urgent |= urgent;
         pending.calls = pending.calls.saturating_add(1);
         pending.bytes_in = pending.bytes_in.saturating_add(bytes_in);
         pending.bytes_out = pending.bytes_out.saturating_add(bytes_out);
         pending.digests.push(digest);
     }
 
-    /// The entries to write now, oldest batch first, and nothing left
-    /// pending.
-    pub fn take(&mut self) -> Vec<Access> {
-        std::mem::take(&mut self.pending)
+    /// The entries to write now: the urgent batches, or with `all` every
+    /// batch. What is taken is no longer pending.
+    pub fn take(&mut self, all: bool) -> Vec<Access> {
+        let (taken, kept) = std::mem::take(&mut self.pending)
             .into_iter()
-            .map(|((vessel, provider), pending)| Access {
+            .partition(|(_, pending)| all || pending.urgent);
+        self.pending = kept;
+        let taken: BTreeMap<_, _> = taken;
+        taken
+            .into_iter()
+            .map(|((vessel, what, provider), pending)| Access {
                 vessel,
-                what: AccessKind::Inference,
+                what,
                 provider,
                 calls: pending.calls,
                 bytes_in: pending.bytes_in,
@@ -131,14 +161,21 @@ impl Batches {
     fn put_back(&mut self, access: Access) {
         let pending = self
             .pending
-            .entry((access.vessel, access.provider))
+            .entry((access.vessel, access.what, access.provider))
             .or_default();
+        // Tried once: it goes out at the next flush.
+        pending.urgent = true;
         // The batch's digest stands for its calls in the next batch: the
         // agent's records still tie in, one level down.
         pending.calls = pending.calls.saturating_add(access.calls);
         pending.bytes_in = pending.bytes_in.saturating_add(access.bytes_in);
         pending.bytes_out = pending.bytes_out.saturating_add(access.bytes_out);
         pending.digests.insert(0, access.digest);
+    }
+
+    /// Whether a flush (of every batch, with `all`) has anything to write.
+    pub fn due(&self, all: bool) -> bool {
+        self.unsent.is_some() || self.pending.values().any(|pending| all || pending.urgent)
     }
 
     /// Whether anything waits.
@@ -156,12 +193,14 @@ pub struct Flushed {
     pub refused: Vec<Refusal>,
 }
 
-/// Write what is pending, one entry per Vessel and provider.
+/// Write what is pending, one entry per Vessel, kind and provider: the
+/// urgent batches, or with `all` every batch.
 pub async fn flush(
     batches: &tokio::sync::Mutex<Batches>,
     broker: &Broker,
     writer: &Writer,
     me: &PublicKey,
+    all: bool,
 ) -> Result<Flushed, String> {
     let mut flushed = Flushed::default();
     // First the entry whose answer was lost.
@@ -176,7 +215,7 @@ pub async fn flush(
             }
         }
     }
-    let entries = batches.lock().await.take();
+    let entries = batches.lock().await.take(all);
     let mut entries = entries.into_iter();
     while let Some(access) = entries.next() {
         let counter = match broker.capabilities(me).await {
@@ -237,11 +276,12 @@ mod tests {
     #[test]
     fn calls_batch_per_vessel_and_provider() {
         let mut batches = Batches::default();
-        batches.add([1; 16], "local", 10, 100, [1; 32]);
-        batches.add([1; 16], "local", 20, 200, [2; 32]);
-        batches.add([1; 16], "gpu", 5, 50, [3; 32]);
-        batches.add([2; 16], "local", 1, 1, [4; 32]);
-        let mut entries = batches.take();
+        let inference = AccessKind::Inference;
+        batches.add([1; 16], inference, "local", 10, 100, [1; 32], true);
+        batches.add([1; 16], inference, "local", 20, 200, [2; 32], true);
+        batches.add([1; 16], inference, "gpu", 5, 50, [3; 32], true);
+        batches.add([2; 16], inference, "local", 1, 1, [4; 32], true);
+        let mut entries = batches.take(false);
         entries.sort_by(|a, b| (a.vessel, &a.provider).cmp(&(b.vessel, &b.provider)));
         assert_eq!(entries.len(), 3);
         let local = &entries[1];
@@ -254,13 +294,48 @@ mod tests {
     #[test]
     fn a_batch_put_back_goes_out_with_the_next() {
         let mut batches = Batches::default();
-        batches.add([1; 16], "local", 10, 100, [1; 32]);
-        let first = batches.take().remove(0);
+        let inference = AccessKind::Inference;
+        batches.add([1; 16], inference, "local", 10, 100, [1; 32], true);
+        let first = batches.take(false).remove(0);
         let first_digest = first.digest;
-        batches.add([1; 16], "local", 1, 1, [9; 32]);
+        batches.add([1; 16], inference, "local", 1, 1, [9; 32], true);
         batches.put_back(first);
-        let merged = batches.take().remove(0);
+        let merged = batches.take(false).remove(0);
         assert_eq!((merged.calls, merged.bytes_in), (2, 11));
         assert_eq!(merged.digest, batch_digest(&[first_digest, [9; 32]]));
+    }
+
+    #[test]
+    fn empty_task_polls_wait_for_the_hourly_flush() {
+        let mut batches = Batches::default();
+        let digest = task_digest(b"/task?after=3", b"");
+        batches.add([1; 16], AccessKind::Task, "", 13, 0, digest, false);
+        batches.add([1; 16], AccessKind::Task, "", 13, 0, digest, false);
+        assert!(batches.take(false).is_empty(), "nothing carried: it waits");
+        let hourly = batches.take(true);
+        assert_eq!(hourly.len(), 1);
+        assert_eq!((hourly[0].what, hourly[0].calls), (AccessKind::Task, 2));
+        // A task handed out makes its batch go at the next flush, with the
+        // empty polls before it.
+        batches.add([1; 16], AccessKind::Task, "", 13, 0, digest, false);
+        batches.add(
+            [1; 16],
+            AccessKind::Task,
+            "",
+            7,
+            90,
+            task_digest(b"/task", b"{}"),
+            true,
+        );
+        let next = batches.take(false);
+        assert_eq!((next.len(), next[0].calls), (1, 2));
+        let mut layout = Vec::new();
+        layout.extend(5u64.to_le_bytes());
+        layout.extend(b"/task");
+        layout.extend(b"{}");
+        assert_eq!(
+            task_digest(b"/task", b"{}"),
+            blake3::derive_key(TASK_DOMAIN, &layout)
+        );
     }
 }

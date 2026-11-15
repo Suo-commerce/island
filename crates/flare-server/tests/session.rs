@@ -50,6 +50,7 @@ async fn start(data: &Path, log: Shared, broker: Option<String>) -> Running {
             .map(str::to_owned)
             .to_vec(),
         clock: tick,
+        agent_session: "main".to_owned(),
     })
     .expect("the server starts");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -95,11 +96,12 @@ impl Client {
                 session: session.to_owned(),
                 after,
                 client: name.to_owned(),
+                version: Some(2),
             })
             .await;
         match client.receive().await {
             ServerMessage::Attached { next, version, .. } => {
-                assert_eq!(version, 1);
+                assert_eq!(version, 2);
                 (client, next)
             }
             other => panic!("not attached: {other:?}"),
@@ -529,4 +531,186 @@ async fn with_the_broker_down_see_shows_the_replica_and_a_proposal_is_not_known(
     );
     let _ = running.broker;
     running.serving.abort();
+}
+
+/// One request on the agent socket: status and body.
+async fn agent_ask(socket: &Path, method: &str, target: &str, body: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .expect("the agent socket answers");
+    let request = format!(
+        "{method} {target} HTTP/1.1\r\nHost: flare\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.expect("sent");
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).await.expect("read");
+    let status = answer
+        .get(9..12)
+        .and_then(|code| code.parse().ok())
+        .expect("a status");
+    let body = answer
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, body)
+}
+
+/// The agent socket of `server` at `path`, letting `tasks` and `replies`
+/// in by uid.
+fn agent_socket(server: Arc<Server>, path: &Path, tasks: u32, replies: u32) {
+    let listener = tokio::net::UnixListener::bind(path).expect("bind the agent socket");
+    let app = flare_server::agent_router(server, flare_server::AgentPeers { tasks, replies })
+        .into_make_service_with_connect_info::<flare_server::Peer>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+}
+
+fn my_uid(dir: &Path) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(dir).expect("the temp dir").uid()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_say_is_a_task_and_the_reply_comes_back_once() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(&dir.path().join("server"), started_log(), None).await;
+    let me = my_uid(dir.path());
+    let socket = dir.path().join("agent.sock");
+    agent_socket(running.server.clone(), &socket, me, me);
+    let (mut laptop, _) = Client::attach(&running.url, "main", None, "laptop").await;
+
+    // No task yet: a short wait ends with nothing.
+    assert_eq!(agent_ask(&socket, "GET", "/task?wait=0", "").await.0, 204);
+
+    // Said in the session, it is the agent's next task.
+    laptop
+        .command(
+            "s-1",
+            Verb::Say,
+            serde_json::json!({ "text": "draft the verse for that" }),
+        )
+        .await;
+    let said = laptop.event().await;
+    assert_eq!(said.kind, EventKind::UserMessage);
+    let (status, body) = agent_ask(&socket, "GET", "/task", "").await;
+    assert_eq!(status, 200, "{body}");
+    let task: flare_core::session::Task = serde_json::from_str(&body).expect("a task");
+    assert_eq!(task.id, said.seq);
+    assert_eq!(task.text, "draft the verse for that");
+    assert_eq!(task.client, "laptop");
+
+    // After it, a waiting request gets the next one as it is said.
+    let waiting = {
+        let socket = socket.clone();
+        let target = format!("/task?after={}&wait=20", task.id);
+        tokio::spawn(async move { agent_ask(&socket, "GET", &target, "").await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    laptop
+        .command(
+            "s-2",
+            Verb::Say,
+            serde_json::json!({ "text": "and another" }),
+        )
+        .await;
+    let second = laptop.event().await;
+    let (status, body) = waiting.await.expect("the wait ends");
+    assert_eq!(status, 200, "{body}");
+    let next: flare_core::session::Task = serde_json::from_str(&body).expect("a task");
+    assert_eq!((next.id, next.text.as_str()), (second.seq, "and another"));
+
+    // The reply is delivered once per key: every client sees it once.
+    let delivery = serde_json::json!({
+        "vessel": "914c503c980b8f7f1750c664b5743d2c",
+        "key": "ab".repeat(32),
+        "request": serde_json::json!({ "task": task.id, "text": "Here is a draft." }).to_string(),
+    })
+    .to_string();
+    let (status, body) = agent_ask(&socket, "POST", "/say", &delivery).await;
+    assert_eq!(status, 200, "{body}");
+    let reply = laptop.event().await;
+    assert_eq!(reply.kind, EventKind::AgentText);
+    let text: flare_core::session::AgentText =
+        serde_json::from_value(reply.payload.clone()).expect("agent text");
+    assert_eq!(
+        (text.task, text.text.as_str()),
+        (task.id, "Here is a draft.")
+    );
+    assert!(body.contains(&format!("\"event\":{}", reply.seq)), "{body}");
+    let (status, again) = agent_ask(&socket, "POST", "/say", &delivery).await;
+    assert_eq!((status, again), (200, body));
+
+    // A malformed reply is refused for good; a task is never a reply.
+    let bad = serde_json::json!({ "vessel": "00".repeat(16), "key": "cd".repeat(32), "request": "hello" })
+        .to_string();
+    assert_eq!(agent_ask(&socket, "POST", "/say", &bad).await.0, 422);
+
+    // Nothing else was recorded: the next event is the next say.
+    laptop
+        .command("s-3", Verb::Say, serde_json::json!({ "text": "third" }))
+        .await;
+    assert_eq!(laptop.event().await.seq, reply.seq + 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn say_is_refused_where_the_agent_does_not_listen_and_to_strangers() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(&dir.path().join("server"), started_log(), None).await;
+    let me = my_uid(dir.path());
+    let socket = dir.path().join("agent.sock");
+    // Neither tasks nor replies are this uid's.
+    agent_socket(running.server.clone(), &socket, me + 1, me + 2);
+
+    let (mut other, _) = Client::attach(&running.url, "elsewhere", None, "laptop").await;
+    other
+        .command("s-1", Verb::Say, serde_json::json!({ "text": "hello" }))
+        .await;
+    let refused = other.event().await;
+    assert_eq!(refused.kind, EventKind::Error);
+    assert!(
+        refused
+            .payload
+            .to_string()
+            .contains("listens in session main"),
+        "{refused:?}"
+    );
+
+    // A version 1 client cannot say.
+    let (socket_v1, _) = tokio_tungstenite::connect_async(&running.url)
+        .await
+        .expect("connects");
+    let mut v1 = Client {
+        socket: socket_v1,
+        name: "old".to_owned(),
+    };
+    v1.send(&ClientMessage::Attach {
+        session: "main".to_owned(),
+        after: None,
+        client: "old".to_owned(),
+        version: None,
+    })
+    .await;
+    match v1.receive().await {
+        ServerMessage::Attached { version, .. } => assert_eq!(version, 1),
+        other => panic!("not attached: {other:?}"),
+    }
+    v1.command("s-1", Verb::Say, serde_json::json!({ "text": "hello" }))
+        .await;
+    let refused = v1.event().await;
+    assert!(
+        refused.payload.to_string().contains("version 2"),
+        "{refused:?}"
+    );
+
+    assert_eq!(agent_ask(&socket, "GET", "/task?wait=0", "").await.0, 403);
+    let delivery = serde_json::json!({
+        "vessel": "00".repeat(16), "key": "ab".repeat(32),
+        "request": serde_json::json!({ "task": 0, "text": "x" }).to_string(),
+    })
+    .to_string();
+    assert_eq!(agent_ask(&socket, "POST", "/say", &delivery).await.0, 403);
 }

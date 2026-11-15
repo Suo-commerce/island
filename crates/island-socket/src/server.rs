@@ -6,6 +6,7 @@
 //! | `GET /whoami`               | who the caller is                         |
 //! | `GET /v1/models`            | the models it may name                    |
 //! | `POST /v1/chat/completions` | the model's answer, streamed as it comes  |
+//! | `GET /task?after=N`         | the next message said to the agent after N, from `flare-server`, or 204 after waiting up to 50 s (the prime only) |
 //!
 //! The rest of the table (tasks, log reads, repos, notes) comes with the
 //! steps that use it; until then it is a 404.
@@ -71,6 +72,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/whoami", get(whoami))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat))
+        .route("/task", get(task))
         .fallback(not_here)
         .layer(DefaultBodyLimit::max(MAX_REQUEST))
         .with_state(shared)
@@ -168,7 +170,7 @@ async fn not_here(ConnectInfo(_peer): ConnectInfo<Peer>) -> Response {
     error(
         StatusCode::NOT_FOUND,
         "not_found",
-        "not served (yet): this socket answers /whoami, /v1/models and /v1/chat/completions",
+        "not served (yet): this socket answers /whoami, /v1/models, /v1/chat/completions and /task",
     )
 }
 
@@ -211,11 +213,15 @@ impl Drop for Accounting {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
-                    shared
-                        .batches
-                        .lock()
-                        .await
-                        .add(vessel, &provider, bytes_in, bytes_out, digest);
+                    shared.batches.lock().await.add(
+                        vessel,
+                        island_core::AccessKind::Inference,
+                        &provider,
+                        bytes_in,
+                        bytes_out,
+                        digest,
+                        true,
+                    );
                 });
             }
             Err(_) => eprintln!("island-socket: a call ended after the runtime; not batched"),
@@ -333,4 +339,95 @@ async fn chat(
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
+}
+
+/// How long a task request waits for a message, in seconds.
+pub const TASK_WAIT: u64 = 50;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskQuery {
+    after: Option<u64>,
+}
+
+/// The next message said to the agent, from `flare-server`'s agent socket.
+async fn task(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    uri: axum::http::Uri,
+) -> Response {
+    let caller = match shared.caller(peer) {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    if caller.role == Role::Fork {
+        return error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "tasks are the prime's; a fork takes its task from its files",
+        );
+    }
+    let query: TaskQuery = match serde_urlencoded_query(uri.query()) {
+        Ok(query) => query,
+        Err(why) => return error(StatusCode::BAD_REQUEST, "invalid_request_error", why),
+    };
+    let target = uri
+        .path_and_query()
+        .map_or_else(|| "/task".to_owned(), |path| path.as_str().to_owned());
+    let upstream = match query.after {
+        Some(after) => format!("/task?after={after}&wait={TASK_WAIT}"),
+        None => format!("/task?wait={TASK_WAIT}"),
+    };
+    let (status, body) = match crate::upstream::get_unix(&shared.config.tasks, &upstream).await {
+        Ok(answer) => answer,
+        Err(why) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tasks_unavailable",
+                format!("the session server: {why}"),
+            );
+        }
+    };
+    let urgent = status == StatusCode::OK;
+    let digest = crate::access::task_digest(target.as_bytes(), &body);
+    shared.batches.lock().await.add(
+        caller.vessel,
+        island_core::AccessKind::Task,
+        "",
+        target.len() as u64,
+        body.len() as u64,
+        digest,
+        urgent,
+    );
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    if urgent {
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+    }
+    response
+}
+
+/// `after=N` or nothing.
+fn serde_urlencoded_query(query: Option<&str>) -> Result<TaskQuery, String> {
+    let mut after = None;
+    for pair in query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+    {
+        match pair.split_once('=') {
+            Some(("after", value)) => {
+                after = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("after: {value:?} is not a number"))?,
+                );
+            }
+            _ => return Err(format!("{pair:?}: a task request takes after=N only")),
+        }
+    }
+    Ok(TaskQuery { after })
 }

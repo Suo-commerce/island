@@ -226,9 +226,9 @@ To take a device out, delete its `[Peer]` block and run
 
 Taso runs the Vessels: one for now, `flare-home`, Island's agent. Its
 block log, its Warden and `island-sender` are system services beside the
-broker and the session server (docs/slice-2.md, "The Taso node"). Until
-`flare-agent` exists (slice 2, step 4), `flare-home` runs a stand-in: one
-turn, one action to approve, then it waits.
+broker and the session server (docs/slice-2.md, "The Taso node").
+`flare-home` runs `flare-agent` (section 8); before step 4 it ran spike
+S4's stand-in agent, which the spikes still use.
 
 The new kinds must be in every program that reads the log before the
 first approval is written: the broker, `island-cli` and `flare-server` on
@@ -372,6 +372,43 @@ A new agents' image (`install.sh` again) replaces the socket's directory:
 on the new one. A running agent keeps the old directory until its next
 start: `systemctl restart taso-wardend`.
 
+## 8. Flare's agent
+
+`flare-agent` is the program `flare-home` runs (slice 2, step 4). It
+takes the messages said to it in the session `main`, works on each with
+the model and its tools (`read`, `write`, `edit`, `bash` in its `/work`,
+and `say`), and replies. The reply is an action, `flare.say`, that Taso
+releases and `island-sender` hands to `flare-server`, which records it as
+an `agent_text` once per key: a reply redone after a crash is shown once.
+It needs no approval; a verse of the agent's own will (step 5).
+
+The pieces between them:
+
+- `flare-server` serves the agent socket `/run/flare-server/agent.sock`:
+  the next message for the agent, to `island-socket`'s user only; and
+  replies, from root (`island-sender`) only. Its unit and binary come
+  with `scripts/node/install.sh` now, built on the server.
+- `island-socket` answers the agent's `GET /task?after=N` from it, waiting
+  up to 50 s, and counts it as access (kind `task`). An empty answer waits
+  for the hourly access entry; a task goes out with the next.
+- `flare-agent` keeps its cursor, the task it is on and the conversation
+  in `/work/.flare/`, sealed with each turn, and notes its starts, tasks
+  and turns in `/work/.flare/log.jsonl`, which `check.sh` reads.
+
+Talk to it from the laptop's terminal:
+
+```sh
+flare-tui --server ws://10.77.0.1:4749/session --session main --root "$ISLAND_ROOT"
+say what can you do?
+```
+
+or on the server, `scripts/node/check.sh converse "your message"`.
+
+The model is `island-socket`'s default (section 7). Its answers, tool
+calls and their results are in `flare-home`'s Chronicle as transcript
+entries, each model call with the digest its `access` entry counts; the
+Island log holds the counts only.
+
 ## Updating the server
 
 `islander.sh update` updates only the laptop. After merging a bundle, the
@@ -385,10 +422,12 @@ ssh root@10.77.0.1 'install -m 755 /tmp/island-broker /tmp/island-cli /tmp/flare
 curl -s http://10.77.0.1:4747/head
 ```
 
-The head names the build it runs. The Taso node's programs and image
-are built on the server: pull, then run `scripts/node/install.sh` again,
-and restart what changed (`systemctl restart island-sender`; a new image
-is used at the agent's next start).
+The head names the build it runs. The Taso node's programs and image,
+and since step 4 `flare-server`, are built on the server: pull, then run
+`scripts/node/install.sh` again, and restart what changed (`systemctl
+restart flare-server island-socket island-sender`; a new image is used at
+the agent's next start, `systemctl restart taso-wardend`). `flare-server`
+no longer needs copying from the laptop.
 
 ## Later
 

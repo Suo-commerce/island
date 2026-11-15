@@ -114,12 +114,13 @@ async fn world(provider_url: &str, budget_calls: u64, stranger: bool) -> World {
     let config = format!(
         "socket = {socket:?}\nwarden_config = {warden:?}\nstate_dir = {state:?}\n\
          broker = \"http://127.0.0.1:9\"\nroot = \"{root}\"\nkey = \"/nonexistent\"\n\
-         default = \"local\"\n\
+         default = \"local\"\ntasks = {tasks:?}\n\
          [provider.local]\nbase_url = \"{provider_url}\"\nmodels = [\"small\", \"large\"]\n\
          key_file = {key_file:?}\nbudget = {{ calls = {budget_calls}, bytes = 100000000 }}\n\
          [provider.down]\nbase_url = \"http://127.0.0.1:9/v1\"\nmodels = [\"nowhere\"]\n\
          budget = {{ calls = 10, bytes = 1000 }}\n",
         state = dir.path().join("state"),
+        tasks = dir.path().join("agent.sock"),
         root = "a3d2b14059647d18c5334b853e1f712e62d1ddae66f959a3224bf5130acf7e5d",
     );
     let config = island_socket::config::Config::parse(&config).unwrap();
@@ -181,8 +182,9 @@ async fn batched(world: &World) -> BTreeMap<String, (u32, u64, u64, [u8; 32])> {
         .batches
         .lock()
         .await
-        .take()
+        .take(true)
         .into_iter()
+        .filter(|a| a.what == island_core::AccessKind::Inference)
         .map(|a| (a.provider, (a.calls, a.bytes_in, a.bytes_out, a.digest)))
         .collect()
 }
@@ -211,7 +213,7 @@ async fn whoami_says_who_from_the_peer_uid() {
         .collect();
     assert_eq!(ids, ["nowhere", "small", "large"]);
 
-    let (status, _) = ask(&world.socket, "GET", "/task?after=0", b"").await;
+    let (status, _) = ask(&world.socket, "GET", "/notes", b"").await;
     assert_eq!(status, 404, "not served in this step");
 }
 
@@ -333,5 +335,87 @@ async fn a_provider_that_does_not_answer_is_a_counted_call() {
     assert_eq!(
         digest,
         island_socket::access::batch_digest(&[call_digest(request, &body)])
+    );
+}
+
+/// A stand-in for flare-server's agent socket: one task, id 7, then none.
+fn tasks_stub(path: &Path) -> Arc<Mutex<Vec<String>>> {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let record = asked.clone();
+    let app = axum::Router::new().route(
+        "/task",
+        axum::routing::get(move |uri: axum::http::Uri| {
+            let record = record.clone();
+            async move {
+                let query = uri.query().unwrap_or_default().to_owned();
+                record.lock().unwrap().push(query.clone());
+                if query.contains("after=7") {
+                    axum::response::Response::builder()
+                        .status(204)
+                        .body(Body::empty())
+                        .unwrap()
+                } else {
+                    axum::response::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({"id": 7, "at": 1, "client": "laptop", "text": "draft it"})
+                                .to_string(),
+                        ))
+                        .unwrap()
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    asked
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_comes_from_the_session_server_and_is_counted() {
+    let (url, _) = stub(1).await;
+    let world = world(&url, 10, false).await;
+    let tasks = world.socket.with_file_name("agent.sock");
+
+    // No session server yet: said so, and nothing counted.
+    let (status, _) = ask(&world.socket, "GET", "/task", b"").await;
+    assert_eq!(status, 503);
+
+    let asked = tasks_stub(&tasks);
+    let (status, body) = ask(&world.socket, "GET", "/task", b"").await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let task: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        (task["id"].as_u64(), task["text"].as_str()),
+        (Some(7), Some("draft it"))
+    );
+    let (status, empty) = ask(&world.socket, "GET", "/task?after=7", b"").await;
+    assert_eq!((status, empty.len()), (204, 0));
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec!["wait=50".to_owned(), "after=7&wait=50".to_owned()],
+        "the socket sets the wait"
+    );
+    let (status, _) = ask(&world.socket, "GET", "/task?after=x", b"").await;
+    assert_eq!(status, 400);
+
+    // Both requests are in one task batch, with the task handed out it is
+    // due at the next flush.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut batches = world.shared.batches.lock().await;
+    let due = batches.take(false);
+    let task_batch: Vec<_> = due
+        .iter()
+        .filter(|a| a.what == island_core::AccessKind::Task)
+        .collect();
+    assert_eq!(task_batch.len(), 1);
+    assert_eq!(task_batch[0].calls, 2);
+    assert_eq!(task_batch[0].bytes_out, body.len() as u64);
+    assert_eq!(
+        task_batch[0].digest,
+        island_socket::access::batch_digest(&[
+            island_socket::access::task_digest(b"/task", &body),
+            island_socket::access::task_digest(b"/task?after=7", b""),
+        ])
     );
 }

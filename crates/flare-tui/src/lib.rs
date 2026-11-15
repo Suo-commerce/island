@@ -9,7 +9,9 @@
 
 #![warn(missing_docs)]
 
-use flare_core::session::{Event, EventKind, Problem, VerbCall, VerbResult};
+use flare_core::session::{
+    AgentText, Event, EventKind, Problem, UserMessage, VerbCall, VerbResult,
+};
 use flare_core::time;
 use island_core::{Evidence, Hash, Verse};
 
@@ -32,6 +34,11 @@ pub enum Typed {
     },
     /// `again`: propose the last proposal again, exactly.
     Again,
+    /// `say TEXT`: tell the agent.
+    Say {
+        /// What to tell it, as typed.
+        text: String,
+    },
     /// `help`.
     Help,
     /// `quit`, or the end of input.
@@ -51,6 +58,8 @@ commands:
                                    HASH is 64 hex digits
   verse @STREAM EVIDENCE ... TEXT  the same, on another stream
   again                            propose the last proposal again, exactly
+  say TEXT                         tell the agent; its reply comes to the
+                                   session as `agent`
   help                             this
   quit                             leave; the session goes on
 ";
@@ -132,6 +141,15 @@ pub fn parse(line: &str, stream: &str) -> Result<Typed, String> {
             })
         }
         "again" => Ok(Typed::Again),
+        "say" => {
+            let text = line.trim_start()["say".len()..].trim();
+            if text.is_empty() {
+                return Err("say needs something to say".to_owned());
+            }
+            Ok(Typed::Say {
+                text: text.to_owned(),
+            })
+        }
         "help" | "?" => Ok(Typed::Help),
         "quit" | "exit" => Ok(Typed::Quit),
         other => Err(format!("`{other}` is not a command; `help` lists them")),
@@ -174,9 +192,33 @@ pub fn show(event: &Event) -> String {
             Ok(problem) => format!("{head}  error: {}", problem.text),
             Err(_) => format!("{head}  an error this terminal does not read"),
         },
-        EventKind::UserMessage | EventKind::AgentText => {
-            format!("{head}  {}", event.payload)
+        EventKind::UserMessage => {
+            match serde_json::from_value::<UserMessage>(event.payload.clone()) {
+                Ok(message) => format!(
+                    "{head}  {} → agent: {}",
+                    message.client,
+                    multiline(&message.text, &indent)
+                ),
+                Err(_) => format!("{head}  a message this terminal does not read"),
+            }
         }
+        EventKind::AgentText => match serde_json::from_value::<AgentText>(event.payload.clone()) {
+            Ok(reply) => format!(
+                "{head}  agent (to #{}): {}",
+                reply.task,
+                multiline(&reply.text, &indent)
+            ),
+            Err(_) => format!("{head}  a reply this terminal does not read"),
+        },
+    }
+}
+
+/// A text on the event's line, its further lines indented below.
+fn multiline(text: &str, indent: &dyn Fn(&str) -> String) -> String {
+    let text = text.trim_end();
+    match text.split_once('\n') {
+        None => text.to_owned(),
+        Some((first, rest)) => format!("{first}\n{}", indent(rest)),
     }
 }
 
@@ -233,5 +275,43 @@ mod tests {
         assert!(parse("verse artefact ref=abc built", "island").is_err());
         assert!(parse("dance", "island").is_err());
         assert_eq!(parse("quit", "island"), Ok(Typed::Quit));
+        assert_eq!(
+            parse("  say draft the verse   for that ", "island"),
+            Ok(Typed::Say {
+                text: "draft the verse   for that".into()
+            })
+        );
+        assert!(parse("say   ", "island").is_err());
+    }
+}
+
+#[cfg(test)]
+mod shown {
+    use super::*;
+
+    #[test]
+    fn a_message_and_its_reply_read_as_a_conversation() {
+        let said = Event {
+            seq: 4,
+            at: 1_794_400_000_000_000,
+            kind: EventKind::UserMessage,
+            payload: serde_json::json!({ "id": "t-1", "client": "laptop", "text": "draft it" }),
+        };
+        assert!(
+            show(&said).ends_with("laptop → agent: draft it"),
+            "{}",
+            show(&said)
+        );
+        let reply = Event {
+            seq: 5,
+            at: 1_794_400_001_000_000,
+            kind: EventKind::AgentText,
+            payload: serde_json::json!({ "task": 4, "text": "Here:\nline two", "vessel": "ab", "key": "cd" }),
+        };
+        assert!(
+            show(&reply).ends_with("agent (to #4): Here:\n    line two"),
+            "{}",
+            show(&reply)
+        );
     }
 }

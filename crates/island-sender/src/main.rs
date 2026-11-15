@@ -34,7 +34,8 @@ use island_core::{Body, Dispatch, Hash, PublicKey, StreamId, VesselId, public_ke
 use island_env::keyfile;
 use island_log::Chain;
 use island_sender::{
-    Action, Ended, Ledger, Planned, Released, SenderConn, Step, serve, sockets_in, vessel_of,
+    Action, Delivered, Ended, Ledger, Planned, Released, SenderConn, Step, serve, sockets_in,
+    vessel_of,
 };
 use serde_json::json;
 use taso_field::protocol::{OpenEffect, Outcome};
@@ -77,6 +78,14 @@ struct Args {
     /// sender that crashes there would. The next run must not send again.
     #[arg(long, hide = true)]
     stop_after_send: bool,
+    /// flare-server's agent socket: the agent's replies (`flare.say`) are
+    /// delivered there.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/run/flare-server/agent.sock"
+    )]
+    session_socket: PathBuf,
 }
 
 fn parse_key(text: &str) -> Result<PublicKey, String> {
@@ -302,6 +311,7 @@ fn run(runtime: &tokio::runtime::Runtime, args: &Args) -> Result<(), String> {
 struct Online<'a> {
     sender: &'a mut Sender,
     runtime: &'a tokio::runtime::Runtime,
+    session: &'a Path,
 }
 
 impl Ledger<Failed> for Online<'_> {
@@ -316,6 +326,57 @@ impl Ledger<Failed> for Online<'_> {
         approval: u64,
     ) -> Result<Result<u64, String>, Failed> {
         self.sender.send(self.runtime, vessel, planned, approval)
+    }
+
+    fn say(&mut self, vessel: VesselId, planned: &Planned) -> Result<Delivered, Failed> {
+        Ok(deliver(self.session, vessel, planned))
+    }
+}
+
+/// Hand a reply to flare-server's agent socket: `POST /say`.
+fn deliver(session: &Path, vessel: VesselId, planned: &Planned) -> Delivered {
+    use std::io::{Read, Write};
+    let Ok(request) = std::str::from_utf8(&planned.effect.request) else {
+        return Delivered::Refused("the reply is not UTF-8".to_owned());
+    };
+    let body = json!({
+        "vessel": approval::hex(&vessel),
+        "key": approval::hex(&planned.key),
+        "request": request,
+    })
+    .to_string();
+    let exchange = || -> std::io::Result<String> {
+        let mut stream = UnixStream::connect(session)?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        write!(
+            stream,
+            "POST /say HTTP/1.1\r\nHost: flare\r\nConnection: close\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )?;
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer)?;
+        Ok(answer)
+    };
+    let answer = match exchange() {
+        Ok(answer) => answer,
+        Err(error) => return Delivered::Unreachable(format!("{}: {error}", session.display())),
+    };
+    let status = answer.get(9..12).unwrap_or_default();
+    let text = answer
+        .split_once("\r\n\r\n")
+        .map_or("", |(_, body)| body)
+        .trim();
+    match status {
+        "200" => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|value| value["event"].as_u64())
+            .map_or_else(
+                || Delivered::Unreachable(format!("the session answered {text:?}")),
+                Delivered::At,
+            ),
+        "422" | "400" => Delivered::Refused(format!("the session refused it: {text}")),
+        _ => Delivered::Unreachable(format!("the session answered {status}: {text}")),
     }
 }
 
@@ -345,7 +406,11 @@ fn pass(
     let mut refused = std::mem::take(&mut sender.refused);
     let mut lines = Vec::new();
     let ended = serve(
-        &mut Online { sender, runtime },
+        &mut Online {
+            sender,
+            runtime,
+            session: &args.session_socket,
+        },
         &mut conn,
         vessel,
         &mut refused,
@@ -385,7 +450,10 @@ fn line(vessel: VesselId, step: &Step) -> (u64, String, String) {
             line["approved_at"] = json!(approval);
             line["sent_at"] = json!(entry);
         }
-        Action::SendRefused(why) => line["error"] = json!(why),
+        Action::SendRefused(why) | Action::Undeliverable(why) | Action::NotDelivered(why) => {
+            line["error"] = json!(why);
+        }
+        Action::Delivered(event) => line["event"] = json!(event),
         Action::Wait | Action::HeldAfterRefusal => {}
     }
     match &step.reported {

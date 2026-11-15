@@ -171,7 +171,7 @@ async fn serve(path: PathBuf) -> Result<(), String> {
         match Broker::connect(&config.broker).await {
             Ok(broker) => {
                 if let Err(error) =
-                    flush(&shared_ref.batches, &broker, &Writer::new(key), &me).await
+                    flush(&shared_ref.batches, &broker, &Writer::new(key), &me, true).await
                 {
                     eprintln!("island-socket: the last access entries: {error}");
                 }
@@ -190,9 +190,14 @@ async fn flush_forever(
     every: Duration,
 ) {
     let mut broker: Option<Broker> = None;
+    // Quiet batches (task polls that found nothing) go out once an hour.
+    let rounds_per_hour = (3600 / every.as_secs().max(1)).max(1);
+    let mut round = 0u64;
     loop {
         tokio::time::sleep(every).await;
-        if shared.batches.lock().await.is_empty() {
+        round += 1;
+        let all = round.is_multiple_of(rounds_per_hour);
+        if !shared.batches.lock().await.due(all) {
             continue;
         }
         if broker.is_none() {
@@ -205,7 +210,7 @@ async fn flush_forever(
             }
         }
         let connected = broker.as_ref().expect("connected above");
-        match flush(&shared.batches, connected, &writer, &me).await {
+        match flush(&shared.batches, connected, &writer, &me, all).await {
             Ok(flushed) => {
                 for refusal in flushed.refused {
                     eprintln!(

@@ -1,0 +1,25 @@
+[package]
+name = "flare-agent"
+description = "Flare's agent: the loop that runs in the Vessel flare-home, thinks through the island socket, works in /work, and replies to Jarmo through Taso (docs/slice-2.md, \"The Vessel and the agent\"). Its loop and file tools are ported from Pi (PI-LICENSE)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+flare-core = { workspace = true }
+taso-core = { workspace = true }
+taso-field = { workspace = true }
+blake3 = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile = { workspace = true }

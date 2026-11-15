@@ -7,28 +7,32 @@
 #
 # What it does, each step safe to run again:
 #
-#   1. builds Taso (taso-blkd, taso-wardend, taso-ctl, the Landlock shim)
-#      and island-sender, release, and installs them in /usr/local/bin;
+#   1. builds Taso (taso-blkd, taso-wardend, taso-ctl, the Landlock shim),
+#      island-sender, island-socket, flare-server, flare-agent and
+#      flare-tui, release, and installs the services' programs in
+#      /usr/local/bin;
 #   2. builds the agents' image, /var/lib/taso/agent-island, without
-#      Docker: python3 and its standard library, the stand-in agent
-#      (scripts/s2/s4-agent.py) until flare-agent exists, the shim, and the
-#      mount targets.  A new image goes in beside the old and is swapped
-#      in; a running agent keeps the one it started on;
+#      Docker: flare-agent (step 4), bash and the everyday commands it
+#      runs, python3 and its standard library (spike S4's stand-in agent
+#      stays there for the spikes), the shim, and the mount targets.  A new
+#      image goes in beside the old and is swapped in; a running agent
+#      keeps the one it started on;
 #   3. `taso-ctl init` (once): the module and expedited RCU at boot, the
 #      directories, /etc/taso/warden.json;
 #   4. writes flare-home's entry into /etc/taso/warden.json (replacing an
-#      older one), checked by Taso's own parser before it stays;
+#      older one): it runs flare-agent. Checked by Taso's own parser
+#      before it stays;
 #   5. makes island-sender's key, /etc/island/sender.key, if there is none,
 #      and prints its public key for the grant;
 #   6. island-socket (step 3): its user, its key and config under
 #      /etc/island-socket (written once; edited by hand after), and a stub
 #      model as its first provider;
 #   7. installs the units taso-blkd, taso-wardend, island-sender,
-#      island-socket and island-stub-model and enables them.  It starts
-#      nothing: that is the last command it prints.
+#      island-socket, island-stub-model and flare-server (with its agent
+#      socket, step 4) and enables them.  It starts nothing: that is the
+#      last command it prints.
 #
 # Environment: TASO (/root/taso)  SIZE_GIB (32: the block log, at init only)
-#              FLARE_HOME_PLAN (the stand-in agent's steps, comma-separated)
 #
 # It opens no port and adds no firewall rule; Taso adds none either.
 
@@ -61,12 +65,13 @@ grep -q '^ISLAND_ROOT=[0-9a-f]\{64\}$' "$ENV" || die "$ENV has no ISLAND_ROOT"
 say "building Taso (release) at $(git -C "$TASO" log -1 --format='%h %s' 2>/dev/null || echo '?')"
 (cd "$TASO" && cargo build --release -q -p taso-warden -p taso-landlock \
     && cargo build --release -q -p taso-blk --bin taso-blkd)
-say "building island-sender, island-socket and island-cli (release) at $(git -C "$ISLAND" log -1 --format='%h' 2>/dev/null || echo '?')"
-(cd "$ISLAND" && cargo build --release -q --locked -p island-sender -p island-socket -p island-cli)
+say "building island-sender, island-socket, island-cli, flare-server, flare-agent and flare-tui (release) at $(git -C "$ISLAND" log -1 --format='%h' 2>/dev/null || echo '?')"
+(cd "$ISLAND" && cargo build --release -q --locked -p island-sender -p island-socket -p island-cli \
+    -p flare-server -p flare-agent -p flare-tui)
 install -m 755 "$TASO/target/release/taso-blkd" "$TASO/target/release/taso-wardend" \
     "$TASO/target/release/taso-ctl" "$ISLAND/target/release/island-sender" \
-    "$ISLAND/target/release/island-socket" /usr/local/bin/
-say "installed taso-blkd, taso-wardend, taso-ctl, island-sender, island-socket in /usr/local/bin"
+    "$ISLAND/target/release/island-socket" "$ISLAND/target/release/flare-server" /usr/local/bin/
+say "installed taso-blkd, taso-wardend, taso-ctl, island-sender, island-socket, flare-server in /usr/local/bin"
 if ! id island-socket >/dev/null 2>&1; then
     useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin island-socket
     say "made the user island-socket"
@@ -83,6 +88,26 @@ copy_with_libs() {   # $1 host file -> $2 path in the image, with its libraries
         [ -f "$lib" ] && install -D -m 755 "$lib" "$NEW$lib"
     done
 }
+# A command as the host has it: a link (one multi-call binary, as
+# Ubuntu's coreutils is) stays a link to one copy of its target.
+copy_command() {   # $1 command name
+    local path real
+    path=$(command -v "$1") || return 0
+    real=$(readlink -f "$path")
+    [ -e "$NEW$real" ] || copy_with_libs "$real" "$real"
+    if [ "$real" != "/usr/bin/$1" ]; then
+        mkdir -p "$NEW/usr/bin"
+        ln -sf "$real" "$NEW/usr/bin/$1"
+    fi
+}
+copy_with_libs "$ISLAND/target/release/flare-agent" /usr/bin/flare-agent
+for c in bash sh ls cat head tail wc grep sed awk find sort uniq mkdir rmdir rm mv cp ln touch \
+    date env echo printf diff tr cut xargs sleep seq tee basename dirname realpath stat du rg; do
+    copy_command "$c"
+done
+mkdir -p "$NEW/bin"
+[ -e "$NEW/bin/sh" ] || ln -s /usr/bin/sh "$NEW/bin/sh"
+[ -e "$NEW/bin/bash" ] || ln -s /usr/bin/bash "$NEW/bin/bash"
 copy_with_libs "$(command -v python3)" /usr/bin/python3
 copy_with_libs "$TASO/target/release/taso-landlock" /usr/lib/taso/landlock
 PY_LIB=$(python3 -c 'import os; print(os.path.dirname(os.__file__))')
@@ -115,17 +140,14 @@ say "taso-ctl init"
 taso-ctl init --data "$DATA" --size-gib "$SIZE_GIB" --rootfs "$IMAGE"
 
 # ── 4. flare-home ──────────────────────────────────────────────────────
-# Until flare-agent (step 4), the stand-in agent: one turn, one action to
-# approve, then it waits.  Its place in that plan lives in its /work, so a
-# restart or a reboot carries on from the last Seal and never proposes the
-# action twice.
-# FLARE_HOME_PLAN replaces it; a running flare-home goes on from where
-# its last Seal left it in the new plan, at its next start.
-PLAN=${FLARE_HOME_PLAN:-mark:flare-home,seal,effect:irr:hello-from-flare-home,seal,idle}
+# flare-agent (step 4): it takes tasks from the session, through the
+# island socket, and replies through island-sender.  What it keeps lives
+# in its /work (.flare/), so a restart or a reboot carries on from the
+# last Seal.
 cp "$CONFIG" "$CONFIG.before-flare-home"
-python3 - "$CONFIG" "$NS" "$IMAGE" "$PLAN" <<'PY'
+python3 - "$CONFIG" "$NS" "$IMAGE" <<'PY'
 import json, os, sys
-path, ns, image, plan = sys.argv[1:5]
+path, ns, image = sys.argv[1:4]
 config = json.load(open(path))
 entry = {
     "namespace": ns,
@@ -136,8 +158,7 @@ entry = {
     "forks": {"slots": [11, 12, 13, 14, 15, 16, 17, 18]},
     "runtime": {
         "rootfs": image,
-        "args": ["/usr/bin/python3", "/usr/lib/flare/s4-agent.py", "--island", "", "--role", "prime",
-                 "--journal-file", "/work/.flare-journal.jsonl", "--prime", plan, "--fork", "exit"],
+        "args": ["/usr/bin/flare-agent"],
         "memory_bytes": 2147483648,
         "pids": 256,
     },
@@ -216,11 +237,12 @@ fi
 # ── 7. the units ───────────────────────────────────────────────────────
 install -m 644 "$ISLAND/deploy/server/taso-blkd.service" "$ISLAND/deploy/server/taso-wardend.service" \
     "$ISLAND/deploy/server/island-sender.service" "$ISLAND/deploy/server/island-socket.service" \
-    "$ISLAND/deploy/server/island-stub-model.service" /etc/systemd/system/
+    "$ISLAND/deploy/server/island-stub-model.service" "$ISLAND/deploy/server/flare-server.service" \
+    /etc/systemd/system/
 install -D -m 755 "$ISLAND/deploy/server/taso-unmount-stale" /usr/local/lib/island/taso-unmount-stale
 systemctl daemon-reload
-systemctl enable -q taso-blkd taso-wardend island-sender island-socket island-stub-model
-say "units installed and enabled (not started): taso-blkd, taso-wardend, island-sender, island-socket, island-stub-model"
+systemctl enable -q taso-blkd taso-wardend island-sender island-socket island-stub-model flare-server
+say "units installed and enabled (not started): taso-blkd, taso-wardend, island-sender, island-socket, island-stub-model, flare-server"
 
 cat <<END
 
@@ -230,8 +252,9 @@ Next:
    island-sender  $SENDER_PUB  'dispatch' on 'approvals'
    island-socket  $SOCKET_PUB  'access' on 'access'
 2. Start, or restart what changed:
-   systemctl restart island-stub-model island-socket island-sender
+   systemctl restart flare-server island-stub-model island-socket island-sender
    systemctl start taso-blkd taso-wardend
    A new image reaches flare-home at its next start: systemctl restart taso-wardend
 3. Check it:        scripts/node/check.sh
+   Talk to it:      scripts/node/check.sh converse
 END

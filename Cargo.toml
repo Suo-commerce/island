@@ -26,6 +26,7 @@ island-log = { path = "crates/island-log" }
 island-model = { path = "crates/island-model" }
 island-sender = { path = "crates/island-sender" }
 island-socket = { path = "crates/island-socket" }
+flare-agent = { path = "crates/flare-agent" }
 flare-core = { path = "crates/flare-core" }
 flare-link = { path = "crates/flare-link" }
 flare-server = { path = "crates/flare-server" }

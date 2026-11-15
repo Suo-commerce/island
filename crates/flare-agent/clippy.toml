@@ -1,0 +1,21 @@
+# flare-agent is a program in a Vessel, not part of the Island log: it
+# times its own work (the two-minute turn, a command's timeout) and reads a
+# command's output on a thread of its own while it waits for the command.
+# Clippy uses the nearest clippy.toml and does not merge, so this is the
+# root's list without Instant::now, Instant::elapsed and thread::spawn.
+# Its turns are replayed by Taso from what it recorded, never re-run.
+
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "the agent needs no wall clock" },
+    { path = "std::time::SystemTime::elapsed", reason = "the agent needs no wall clock" },
+    { path = "std::thread::Builder::spawn", reason = "use std::thread::spawn, for a command's output only" },
+    { path = "std::thread::scope", reason = "use std::thread::spawn, for a command's output only" },
+    { path = "rand::thread_rng", reason = "keys are derived, never random", allow-invalid = true },
+    { path = "rand::rng", reason = "keys are derived, never random", allow-invalid = true },
+    { path = "rand::random", reason = "keys are derived, never random", allow-invalid = true },
+]
+
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order differs between runs; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order differs between runs; use BTreeSet" },
+]

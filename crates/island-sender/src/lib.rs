@@ -13,6 +13,11 @@
 //! the approval rule, and only once per action key, which is also what
 //! makes a send happen once. Real providers (a verse from a Vessel, a
 //! mail) come in later steps of slice 2 (docs/slice-2.md).
+//!
+//! One provider needs no approval: [`SAY`], the agent's reply to Jarmo.
+//! Talking to him is the review. It is handed to `flare-server`, which
+//! keeps one session event per action key, so a reply redone after a
+//! crash is shown once.
 
 #![warn(missing_docs)]
 
@@ -25,6 +30,21 @@ use taso_core::record::RetryPolicy;
 use taso_field::protocol::{
     OpenEffect, Outcome, ProtocolError, Reply, Request, VERSION, recv_reply, send_request,
 };
+
+/// The provider of the agent's replies (docs/slice-2.md, "Actions and the
+/// sender"): delivered to the session, without approval.
+pub const SAY: &str = "flare.say";
+
+/// What came of handing a reply to the session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Delivered {
+    /// Recorded (now, or before for this key) as this session event.
+    At(u64),
+    /// The session will never take it: reported not applied.
+    Refused(String),
+    /// The session did not answer: it waits for the next pass.
+    Unreachable(String),
+}
 
 /// A conversation on a Vessel's sender socket.
 pub struct SenderConn<S> {
@@ -206,6 +226,14 @@ pub trait Ledger<E> {
         planned: &Planned,
         approval: u64,
     ) -> Result<Result<u64, String>, E>;
+    /// Hand a [`SAY`] action to the session. Without a session to hand it
+    /// to, it waits.
+    fn say(&mut self, vessel: VesselId, planned: &Planned) -> Result<Delivered, E> {
+        let _ = (vessel, planned);
+        Ok(Delivered::Unreachable(
+            "no session to deliver to".to_owned(),
+        ))
+    }
 }
 
 /// The Warden side of a pass: one Vessel's sender socket.
@@ -247,6 +275,12 @@ pub enum Action {
     SendRefused(String),
     /// Refused earlier in this process: left as it is.
     HeldAfterRefusal,
+    /// A reply, delivered as this session event.
+    Delivered(u64),
+    /// A reply the session refused: reported not applied.
+    Undeliverable(String),
+    /// A reply the session did not take now: left waiting.
+    NotDelivered(String),
 }
 
 impl Action {
@@ -259,6 +293,9 @@ impl Action {
             Self::Sent { .. } => "send",
             Self::SendRefused(_) => "send-refused",
             Self::HeldAfterRefusal => "held-after-refusal",
+            Self::Delivered(_) => "delivered",
+            Self::Undeliverable(_) => "undeliverable",
+            Self::NotDelivered(_) => "not-delivered",
         }
     }
 }
@@ -300,6 +337,31 @@ pub fn serve<E>(
 ) -> Result<Ended, E> {
     for effect in warden.open()? {
         let planned = plan(ledger.marks(), &vessel, effect);
+        if planned.effect.provider == SAY {
+            let (action, result) = match ledger.say(vessel, &planned)? {
+                Delivered::At(event) => (
+                    Action::Delivered(event),
+                    Some(Outcome::Applied {
+                        receipt: format!("session event {event}").into_bytes(),
+                    }),
+                ),
+                Delivered::Refused(why) => (
+                    Action::Undeliverable(why.clone()),
+                    Some(Outcome::NotApplied { reason: why }),
+                ),
+                Delivered::Unreachable(why) => (Action::NotDelivered(why), None),
+            };
+            let mut step = Step {
+                planned,
+                action,
+                reported: None,
+            };
+            if let Some(result) = result {
+                step.reported = Some(warden.report(step.planned.effect.op, result)?);
+            }
+            each(&step);
+            continue;
+        }
         let (action, sent_entry) = match planned.decision {
             Decision::Wait => (Action::Wait, None),
             Decision::Decline(seq) => (Action::Decline(seq), None),
@@ -400,6 +462,116 @@ mod tests {
             Some(Outcome::Applied {
                 receipt: b"island entry 12".to_vec()
             })
+        );
+    }
+
+    /// A ledger with no approvals, and a session that takes replies.
+    struct Session {
+        marks: Marks,
+        said: Vec<(VesselId, Hash, Vec<u8>)>,
+        answer: Delivered,
+    }
+
+    impl Ledger<String> for Session {
+        fn marks(&self) -> &Marks {
+            &self.marks
+        }
+        fn dispatch(
+            &mut self,
+            _: VesselId,
+            _: &Planned,
+            _: u64,
+        ) -> Result<Result<u64, String>, String> {
+            Err("a reply is never dispatched".to_owned())
+        }
+        fn say(&mut self, vessel: VesselId, planned: &Planned) -> Result<Delivered, String> {
+            self.said
+                .push((vessel, planned.key, planned.effect.request.clone()));
+            Ok(self.answer.clone())
+        }
+    }
+
+    struct Listed(Vec<OpenEffect>, Vec<(u64, Outcome)>);
+
+    impl Released<String> for Listed {
+        fn open(&mut self) -> Result<Vec<OpenEffect>, String> {
+            Ok(self.0.clone())
+        }
+        fn report(&mut self, op: u64, result: Outcome) -> Result<Option<String>, String> {
+            self.1.push((op, result));
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn a_reply_goes_to_the_session_without_approval() {
+        let mut say = effect(4, b"{\"task\":3,\"text\":\"hi\"}", false);
+        say.provider = SAY.to_owned();
+        let mut session = Session {
+            marks: Marks::default(),
+            said: Vec::new(),
+            answer: Delivered::At(12),
+        };
+        let mut warden = Listed(vec![say.clone()], Vec::new());
+        let mut actions = Vec::new();
+        serve(
+            &mut session,
+            &mut warden,
+            V,
+            &mut BTreeSet::new(),
+            false,
+            |step| actions.push(step.action.clone()),
+        )
+        .unwrap();
+        assert_eq!(actions, vec![Action::Delivered(12)]);
+        assert_eq!(
+            session.said,
+            vec![(V, action_key(&say), say.request.clone())]
+        );
+        assert_eq!(
+            warden.1,
+            vec![(
+                4,
+                Outcome::Applied {
+                    receipt: b"session event 12".to_vec()
+                }
+            )]
+        );
+
+        // Not taken now: nothing reported, it waits.
+        session.answer = Delivered::Unreachable("down".to_owned());
+        let mut warden = Listed(vec![say.clone()], Vec::new());
+        serve(
+            &mut session,
+            &mut warden,
+            V,
+            &mut BTreeSet::new(),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        assert!(warden.1.is_empty());
+
+        // Refused for good: reported not applied.
+        session.answer = Delivered::Refused("not a reply".to_owned());
+        let mut warden = Listed(vec![say], Vec::new());
+        serve(
+            &mut session,
+            &mut warden,
+            V,
+            &mut BTreeSet::new(),
+            false,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            warden.1,
+            vec![(
+                4,
+                Outcome::NotApplied {
+                    reason: "not a reply".to_owned()
+                }
+            )]
         );
     }
 

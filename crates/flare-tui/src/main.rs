@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use flare_core::session::{
-    ClientMessage, Event, EventKind, ProposeArgs, SeeArgs, ServerMessage, Verb, VerbCall,
-    VerbResult,
+    AgentText, ClientMessage, Event, EventKind, ProposeArgs, SayArgs, SeeArgs, ServerMessage,
+    UserMessage, Verb, VerbCall, VerbResult,
 };
 use flare_core::{hex, short};
 use flare_link::replica::{self, Replica, ReplicaError};
@@ -66,6 +66,10 @@ struct Args {
     /// This machine's replica, which `see` is checked against.
     #[arg(long, default_value_os_t = default_replica())]
     replica: PathBuf,
+    /// At the end of input, how long to wait for the agent's replies to
+    /// what this terminal said, in seconds.
+    #[arg(long, value_name = "SECONDS", default_value_t = 300)]
+    reply_wait: u64,
 }
 
 fn unhex32(text: &str) -> Option<[u8; 32]> {
@@ -111,6 +115,10 @@ struct Waiting {
     proposals: std::sync::Mutex<BTreeSet<String>>,
     answered: Notify,
     replayed: std::sync::atomic::AtomicBool,
+    /// Says of this terminal by the task their message became, waiting
+    /// for the agent's reply.
+    tasks: std::sync::Mutex<BTreeMap<u64, String>>,
+    says: std::sync::atomic::AtomicUsize,
 }
 
 impl Waiting {
@@ -154,6 +162,25 @@ impl Waiting {
             proposals.remove(id);
         }
         self.answered.notify_waiters();
+    }
+
+    /// A say of this terminal is now the task `task`.
+    fn said(&self, id: &str, task: u64) {
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.insert(task, id.to_owned());
+        }
+    }
+
+    /// The agent replied to `task`.
+    fn replied(&self, task: u64) {
+        let id = self
+            .tasks
+            .lock()
+            .ok()
+            .and_then(|mut tasks| tasks.remove(&task));
+        if let Some(id) = id {
+            self.done(&id);
+        }
     }
 
     fn empty(&self) -> bool {
@@ -204,6 +231,7 @@ async fn run(args: Args) -> Result<(), String> {
         session: args.session.clone(),
         after: args.after,
         client: args.client.clone(),
+        version: Some(2),
     };
     send(&mut outgoing, &attach).await?;
 
@@ -251,6 +279,18 @@ async fn run(args: Args) -> Result<(), String> {
                         }
                         if let Some(id) = command_id(&event) {
                             waiting.done(&id);
+                        }
+                        if event.kind == EventKind::UserMessage
+                            && let Ok(message) =
+                                serde_json::from_value::<UserMessage>(event.payload.clone())
+                        {
+                            waiting.said(&message.id, event.seq);
+                        }
+                        if event.kind == EventKind::AgentText
+                            && let Ok(reply) =
+                                serde_json::from_value::<AgentText>(event.payload.clone())
+                        {
+                            waiting.replied(reply.task);
                         }
                     }
                     Ok(ServerMessage::Refused { reason }) => {
@@ -323,6 +363,15 @@ async fn run(args: Args) -> Result<(), String> {
                 last = Some(signed);
                 (Verb::Propose, value)
             }
+            Typed::Say { text } => {
+                waiting
+                    .says
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (
+                    Verb::Say,
+                    serde_json::to_value(SayArgs { text }).map_err(|error| error.to_string())?,
+                )
+            }
             Typed::Again => match &last {
                 Some(signed) => (Verb::Propose, proposal(signed)?),
                 None => {
@@ -343,8 +392,14 @@ async fn run(args: Args) -> Result<(), String> {
         send(&mut outgoing, &command).await?;
     }
 
-    // Wait for what was asked, then leave; the session goes on.
-    let patience = tokio::time::sleep(Duration::from_secs(30));
+    // Wait for what was asked, then leave; the session goes on. A reply
+    // from the agent may take its time.
+    let patience = if waiting.says.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        Duration::from_secs(args.reply_wait)
+    } else {
+        Duration::from_secs(30)
+    };
+    let patience = tokio::time::sleep(patience);
     tokio::pin!(patience);
     while !waiting.empty() && !printer.is_finished() {
         tokio::select! {

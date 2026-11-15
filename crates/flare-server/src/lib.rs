@@ -5,6 +5,10 @@
 //! - [`Server`]: the sessions, the server's own verified replica of the
 //!   log, and its way to the broker.
 //! - [`router`]: the WebSocket at `/session`.
+//! - [`agent_router`]: the agent's side, on a Unix socket only the island
+//!   socket (tasks) and `island-sender` (replies) may use: the next
+//!   message said to the agent, and the agent's reply delivered once per
+//!   action key (docs/slice-2.md, "Actions and the sender").
 //!
 //! The server holds no writer key. A `propose` carries a submission its
 //! client signed; the server hands it to the broker as it is. A `see` is
@@ -27,8 +31,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use flare_core::session::{
-    ClientMessage, Event, EventKind, Place, Problem, ProposeArgs, RECENT, SESSION_VERSION, SeeArgs,
-    ServerMessage, Verb, VerbCall, VerbResult, valid_session,
+    AgentText, ClientMessage, Event, EventKind, MAX_REPLY, MAX_SAY, Place, Problem, ProposeArgs,
+    RECENT, SESSION_VERSION, SayArgs, SayRequest, SeeArgs, ServerMessage, Task, UserMessage, Verb,
+    VerbCall, VerbResult, valid_session,
 };
 use flare_core::{Overview, StreamView, content, hex, kind_name, short};
 use flare_link::{PullError, Replica, pull};
@@ -58,6 +63,9 @@ pub struct Config {
     pub hosts: Vec<String>,
     /// The clock.
     pub clock: Clock,
+    /// The session the agent listens in: `say` is taken there only, and
+    /// its tasks and replies are there.
+    pub agent_session: String,
 }
 
 /// One session: its events, and the channel new ones go out on.
@@ -99,6 +107,11 @@ impl Server {
     /// them. Their sessions stay on disk; they attach again later.
     pub fn stop(&self) {
         self.stopping.send_replace(true);
+    }
+
+    /// Whether [`Server::stop`] was called, as a channel to wait on.
+    pub fn stopped(&self) -> watch::Receiver<bool> {
+        self.stopping.subscribe()
     }
 
     /// Record an event in a session and send it to every attached client.
@@ -172,11 +185,20 @@ impl Server {
         &self,
         session: &str,
         client: &str,
+        version: u32,
         id: String,
         verb: Verb,
         args: serde_json::Value,
     ) {
+        if verb == Verb::Say {
+            let said = self.say(session, client, version, id.clone(), args);
+            if let Err(text) = said {
+                let _ = self.record(session, EventKind::Error, Problem { id: Some(id), text });
+            }
+            return;
+        }
         let outcome = match verb {
+            Verb::Say => unreachable!("handled above"),
             Verb::See => match serde_json::from_value::<SeeArgs>(args) {
                 Ok(args) => {
                     let what = match &args.stream {
@@ -232,6 +254,108 @@ impl Server {
             Work::Propose(signed) => self.propose(id, &signed.0, &signed.1).await,
         };
         let _ = self.record(session, EventKind::VerbResult, result);
+    }
+
+    /// `say`: a message for the agent, recorded as a `user_message`. Its
+    /// place is the task's id; there is no call or result, the agent's
+    /// reply is the answer.
+    fn say(
+        &self,
+        session: &str,
+        client: &str,
+        version: u32,
+        id: String,
+        args: serde_json::Value,
+    ) -> Result<(), String> {
+        if version < 2 {
+            return Err("say needs session protocol version 2; attach with version 2".to_owned());
+        }
+        if session != self.config.agent_session {
+            return Err(format!(
+                "the agent listens in session {}, not here",
+                self.config.agent_session
+            ));
+        }
+        let args: SayArgs =
+            serde_json::from_value(args).map_err(|error| format!("say: {error}"))?;
+        if args.text.trim().is_empty() {
+            return Err("say: nothing to say".to_owned());
+        }
+        if args.text.len() > MAX_SAY {
+            return Err(format!("say: at most {MAX_SAY} bytes"));
+        }
+        let message = UserMessage {
+            id,
+            client: client.to_owned(),
+            text: args.text,
+        };
+        self.record(session, EventKind::UserMessage, message)
+            .map(|_| ())
+    }
+
+    /// The first message said to the agent after `after` (every one, if
+    /// `None`), and a channel for the ones still to come.
+    fn next_task(
+        &self,
+        after: Option<u64>,
+    ) -> Result<(Option<Task>, broadcast::Receiver<Event>), String> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "the sessions are lost".to_owned())?;
+        let name = self.config.agent_session.clone();
+        let session = self.session(&mut sessions, &name)?;
+        let task = session
+            .store
+            .events()
+            .iter()
+            .filter(|event| after.is_none_or(|after| event.seq > after))
+            .find_map(task_of);
+        Ok((task, session.live.subscribe()))
+    }
+
+    /// Deliver the agent's reply once: the event already recorded for its
+    /// key, or a new `agent_text`.
+    fn deliver(&self, vessel: &str, key: &str, request: &str) -> Result<u64, Undeliverable> {
+        let said: SayRequest = serde_json::from_str(request).map_err(|error| {
+            Undeliverable::Malformed(format!("not a flare.say request: {error}"))
+        })?;
+        if said.text.len() > MAX_REPLY {
+            return Err(Undeliverable::Malformed(format!(
+                "a reply is at most {MAX_REPLY} bytes"
+            )));
+        }
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Undeliverable::Down("the sessions are lost".to_owned()))?;
+        let name = self.config.agent_session.clone();
+        let session = self
+            .session(&mut sessions, &name)
+            .map_err(Undeliverable::Down)?;
+        let seen = session.store.events().iter().find(|event| {
+            event.kind == EventKind::AgentText
+                && serde_json::from_value::<AgentText>(event.payload.clone())
+                    .is_ok_and(|text| text.key == key)
+        });
+        if let Some(event) = seen {
+            return Ok(event.seq);
+        }
+        let payload = serde_json::to_value(AgentText {
+            task: said.task,
+            text: said.text,
+            vessel: vessel.to_owned(),
+            key: key.to_owned(),
+        })
+        .map_err(|error| Undeliverable::Down(error.to_string()))?;
+        let event = session
+            .store
+            .append((self.config.clock)(), EventKind::AgentText, payload)
+            .map_err(|error| {
+                Undeliverable::Down(format!("{}: {error}", session.store.path().display()))
+            })?;
+        let _ = session.live.send(event.clone());
+        Ok(event.seq)
     }
 
     /// `see`, from the replica, pulled first.
@@ -419,12 +543,18 @@ async fn attached(server: Arc<Server>, mut socket: WebSocket) {
             _ => return,
         }
     };
-    let (session, after, client) = match serde_json::from_str::<ClientMessage>(&first) {
+    let (session, after, client, version) = match serde_json::from_str::<ClientMessage>(&first) {
         Ok(ClientMessage::Attach {
             session,
             after,
             client,
-        }) => (session, after, client),
+            version,
+        }) => (
+            session,
+            after,
+            client,
+            version.unwrap_or(1).clamp(1, SESSION_VERSION),
+        ),
         Ok(_) => return refuse(socket, "attach first".to_owned()).await,
         Err(error) => {
             return refuse(socket, format!("not a message of this protocol: {error}")).await;
@@ -449,7 +579,7 @@ async fn attached(server: Arc<Server>, mut socket: WebSocket) {
     let attached = ServerMessage::Attached {
         session: session.clone(),
         next,
-        version: SESSION_VERSION,
+        version,
     };
     if !send(&mut socket, &attached).await {
         return;
@@ -469,7 +599,9 @@ async fn attached(server: Arc<Server>, mut socket: WebSocket) {
         let (server, session, client) = (server.clone(), session.clone(), client.clone());
         tokio::spawn(async move {
             while let Some((id, verb, args)) = commands.recv().await {
-                server.command(&session, &client, id, verb, args).await;
+                server
+                    .command(&session, &client, version, id, verb, args)
+                    .await;
             }
         })
     };
@@ -518,5 +650,169 @@ async fn attached(server: Arc<Server>, mut socket: WebSocket) {
                 }
             },
         }
+    }
+}
+
+/// A `user_message` event as a task.
+fn task_of(event: &Event) -> Option<Task> {
+    if event.kind != EventKind::UserMessage {
+        return None;
+    }
+    let message: UserMessage = serde_json::from_value(event.payload.clone()).ok()?;
+    Some(Task {
+        id: event.seq,
+        at: event.at,
+        client: message.client,
+        text: message.text,
+    })
+}
+
+/// Why a reply could not be delivered.
+#[derive(Debug)]
+enum Undeliverable {
+    /// The request is not one: it never will be.
+    Malformed(String),
+    /// The server could not record it now: try again.
+    Down(String),
+}
+
+/// The longest a task request may wait for a message, in seconds.
+pub const MAX_TASK_WAIT: u64 = 60;
+
+/// Who may use the agent socket, by uid.
+#[derive(Clone, Copy, Debug)]
+pub struct AgentPeers {
+    /// May take tasks: the island socket's user.
+    pub tasks: u32,
+    /// May deliver replies: `island-sender`, root.
+    pub replies: u32,
+}
+
+/// A connection's peer on the agent socket.
+#[derive(Clone, Copy, Debug)]
+pub struct Peer {
+    /// Its uid, as the kernel says.
+    pub uid: Option<u32>,
+}
+
+impl
+    axum::extract::connect_info::Connected<
+        axum::serve::IncomingStream<'_, tokio::net::UnixListener>,
+    > for Peer
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
+        Self {
+            uid: stream.io().peer_cred().ok().map(|cred| cred.uid()),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Agent {
+    server: Arc<Server>,
+    peers: AgentPeers,
+}
+
+/// The agent socket's routes:
+///
+/// | Request | Who | Answer |
+/// | --- | --- | --- |
+/// | `GET /task?after=N&wait=S` | [`AgentPeers::tasks`] | the next [`Task`] after N, waiting up to S seconds; 204: none |
+/// | `POST /say` `{ vessel, key, request }` | [`AgentPeers::replies`] | `{ event }`: the `agent_text`, recorded once per key |
+pub fn agent_router(server: Arc<Server>, peers: AgentPeers) -> Router {
+    Router::new()
+        .route("/task", get(agent_task))
+        .route("/say", axum::routing::post(agent_say))
+        .with_state(Agent { server, peers })
+}
+
+#[derive(serde::Deserialize)]
+struct TaskQuery {
+    after: Option<u64>,
+    #[serde(default)]
+    wait: u64,
+}
+
+async fn agent_task(
+    State(agent): State<Agent>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<Peer>,
+    axum::extract::Query(query): axum::extract::Query<TaskQuery>,
+) -> Response {
+    if peer.uid != Some(agent.peers.tasks) {
+        return (StatusCode::FORBIDDEN, "tasks are for the island socket\n").into_response();
+    }
+    let (found, mut live) = match agent.server.next_task(query.after) {
+        Ok(next) => next,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+    };
+    if let Some(task) = found {
+        return axum::Json(task).into_response();
+    }
+    let wait = std::time::Duration::from_secs(query.wait.min(MAX_TASK_WAIT));
+    let mut stopping = agent.server.stopping.subscribe();
+    let waited = tokio::time::timeout(wait, async {
+        loop {
+            tokio::select! {
+                () = async { let _ = stopping.wait_for(|stop| *stop).await; } => return None,
+                event = live.recv() => match event {
+                    Ok(event) => {
+                        let wanted = query.after.is_none_or(|after| event.seq > after);
+                        if wanted && let Some(task) = task_of(&event)
+                        {
+                            return Some(task);
+                        }
+                    }
+                    // Missed some: the store has them.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        return agent.server.next_task(query.after).ok().and_then(|(task, _)| task);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                },
+            }
+        }
+    })
+    .await;
+    match waited {
+        Ok(Some(task)) => axum::Json(task).into_response(),
+        _ => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Delivery {
+    vessel: String,
+    key: String,
+    request: String,
+}
+
+async fn agent_say(
+    State(agent): State<Agent>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<Peer>,
+    axum::Json(delivery): axum::Json<Delivery>,
+) -> Response {
+    if peer.uid != Some(agent.peers.replies) {
+        return (
+            StatusCode::FORBIDDEN,
+            "replies are delivered by island-sender\n",
+        )
+            .into_response();
+    }
+    let hex_of = |text: &str, bytes: usize| {
+        text.len() == 2 * bytes && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+    };
+    if !hex_of(&delivery.vessel, 16) || !hex_of(&delivery.key, 32) {
+        return (StatusCode::BAD_REQUEST, "vessel is 32 hex digits, key 64\n").into_response();
+    }
+    match agent.server.deliver(
+        &delivery.vessel.to_ascii_lowercase(),
+        &delivery.key.to_ascii_lowercase(),
+        &delivery.request,
+    ) {
+        Ok(event) => axum::Json(serde_json::json!({ "event": event })).into_response(),
+        Err(Undeliverable::Malformed(why)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, why).into_response()
+        }
+        Err(Undeliverable::Down(why)) => (StatusCode::SERVICE_UNAVAILABLE, why).into_response(),
     }
 }

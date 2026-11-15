@@ -8,12 +8,18 @@
 //! text message.
 //!
 //! ```text
-//! client → server   attach   { session, after?, client }
-//! client → server   command  { id, verb: "see" | "propose", args }
-//! server → client   attached { session, next }
+//! client → server   attach   { session, after?, client, version? }
+//! client → server   command  { id, verb: "see" | "propose" | "say", args }
+//! server → client   attached { session, next, version }
 //! server → client   event    { seq, at, kind, payload }
 //!    kinds: user_message, agent_text, verb_call, verb_result, error
 //! ```
+//!
+//! Version 2 (docs/slice-2.md, "Session protocol, version 2") adds `say`:
+//! a message for the agent, recorded as a `user_message` whose place is
+//! the task's id. The agent's reply comes back as an `agent_text` naming
+//! that task. A client says which version it speaks when it attaches;
+//! the server answers with the version it will use.
 //!
 //! A `propose` carries a submission the client signed with its own key;
 //! the server only relays it to the broker. A `see` is answered from the
@@ -22,8 +28,15 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The version of this protocol.
-pub const SESSION_VERSION: u32 = 1;
+/// The newest version of this protocol.
+pub const SESSION_VERSION: u32 = 2;
+
+/// The longest message a `say` may carry, in bytes.
+pub const MAX_SAY: usize = 64 * 1024;
+
+/// The longest reply the agent may send, in bytes (docs/slice-2.md,
+/// "Actions and the sender": `flare.say` is at most 256 KiB).
+pub const MAX_REPLY: usize = 256 * 1024;
 
 /// How many events an attach without a cursor replays.
 pub const RECENT: u64 = 20;
@@ -50,6 +63,9 @@ pub enum ClientMessage {
         after: Option<u64>,
         /// What the client calls itself in the session: `laptop`, `ssh`.
         client: String,
+        /// The protocol version it speaks. Left out: 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u32>,
     },
     /// Ask the server to do something. Its call and its result become
     /// events every attached client sees.
@@ -71,6 +87,70 @@ pub enum Verb {
     See,
     /// Hand a signed submission to the broker.
     Propose,
+    /// Tell the agent something (version 2).
+    Say,
+}
+
+/// Arguments of `say`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SayArgs {
+    /// The message, at most [`MAX_SAY`] bytes.
+    pub text: String,
+}
+
+/// The payload of a `user_message`: something said to the agent. Its
+/// event's place is the task's id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserMessage {
+    /// The command's id.
+    pub id: String,
+    /// The client that said it.
+    pub client: String,
+    /// What was said.
+    pub text: String,
+}
+
+/// The payload of an `agent_text`: the agent's reply, delivered by
+/// `island-sender` as the action `flare.say`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentText {
+    /// The task it answers: the place of its `user_message`.
+    pub task: u64,
+    /// The reply.
+    pub text: String,
+    /// The Vessel that said it, in hex.
+    pub vessel: String,
+    /// The action's key, in hex: the session keeps one event per key.
+    pub key: String,
+}
+
+/// The request bytes of the action `flare.say`, as the agent declares it
+/// and `flare-server` reads it: JSON, at most [`MAX_REPLY`] bytes of text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SayRequest {
+    /// The task it answers.
+    pub task: u64,
+    /// The reply.
+    pub text: String,
+}
+
+/// A task as `flare-server` hands it to the island socket, and the
+/// island socket to the agent: the next `user_message` after a cursor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Task {
+    /// Its id: the place of its `user_message`.
+    pub id: u64,
+    /// When it was said, in microseconds since the epoch.
+    pub at: u64,
+    /// The client that said it.
+    pub client: String,
+    /// What was said.
+    pub text: String,
 }
 
 /// Arguments of `see`.
@@ -137,9 +217,9 @@ pub struct Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
-    /// A person said something. Not used in slice 1.
+    /// A person said something to the agent: [`UserMessage`].
     UserMessage,
-    /// The agent said something. Not used in slice 1.
+    /// The agent replied: [`AgentText`].
     AgentText,
     /// A client asked for a verb.
     VerbCall,

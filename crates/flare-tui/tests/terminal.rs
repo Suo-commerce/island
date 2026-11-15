@@ -39,6 +39,7 @@ fn start() -> Running {
             data: dir.path().join("server"),
             hosts: ["localhost", "127.0.0.1"].map(str::to_owned).to_vec(),
             clock: tick,
+            agent_session: "main".to_owned(),
         })
         .expect("the server starts");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

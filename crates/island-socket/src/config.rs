@@ -11,6 +11,7 @@
 //! root = "a3d2…"                      # the pinned root public key, hex
 //! key = "/etc/island-socket/socket.key"
 //! access_every_secs = 30
+//! tasks = "/run/flare-server/agent.sock"   # flare-server's agent socket
 //! default = "melious"
 //!
 //! [provider.melious]
@@ -50,10 +51,17 @@ pub struct Config {
     /// The providers, by name.
     #[serde(default)]
     pub provider: BTreeMap<String, Provider>,
+    /// `flare-server`'s agent socket, where tasks come from.
+    #[serde(default = "agent_socket")]
+    pub tasks: PathBuf,
 }
 
 fn thirty() -> u64 {
     30
+}
+
+fn agent_socket() -> PathBuf {
+    PathBuf::from("/run/flare-server/agent.sock")
 }
 
 /// One OpenAI-compatible endpoint.

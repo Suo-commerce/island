@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use flare_server::{Config, Server, router};
+use flare_server::{AgentPeers, Config, Peer, Server, agent_router, router};
 use island_core::PublicKey;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
@@ -33,6 +33,37 @@ struct Args {
     /// once.
     #[arg(long, value_name = "HOST")]
     allow_host: Vec<String>,
+    /// The session the agent listens in.
+    #[arg(long, default_value = "main")]
+    agent_session: String,
+    /// Serve the agent's side on this Unix socket: tasks for the island
+    /// socket, replies from island-sender.
+    #[arg(long, value_name = "PATH")]
+    agent_socket: Option<PathBuf>,
+    /// The user that may take tasks: the island socket's.
+    #[arg(long, value_name = "USER", default_value = "island-socket")]
+    task_reader: String,
+    /// The user that may deliver the agent's replies: island-sender's.
+    #[arg(long, value_name = "USER", default_value = "root")]
+    reply_sender: String,
+}
+
+/// A user's uid, from /etc/passwd.
+fn uid_of(user: &str) -> Result<u32, String> {
+    if let Ok(uid) = user.parse() {
+        return Ok(uid);
+    }
+    let passwd =
+        std::fs::read_to_string("/etc/passwd").map_err(|error| format!("/etc/passwd: {error}"))?;
+    passwd
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split(':');
+            (fields.next() == Some(user))
+                .then(|| fields.nth(1)?.parse().ok())
+                .flatten()
+        })
+        .ok_or_else(|| format!("no user {user} in /etc/passwd"))
 }
 
 fn parse_public_key(text: &str) -> Result<PublicKey, String> {
@@ -116,12 +147,55 @@ async fn run(args: Args) -> Result<(), String> {
         data: args.data.clone(),
         hosts: hosts.clone(),
         clock: now,
+        agent_session: args.agent_session.clone(),
     })?;
+    let agent = match &args.agent_socket {
+        None => None,
+        Some(path) => {
+            let peers = AgentPeers {
+                tasks: uid_of(&args.task_reader)?,
+                replies: uid_of(&args.reply_sender)?,
+            };
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("{}: {error}", path.display())),
+            }
+            let listener = tokio::net::UnixListener::bind(path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            // Anyone may connect; the peer's uid decides what it gets.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            Some((listener, peers))
+        }
+    };
 
     println!("flare-server  ws://{address}/session");
     println!("data          {}", args.data.display());
     println!("broker        {}", args.broker);
     println!("answers to    {}", hosts.join(", "));
+    println!("agent         session {}", args.agent_session);
+    if let (Some(path), Some((_, peers))) = (&args.agent_socket, &agent) {
+        println!(
+            "agent socket  {} (tasks: uid {}, replies: uid {})",
+            path.display(),
+            peers.tasks,
+            peers.replies
+        );
+    }
+    if let Some((listener, peers)) = agent {
+        let app = agent_router(server.clone(), peers).into_make_service_with_connect_info::<Peer>();
+        let stopping = server.clone();
+        tokio::spawn(async move {
+            let mut stopped = stopping.stopped();
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = stopped.wait_for(|stop| *stop).await;
+                })
+                .await;
+        });
+    }
 
     let mut terminate =
         signal(SignalKind::terminate()).map_err(|error| format!("no signal handler: {error}"))?;
