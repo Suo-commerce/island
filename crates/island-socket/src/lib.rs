@@ -11,12 +11,12 @@ pub mod access;
 pub mod callers;
 pub mod config;
 pub mod server;
+pub mod upstream;
 pub mod usage;
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 /// Everything `serve` needs, read and checked before the socket opens.
 pub fn shared(config: config::Config) -> Result<Arc<server::Shared>, String> {
@@ -35,12 +35,7 @@ pub fn shared(config: config::Config) -> Result<Arc<server::Shared>, String> {
             keys.insert(name.clone(), key.trim().to_owned());
         }
     }
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        // Between two pieces of a streamed answer, not for the whole.
-        .read_timeout(Duration::from_secs(300))
-        .build()
-        .map_err(|error| format!("the HTTP client: {error}"))?;
+    let client = upstream::Client::new()?;
     Ok(Arc::new(server::Shared {
         warden_config: config.warden_config.clone(),
         config,

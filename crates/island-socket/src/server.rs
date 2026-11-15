@@ -45,7 +45,7 @@ pub struct Shared {
     /// Calls not yet in an `access` entry.
     pub batches: Arc<tokio::sync::Mutex<Batches>>,
     /// The client to the providers.
-    pub client: reqwest::Client,
+    pub client: crate::upstream::Client,
     /// The Warden config's path, for re-reading.
     pub warden_config: PathBuf,
 }
@@ -295,15 +295,8 @@ async fn chat(
         "{}/chat/completions",
         provider.base_url.trim_end_matches('/')
     );
-    let mut call = shared
-        .client
-        .post(&url)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(forwarded);
-    if let Some(key) = shared.keys.get(&provider_name) {
-        call = call.bearer_auth(key);
-    }
-    let answer = match call.send().await {
+    let key = shared.keys.get(&provider_name).map(String::as_str);
+    let answer = match shared.client.post_json(&url, key, forwarded).await {
         Ok(answer) => answer,
         Err(why) => {
             // A call made and not answered counts; the agent gets, and
@@ -321,20 +314,18 @@ async fn chat(
             return Response::from_parts(parts, Body::from(bytes));
         }
     };
-    let status = StatusCode::from_u16(answer.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let status = answer.status;
     let mut headers = HeaderMap::new();
-    if let Some(kind) = answer.headers().get(reqwest::header::CONTENT_TYPE)
-        && let Ok(kind) = HeaderValue::from_bytes(kind.as_bytes())
-    {
-        headers.insert(header::CONTENT_TYPE, kind);
+    if let Some(kind) = answer.headers.get(header::CONTENT_TYPE) {
+        headers.insert(header::CONTENT_TYPE, kind.clone());
     }
     headers.insert(
         "x-island-provider",
         HeaderValue::from_str(&provider_name).unwrap_or(HeaderValue::from_static("?")),
     );
     let accounting = Arc::new(Mutex::new(accounting));
-    let stream = answer.bytes_stream().map(move |chunk| {
-        let chunk = chunk.map_err(std::io::Error::other)?;
+    let stream = answer.body.map(move |chunk| {
+        let chunk = chunk?;
         accounting.lock().expect("not poisoned").saw(&chunk);
         Ok::<Bytes, std::io::Error>(chunk)
     });

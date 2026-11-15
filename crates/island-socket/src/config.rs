@@ -11,12 +11,12 @@
 //! root = "a3d2…"                      # the pinned root public key, hex
 //! key = "/etc/island-socket/socket.key"
 //! access_every_secs = 30
-//! default = "local"
+//! default = "melious"
 //!
-//! [provider.local]
-//! base_url = "http://127.0.0.1:8080/v1"
-//! models = ["qwen3.6-35b-a3b"]
-//! key_file = "/etc/island-socket/local.key"   # optional
+//! [provider.melious]
+//! base_url = "https://api.melious.ai/v1"
+//! models = ["qwen3.8-27b"]
+//! key_file = "/etc/island-socket/melious.key"   # optional
 //! budget = { calls = 2000, bytes = 500_000_000 }
 //! ```
 
@@ -116,16 +116,31 @@ impl Config {
             if provider.models.is_empty() {
                 return Err(format!("provider {name}: no models"));
             }
-            if let Some(rest) = provider.base_url.strip_prefix("https://") {
-                // reqwest is built without TLS in this workspace; a hosted
-                // provider comes with it (docs/slice-2.md, step 3).
+            let Some(host) = provider
+                .base_url
+                .strip_prefix("https://")
+                .or_else(|| provider.base_url.strip_prefix("http://"))
+                .map(|rest| rest.split(['/', ':']).next().unwrap_or_default())
+            else {
                 return Err(format!(
-                    "provider {name}: https (https://{rest}) needs TLS, which island-socket \
-                     is not built with yet"
+                    "provider {name}: base_url is neither https:// nor http://"
                 ));
+            };
+            if host.is_empty() {
+                return Err(format!("provider {name}: base_url names no host"));
             }
-            if !provider.base_url.starts_with("http://") {
-                return Err(format!("provider {name}: base_url is not http://"));
+            // A key goes in the clear over http://, so only to this machine
+            // or over wg-island, which is encrypted itself.
+            if provider.key_file.is_some()
+                && provider.base_url.starts_with("http://")
+                && !(host == "localhost"
+                    || host.starts_with("127.")
+                    || host.starts_with("10.77.0."))
+            {
+                return Err(format!(
+                    "provider {name}: a key_file over http:// to {host} would cross the \
+                     internet in the clear; use https://, or a host on this machine or wg-island"
+                ));
             }
             for model in &provider.models {
                 if let Some(other) = seen.insert(model, name) {
@@ -210,6 +225,21 @@ mod tests {
     }
 
     #[test]
+    fn a_hosted_provider_takes_https_and_a_key() {
+        let config = Config::parse(&text(
+            "[provider.local]\nbase_url = \"https://api.melious.ai/v1\"\nmodels = [\"qwen3.8-27b\"]\n\
+             key_file = \"/etc/island-socket/melious.key\"\nbudget = { calls = 1, bytes = 1 }\n\
+             [provider.gpu]\nbase_url = \"http://10.77.0.4:8000/v1\"\nmodels = [\"c\"]\n\
+             key_file = \"/k\"\nbudget = { calls = 1, bytes = 1 }\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            config.route(None).map(|(p, _, m)| (p, m)),
+            Some(("local", "qwen3.8-27b"))
+        );
+    }
+
+    #[test]
     fn a_bad_file_is_refused_with_its_reason() {
         let bad = |providers: &str, want: &str| {
             let error = Config::parse(&text(providers)).unwrap_err();
@@ -217,8 +247,13 @@ mod tests {
         };
         bad("", "`default` names no provider");
         bad(
-            "[provider.local]\nbase_url = \"https://api.example.com/v1\"\nmodels = [\"a\"]\nbudget = { calls = 1, bytes = 1 }\n",
-            "needs TLS",
+            "[provider.local]\nbase_url = \"ftp://x/v1\"\nmodels = [\"a\"]\nbudget = { calls = 1, bytes = 1 }\n",
+            "neither https:// nor http://",
+        );
+        bad(
+            "[provider.local]\nbase_url = \"http://api.example.com/v1\"\nmodels = [\"a\"]\n\
+             key_file = \"/k\"\nbudget = { calls = 1, bytes = 1 }\n",
+            "in the clear",
         );
         bad(
             "[provider.local]\nbase_url = \"http://x/v1\"\nmodels = []\nbudget = { calls = 1, bytes = 1 }\n",

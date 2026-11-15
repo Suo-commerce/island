@@ -140,7 +140,8 @@ kill_runc() {   # containers left by a killed Warden
 
 BG_PIDS=()
 cleanup() {
-    for p in "${BG_PIDS[@]}"; do kill -KILL "$p" 2>/dev/null || true; done
+    # disown first, so bash does not report each as "Killed".
+    for p in "${BG_PIDS[@]}"; do disown "$p" 2>/dev/null || true; kill -KILL "$p" 2>/dev/null || true; done
     [ -n "${ECHO_PID:-}" ] && kill "$ECHO_PID" 2>/dev/null || true
     [ -n "${COORD_PID:-}" ] && kill "$COORD_PID" 2>/dev/null || true
     kill_runc

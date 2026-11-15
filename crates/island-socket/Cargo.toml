@@ -21,7 +21,15 @@ axum = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true }
 futures-util = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
+# The providers are called with hyper and hyper-rustls, not reqwest: TLS on
+# reqwest would reach every crate built with this one (Cargo unifies
+# features), and its rustls without a provider panics there. rustls with
+# ring as its crypto; the roots are the system's store, read at start.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "native-tokio"] }
+http-body-util = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "signal", "fs"] }

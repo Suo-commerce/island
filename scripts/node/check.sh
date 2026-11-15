@@ -13,9 +13,11 @@
 #                                  flare-home started again at its last Seal,
 #                                  and nothing was proposed or sent twice
 #
-#   scripts/node/check.sh think    the same, then one model call through the
-#                                  island socket as flare-home, and its
-#                                  `access` entry in the log (within 45 s)
+#   scripts/node/check.sh think [MODEL]
+#                                  the same, then one model call through the
+#                                  island socket as flare-home (MODEL, or the
+#                                  config's default), and its `access` entry
+#                                  in the log (within 45 s)
 #
 # After a reboot, the plain check is the reboot test: a reboot is a crash.
 #
@@ -159,10 +161,16 @@ case ${1:-} in
         state now
         vessel=$(basename "$(ls /run/taso/run/senders/*.sock 2>/dev/null | head -1)" .sock)
         before=$("$CLI" tail --broker "$BROKER" --root "$ROOT" -n 1000 | grep -c " access .*vessel $vessel " || true)
-        answer=$(island /v1/chat/completions -H 'content-type: application/json' \
-            -d '{"messages":[{"role":"user","content":"hello from check.sh"}]}' || true)
+        body=$(python3 -c 'import json, sys
+d = {"messages": [{"role": "user", "content": "hello from check.sh: answer in one short sentence"}]}
+if sys.argv[1]: d["model"] = sys.argv[1]
+print(json.dumps(d))' "${2:-}")
+        answer=$(island /v1/chat/completions --max-time 120 -H 'content-type: application/json' -d "$body" || true)
         check "think: a model answers flare-home through the island socket" \
-            "$(python3 -c 'import json, sys; d = json.loads(sys.argv[1]); print("choices" in d)' "$answer" 2>/dev/null || echo "$answer" | head -c 200)" True
+            "$(python3 -c 'import json, sys; d = json.loads(sys.argv[1]); print("choices" in d)' "$answer" 2>/dev/null || echo "$answer" | head -c 300)" True
+        note "think: $(python3 -c 'import json, sys
+d = json.loads(sys.argv[1])
+print(d.get("model"), "said:", repr(d["choices"][0]["message"]["content"][:160]))' "$answer" 2>/dev/null || true)"
         accessed() { [ "$("$CLI" tail --broker "$BROKER" --root "$ROOT" -n 1000 | grep -c " access .*vessel $vessel " || true)" -gt "$before" ]; }
         wait_until 45 accessed || true
         check "think: the call is in the log as an access entry for flare-home" \

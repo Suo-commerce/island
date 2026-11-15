@@ -333,10 +333,39 @@ OpenAI-compatible API (`base_url` ending before `/chat/completions`), its
 daily `budget` per Vessel in calls and bytes. `default` names the provider
 used when the agent names no model. After an edit,
 `systemctl restart island-socket`; the agent and its Vessel are untouched.
-Only `http://` providers for now: on the server, or on `wg-island`. A
-hosted `https://` provider needs TLS in `island-socket`, which comes with
-the first one. A provider over the internet on a port other than 443 or
-80 also needs an incoming rule in UpCloud's firewall for its replies.
+`https://` providers are reached with rustls (ring), checked against the
+server's own certificate store (`ca-certificates`). A `key_file` over
+plain `http://` is refused unless the host is on the server (`127.*`,
+`localhost`) or on `wg-island` (`10.77.0.*`): the key would otherwise
+cross the internet in the clear. UpCloud's firewall lets in replies from
+TCP 443 and 80 only; a provider over the internet on another port needs
+one more incoming rule there.
+
+**Melious** (`https://api.melious.ai/v1`, OpenAI-compatible, a European
+inference API for open-weight models) is the first real provider. Its
+key, `sk-mel-…`, comes from melious.ai/account/api/keys and is shown once;
+put it on the server without it touching the shell's history or the
+screen:
+
+```sh
+install -m 0600 -o island-socket -g island-socket /dev/null /etc/island-socket/melious.key
+read -rs MELKEY && printf '%s' "$MELKEY" > /etc/island-socket/melious.key && unset MELKEY
+```
+
+Then in `/etc/island-socket/config.toml`, `default = "melious"` and:
+
+```toml
+[provider.melious]
+base_url = "https://api.melious.ai/v1"
+models = ["qwen3.8-27b"]
+key_file = "/etc/island-socket/melious.key"
+budget = { calls = 500, bytes = 200000000 }
+```
+
+The stub provider can stay, under its own model name `stub`
+(`scripts/node/check.sh think stub`). Melious lists its models at
+`GET https://api.melious.ai/v1/models` with the key; another one is one
+more name in `models`.
 
 A new agents' image (`install.sh` again) replaces the socket's directory:
 `island-socket` notices within five seconds, exits, and is started again

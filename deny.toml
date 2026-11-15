@@ -9,6 +9,10 @@
 
 [graph]
 all-features = true
+# Island runs on Linux only (the server and the laptop); crates other
+# targets would pull in (wasm32 roots, Windows and macOS bindings) are not
+# built, so they are not judged.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 
 [advisories]
 # Every unmaintained or unsound crate fails, transitive ones too, unless it
@@ -25,6 +29,7 @@ allow = [
     "BSD-3-Clause",   # ed25519-dalek, curve25519-dalek, subtle
     "Unicode-3.0",    # unicode-ident (Unicode data tables), build-time only
     "MIT",            # strsim, via clap
+    "ISC",            # ring, rustls-webpki, untrusted: island-socket's TLS
 ]
 confidence-threshold = 0.8
 
