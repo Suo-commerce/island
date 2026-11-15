@@ -108,7 +108,12 @@ wait_until() {   # wait_until <seconds> <command...>: until the command succeeds
 }
 all_active() { for u in "${UNITS[@]}"; do systemctl is-active -q "$u" || return 1; done; }
 started() { [ "$(agent 'bool(S)')" = true ]; }
-new_start() { [ "$(agent 'S[0]["start"] if S else ""')" != "$1" ]; }
+# A start other than $1, read from the log: while the block log comes back
+# the dataset is not mounted, and "no log" is not a new start.
+new_start() {
+    local now; now=$(agent 'S[0]["start"] if S else ""')
+    [ -n "$now" ] && [ "$now" != no-log ] && [ "$now" != "$1" ]
+}
 
 dispatches() {   # dispatch entries for flare-home in the log
     local v; v=$(basename "$(ls /run/taso/run/senders/*.sock 2>/dev/null | head -1)" .sock)
