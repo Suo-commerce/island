@@ -92,7 +92,8 @@ copy_with_libs() {   # $1 host file -> $2 path in the image, with its libraries
 # Ubuntu's coreutils is) stays a link to one copy of its target.
 copy_command() {   # $1 command name
     local path real
-    path=$(command -v "$1") || return 0
+    # The file, not a shell builtin of the same name (echo, printf).
+    path=$(type -P "$1") || return 0
     real=$(readlink -f "$path")
     [ -e "$NEW$real" ] || copy_with_libs "$real" "$real"
     if [ "$real" != "/usr/bin/$1" ]; then
