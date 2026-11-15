@@ -145,8 +145,12 @@ async fn ask(socket: &Path, method: &str, path: &str, body: &[u8]) -> (u16, Vec<
          content-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     );
-    stream.write_all(head.as_bytes()).await.unwrap();
-    stream.write_all(body).await.unwrap();
+    // One write, and a refusal may come before all of it is read: the
+    // socket answers a stranger at once and closes, so a write that finds
+    // it closed is not a failure; the answer is what counts.
+    let mut request = head.into_bytes();
+    request.extend_from_slice(body);
+    let _ = stream.write_all(&request).await;
     let mut raw = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
         .await
