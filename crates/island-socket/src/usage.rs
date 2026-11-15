@@ -148,14 +148,22 @@ impl Usage {
             .unwrap_or_default()
     }
 
-    /// A fork slot of `prime` has called.
-    pub fn saw_fork(&mut self, prime: &str, slot: u32) {
-        if self
-            .forks_seen
-            .entry(prime.to_owned())
-            .or_default()
-            .insert(slot)
-        {
+    /// A fork slot of `prime` has called. Taso gives a child the first
+    /// of the prime's fork slots no child was ever born in
+    /// (`free_fork_slot`, in the config's order), so a child in one slot
+    /// means every slot before it in `fork_slots` is used too, whether its
+    /// child ever called or not.
+    pub fn saw_fork(&mut self, prime: &str, slot: u32, fork_slots: &[u32]) {
+        let seen = self.forks_seen.entry(prime.to_owned()).or_default();
+        let upto = fork_slots
+            .iter()
+            .position(|&s| s == slot)
+            .map_or(0, |place| place + 1);
+        let mut changed = seen.insert(slot);
+        for &before in &fork_slots[..upto] {
+            changed |= seen.insert(before);
+        }
+        if changed {
             self.save();
         }
     }
@@ -229,12 +237,26 @@ mod tests {
         let mut usage = Usage::load(dir.path(), 10).unwrap();
         usage.spend(10, V, "local", 5);
         usage.spend(10, V, "local", 5);
-        usage.saw_fork("flare-home", 11);
+        usage.saw_fork("flare-home", 11, &[11, 12, 13]);
         let again = Usage::load(dir.path(), 10).unwrap();
         assert_eq!(again.spent(V, "local").calls, 2);
         assert_eq!(again.forks_seen("flare-home"), 1);
         let tomorrow = Usage::load(dir.path(), 11).unwrap();
         assert_eq!(tomorrow.spent(V, "local").calls, 0);
         assert_eq!(tomorrow.forks_seen("flare-home"), 1, "slots stay used");
+    }
+
+    #[test]
+    fn a_fork_in_a_slot_means_the_slots_before_it_are_used() {
+        // Taso gives the first slot never taken: the child in 13 was not
+        // the first, though the children in 11 and 12 never called.
+        let mut usage = Usage::in_memory(10);
+        usage.saw_fork("flare-home", 13, &[11, 12, 13, 14]);
+        assert_eq!(usage.forks_seen("flare-home"), 3);
+        usage.saw_fork("flare-home", 12, &[11, 12, 13, 14]);
+        assert_eq!(usage.forks_seen("flare-home"), 3);
+        // A slot the config no longer lists still counts for itself.
+        usage.saw_fork("flare-home", 99, &[11, 12, 13, 14]);
+        assert_eq!(usage.forks_seen("flare-home"), 4);
     }
 }

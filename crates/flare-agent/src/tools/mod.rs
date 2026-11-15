@@ -2,7 +2,9 @@
 //! `write`, `edit` and `bash` work in `/work` and leave the Vessel as
 //! nothing; `say` messages Jarmo, as the action `flare.say`; `verse`
 //! proposes a verse on the agent's own stream, as the action
-//! `island.verse`, which waits for his approval.
+//! `island.verse`, which waits for his approval; `fork` starts fork
+//! children on alternatives and `promote` adopts one (Taso's `Fork` and
+//! `Promote`, asked on the Field).
 //!
 //! The four file tools are ported from Pi's coding agent, with their
 //! descriptions and messages, so a model that knows Pi knows these.
@@ -124,10 +126,69 @@ Island log: one short entry saying what was decided, made, measured or answered.
 his approval; approved, it is written once, signed as you. You may write only to flare: a \
 verse for one of his projects you draft in your answer, and he writes it himself.";
 
+/// The description of `fork`.
+pub const FORK_DESCRIPTION: &str = "Try alternatives in fork children. Each task you give \
+starts one child: a copy of this Vessel, with your files and this conversation as they are \
+now, working on its task alone with the same tools. Nothing a child does reaches Jarmo or \
+your files: its messages and verses are held. This call ends your turn, waits until the \
+children are done, and returns each child's note saying what it made. Then either call \
+promote with one child's name, or carry on without promoting: any other tool call, or your \
+answer, gives the children up for good. A fork slot is used once and never comes back, and \
+there are few (the result says how many are left): fork only when comparing real \
+alternatives is worth it, usually two. Call it alone, as the last tool call of a message.";
+
+/// The description of `promote`.
+pub const PROMOTE_DESCRIPTION: &str = "Adopt one fork child, after fork returned its \
+note: its files replace yours, and the messages and verses it held become yours. Its answer \
+is sent to Jarmo as the reply to this task, and its verses wait for his approval. You are \
+started again on the child's files, so what you wrote since calling fork is lost, and the \
+other children are dropped.";
+
+/// The most children one `fork` may start.
+pub const MAX_CHILDREN: usize = 4;
+
+/// The longest task a child may be given, in bytes.
+pub const MAX_FORK_TASK: usize = 8 * 1024;
+
 /// The stream the agent's verses go to (docs/slice-2.md, decision D3).
 pub const OWN_STREAM: &str = "flare";
 
-/// Every tool, as the model sees them.
+/// The tools of an agent that may fork: [`specs`], and `fork` and
+/// `promote`. A fork child gets [`specs`]: it cannot fork.
+pub fn specs_with_forks() -> Vec<Spec> {
+    let mut specs = specs();
+    specs.push(Spec {
+        name: "fork",
+        description: FORK_DESCRIPTION.to_owned(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "maxItems": MAX_CHILDREN,
+                    "description": "One task per child: what that child should do, complete in itself"
+                }
+            },
+            "required": ["tasks"]
+        }),
+    });
+    specs.push(Spec {
+        name: "promote",
+        description: PROMOTE_DESCRIPTION.to_owned(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "child": { "type": "string", "description": "The child's name, as fork's result gave it" }
+            },
+            "required": ["child"]
+        }),
+    });
+    specs
+}
+
+/// The tools every agent has, as the model sees them.
 pub fn specs() -> Vec<Spec> {
     vec![
         Spec {

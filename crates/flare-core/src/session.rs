@@ -19,7 +19,9 @@
 //! a message for the agent, recorded as a `user_message` whose place is
 //! the task's id. The agent's reply comes back as an `agent_text` naming
 //! that task. A client says which version it speaks when it attaches;
-//! the server answers with the version it will use.
+//! the server answers with the version it will use. Its other events:
+//! `action_waiting` and `action_settled` for an action that needs Jarmo's
+//! answer, and `fork_note` for what a fork child of the agent made.
 //!
 //! A `propose` carries a submission the client signed with its own key;
 //! the server only relays it to the broker. A `see` is answered from the
@@ -218,6 +220,25 @@ pub struct ActionReport {
     pub why: Option<String>,
 }
 
+/// The longest note a fork child may post, in bytes (docs/slice-2.md,
+/// "Forking, step by step": at most 16 KiB).
+pub const MAX_NOTE: usize = 16 * 1024;
+
+/// The payload of a `fork_note`, and what the island socket posts to
+/// `flare-server` for one: a fork child of the agent's Vessel saying what
+/// it made. A child's files and actions stay in its own Vessel unless the
+/// agent promotes it; the note is all that leaves it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkNote {
+    /// The child's name: `<subject>-fork-<slot>`.
+    pub child: String,
+    /// The note, at most [`MAX_NOTE`] bytes.
+    pub text: String,
+    /// Whether the child is done.
+    pub done: bool,
+}
+
 /// A task as `flare-server` hands it to the island socket, and the
 /// island socket to the agent: the next `user_message` after a cursor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +326,8 @@ pub enum EventKind {
     ActionWaiting,
     /// An action was answered and settled: [`ActionSettled`].
     ActionSettled,
+    /// A fork child of the agent posted a note: [`ForkNote`].
+    ForkNote,
     /// A client asked for a verb.
     VerbCall,
     /// What came of it.

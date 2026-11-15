@@ -10,8 +10,8 @@
 #![warn(missing_docs)]
 
 use flare_core::session::{
-    ActionSettled, ActionWaiting, AgentText, Event, EventKind, Problem, Settled, UserMessage,
-    VerbCall, VerbResult,
+    ActionSettled, ActionWaiting, AgentText, Event, EventKind, ForkNote, Problem, Settled,
+    UserMessage, VerbCall, VerbResult,
 };
 use flare_core::time;
 use island_core::{Evidence, Hash, Verse};
@@ -279,6 +279,15 @@ pub fn show(event: &Event) -> String {
                 Err(_) => format!("{head}  an action this terminal does not read"),
             }
         }
+        EventKind::ForkNote => match serde_json::from_value::<ForkNote>(event.payload.clone()) {
+            Ok(note) => format!(
+                "{head}  fork {}{}: {}",
+                note.child,
+                if note.done { ", done" } else { "" },
+                multiline(&note.text, &indent)
+            ),
+            Err(_) => format!("{head}  a fork's note this terminal does not read"),
+        },
         EventKind::AgentText => match serde_json::from_value::<AgentText>(event.payload.clone()) {
             Ok(reply) => format!(
                 "{head}  agent (to #{}): {}",
@@ -411,6 +420,27 @@ mod shown {
             show(&reply).ends_with("agent (to #4): Here:\n    line two"),
             "{}",
             show(&reply)
+        );
+    }
+
+    #[test]
+    fn a_forks_note_names_the_child_and_says_when_it_is_done() {
+        let note = |text: &str, done: bool| Event {
+            seq: 9,
+            at: 1_794_400_002_000_000,
+            kind: EventKind::ForkNote,
+            payload: serde_json::json!({ "child": "flare-home-fork-11", "text": text, "done": done }),
+        };
+        assert!(
+            show(&note("started: draft it plainly", false))
+                .ends_with("fork flare-home-fork-11: started: draft it plainly"),
+            "{}",
+            show(&note("started: draft it plainly", false))
+        );
+        let done = show(&note("Drafted.\nIt is in draft.md", true));
+        assert!(
+            done.ends_with("fork flare-home-fork-11, done: Drafted.\n    It is in draft.md"),
+            "{done}"
         );
     }
 }

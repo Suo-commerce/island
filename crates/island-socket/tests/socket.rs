@@ -205,6 +205,7 @@ async fn whoami_says_who_from_the_peer_uid() {
     assert_eq!(me["subject"], "flare-home");
     assert_eq!(me["vessel"], "914c503c980b8f7f1750c664b5743d2c");
     assert_eq!(me["forks_left"], 2);
+    assert_eq!(me["fork_slots"].as_array().map(Vec::len), Some(2));
     assert_eq!(me["default_model"], "small");
 
     let (status, body) = ask(&world.socket, "GET", "/v1/models", b"").await;
@@ -218,7 +219,7 @@ async fn whoami_says_who_from_the_peer_uid() {
         .collect();
     assert_eq!(ids, ["nowhere", "small", "large"]);
 
-    let (status, _) = ask(&world.socket, "GET", "/notes", b"").await;
+    let (status, _) = ask(&world.socket, "GET", "/log/head", b"").await;
     assert_eq!(status, 404, "not served in this step");
 }
 
@@ -457,4 +458,164 @@ async fn the_instructions_come_from_their_file_as_it_is_now() {
         (1, 2),
         "two reads, counted at once"
     );
+}
+
+/// A stand-in for flare-server's agent socket that takes fork notes.
+fn notes_stub(path: &Path) -> Arc<Mutex<Vec<Value>>> {
+    let posted = Arc::new(Mutex::new(Vec::new()));
+    let record = posted.clone();
+    let app = axum::Router::new().route(
+        "/note",
+        post(move |axum::Json(note): axum::Json<Value>| {
+            let record = record.clone();
+            async move {
+                record.lock().unwrap().push(note);
+                axum::Json(json!({ "event": 4 }))
+            }
+        }),
+    );
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    posted
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forks_note_reaches_its_prime_the_session_and_the_access_entries() {
+    use island_socket::callers::{Caller, Role};
+    use island_socket::server::{get_notes, post_note};
+
+    let (url, _) = stub(1).await;
+    let world = world(&url, 10, false).await;
+    let session = notes_stub(&world.socket.with_file_name("agent.sock"));
+
+    // Over the socket this process is the prime: it reads notes (none
+    // yet) and may not post one.
+    let (status, body) = ask(&world.socket, "GET", "/notes", b"").await;
+    assert_eq!(
+        (status, String::from_utf8_lossy(&body).as_ref()),
+        (200, r#"{"notes":[]}"#)
+    );
+    let posting = br#"{"set":"5-7","text":"a draft","done":true}"#;
+    let (status, _) = ask(&world.socket, "POST", "/note", posting).await;
+    assert_eq!(status, 403, "a prime posts no note");
+
+    // Its children, as their peer uids would name them.
+    let prime = Caller {
+        vessel: [1; 16],
+        subject: "flare-home".into(),
+        role: Role::Prime,
+        slot: 10,
+        prime: "flare-home".into(),
+        fork_slots: vec![11, 12],
+    };
+    let child = |slot: u32| Caller {
+        vessel: [slot as u8; 16],
+        subject: format!("flare-home-fork-{slot}"),
+        role: Role::Fork,
+        slot,
+        prime: "flare-home".into(),
+        fork_slots: vec![11, 12],
+    };
+    let shared = &world.shared;
+    let started = br#"{"set":"5-7","text":"started: draft it plainly"}"#;
+    let (status, answer) = post_note(shared, &child(11), started, 100).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&answer));
+    let (status, _) = post_note(shared, &child(11), posting, 200).await;
+    assert_eq!(status, 200);
+    let (status, _) = post_note(shared, &child(12), started, 300).await;
+    assert_eq!(status, 200);
+    // A fork reads no notes; a note too long, or not one, is refused.
+    assert_eq!(get_notes(shared, &child(11), b"/notes").await.0, 403);
+    let long = json!({ "set": "5-7", "text": "x".repeat(16 * 1024 + 1), "done": true }).to_string();
+    assert_eq!(
+        post_note(shared, &child(12), long.as_bytes(), 400).await.0,
+        413
+    );
+    assert_eq!(post_note(shared, &child(12), b"{}", 400).await.0, 400);
+
+    // The prime reads each child's newest note.
+    let (status, body) = get_notes(shared, &prime, b"/notes").await;
+    assert_eq!(status, 200);
+    let notes: Value = serde_json::from_slice(&body).unwrap();
+    let read: Vec<_> = notes["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| {
+            (
+                n["child"].as_str().unwrap().to_owned(),
+                n["set"].as_str().unwrap().to_owned(),
+                n["text"].as_str().unwrap().to_owned(),
+                n["done"].as_bool().unwrap(),
+                n["at"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            (
+                "flare-home-fork-11".to_owned(),
+                "5-7".to_owned(),
+                "a draft".to_owned(),
+                true,
+                200
+            ),
+            (
+                "flare-home-fork-12".to_owned(),
+                "5-7".to_owned(),
+                "started: draft it plainly".to_owned(),
+                false,
+                300
+            ),
+        ]
+    );
+    // Kept on disk: another start of the socket still has them.
+    let again = island_socket::notes::Notes::load(&world.socket.with_file_name("state")).unwrap();
+    assert_eq!(again.of("flare-home").len(), 2);
+    // Each accepted note went to the session as a fork_note.
+    let seen = session.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            json!({ "child": "flare-home-fork-11", "text": "started: draft it plainly", "done": false }),
+            json!({ "child": "flare-home-fork-11", "text": "a draft", "done": true }),
+            json!({ "child": "flare-home-fork-12", "text": "started: draft it plainly", "done": false }),
+        ]
+    );
+    // Counted as access of kind note: each child's posts at once; the
+    // prime's reads once they brought it something, its empty polls and
+    // repeats waiting for the hourly entry.
+    let _ = get_notes(shared, &prime, b"/notes").await;
+    let mut batches = shared.batches.lock().await;
+    let due = batches.take(false);
+    let notes: BTreeMap<[u8; 16], u32> = due
+        .iter()
+        .filter(|a| a.what == island_core::AccessKind::Note)
+        .map(|a| (a.vessel, a.calls))
+        .collect();
+    // The prime here is the test process's own Vessel and [1; 16]: the
+    // first read over the socket was empty, the two as `prime` are one
+    // batch that brought news.
+    assert_eq!(notes.get(&[11; 16]), Some(&2));
+    assert_eq!(notes.get(&[12; 16]), Some(&1));
+    assert_eq!(notes.get(&[1; 16]), Some(&2));
+    assert_eq!(notes.len(), 3, "the empty read waits");
+    let hourly = batches.take(true);
+    assert_eq!(
+        hourly
+            .iter()
+            .filter(|a| a.what == island_core::AccessKind::Note)
+            .count(),
+        1
+    );
+    drop(batches);
+
+    // A child that failed says so: done, with nothing to promote.
+    let failed = br#"{"set":"5-7","text":"failed: no task","done":true,"failed":true}"#;
+    assert_eq!(post_note(shared, &child(12), failed, 500).await.0, 200);
+    let (_, body) = get_notes(shared, &prime, b"/notes").await;
+    let notes: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(notes["notes"][0]["failed"], false);
+    assert_eq!(notes["notes"][1]["failed"], true);
 }

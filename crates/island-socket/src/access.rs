@@ -35,6 +35,20 @@ pub const BATCH_DOMAIN: &str = "island.access-batch.v1";
 /// it got back, laid out as a model call's.
 pub const TASK_DOMAIN: &str = "island.task-call.v1";
 
+/// A note request's digest domain: a child's `POST /note` over the body
+/// it sent and the body it got back, a prime's `GET /notes` over the
+/// request's path and the body it got back; laid out as a model call's.
+pub const NOTE_DOMAIN: &str = "island.note-call.v1";
+
+/// A note request's digest.
+pub fn note_digest(request: &[u8], response: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new_derive_key(NOTE_DOMAIN);
+    hasher.update(&(request.len() as u64).to_le_bytes());
+    hasher.update(request);
+    hasher.update(response);
+    *hasher.finalize().as_bytes()
+}
+
 /// A task request's digest.
 pub fn task_digest(target: &[u8], response: &[u8]) -> Hash {
     let mut hasher = blake3::Hasher::new_derive_key(TASK_DOMAIN);

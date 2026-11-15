@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# s2-spike.sh: spikes S2 and S4. An Island agent in Taso Vessels on
-# this host, checked against what the S2 plan read in Taso's code.
+# s2-spike.sh: spikes S2, S4 and S5, and the server gate of slice 2
+# (`just vessel-gate`). An Island agent in Taso Vessels on this host,
+# checked against what the S2 plan read in Taso's code.
 #
 #   a  the prime Vessel dispatches: 3 effects released, a sender applies
 #      them, none listed twice
@@ -46,6 +47,26 @@
 #      the Vessels' root filesystem; the throwaway log gets one `access`
 #      entry per Vessel whose digest matches the agent's own bodies.
 #      Notes time the first byte and the whole.  Run it with ONLY=m.
+#   v  (the server gate, docs/slice-2.md, "Harness and gates") flare-agent
+#      itself in a long-lived Vessel with fork slots, driven by the
+#      scripted model (scripts/s4/scripted_model.py) through the real
+#      island-socket, with flare-server, island-sender and flare-tui on
+#      the throwaway log:
+#        v1  a task said in the session is answered there, once
+#        v2  the Warden is killed while a task is in work: the next start
+#            works it again, and the reply is in the session once
+#        v3  a task is forked two ways over the Field: each child posts
+#            its notes, the last one done is promoted, the prime is
+#            started again on its files, its held answer is the reply and
+#            its verse waits; the Warden is killed while it waits; then
+#            it is approved and written once, signed as the Vessel
+#        v4  the Warden is killed while the children of a fork work: the
+#            prime starts again on the fork's Seal, waits for them
+#            (--fork-wait), forks none again and answers without them
+#        v5  island-socket is killed while the children of a fork work
+#            and started again: every child's last note still arrives,
+#            and the task is answered once
+#      Not in the default ONLY: `just vessel-gate` runs a b c d e f s v.
 #
 # Each run has its own Vessels under its own root.  The script starts its
 # own block log, mounts and coordinator in a work directory, as Taso's
@@ -60,6 +81,7 @@
 #   ONLY="a f" TASO=/root/taso scripts/s2-spike.sh     some runs only
 #   ONLY=p TASO=/root/taso scripts/s2-spike.sh         spike S4
 #   ONLY=m TASO=/root/taso scripts/s2-spike.sh         spike S5
+#   ONLY=v TASO=/root/taso scripts/s2-spike.sh         the gate's own run
 #
 # Environment: TASO (/root/taso)  ONLY (a b c d e f s)  LANDLOCK (1)
 #              S4_BULK (4000:200: run p's /work, files:MiB)
@@ -88,17 +110,22 @@ for t in runc ldd python3 cargo mountpoint; do
 done
 [ -f "$TASO/Cargo.toml" ] || { echo "no Taso checkout at $TASO (set TASO)" >&2; exit 2; }
 for r in $ONLY; do
-    case $r in a|b|c|d|e|f|s|p|m) ;; *) echo "ONLY: unknown run $r (a b c d e f s p m; b also does g and h)" >&2; exit 2 ;; esac
+    case $r in a|b|c|d|e|f|s|p|m|v) ;; *) echo "ONLY: unknown run $r (a b c d e f s p m v; b also does g and h)" >&2; exit 2 ;; esac
 done
 
 echo "== building Taso (release) in $TASO at $(git -C "$TASO" log -1 --format='%h %s' 2>/dev/null || echo '?')"
 (cd "$TASO" && cargo build --release -q -p taso-warden -p taso-landlock \
     && cargo build --release -q -p taso-blk --bin taso-blkd)
 BIN=$TASO/target/release
-case " $ONLY " in *" s "*|*" m "*)
+case " $ONLY " in *" s "*|*" m "*|*" v "*)
     echo "== building island-cli, island-broker, island-sender, island-socket (release) in $ISLAND"
     (cd "$ISLAND" && cargo build --release -q --locked -p island-cli -p island-broker -p island-sender \
         -p island-socket)
+    ;;
+esac
+case " $ONLY " in *" v "*)
+    echo "== building flare-agent, flare-server, flare-tui (release) in $ISLAND"
+    (cd "$ISLAND" && cargo build --release -q --locked -p flare-agent -p flare-server -p flare-tui)
     ;;
 esac
 IBIN=$ISLAND/target/release
@@ -182,6 +209,8 @@ install -D -m 644 "$S2/s2_field.py" "$ROOTFS/usr/lib/s2/s2_field.py"
 install -D -m 755 "$S2/s2-agent.py" "$ROOTFS/usr/lib/s2/s2-agent.py"
 install -D -m 755 "$S2/s4-agent.py" "$ROOTFS/usr/lib/s2/s4-agent.py"
 install -D -m 755 "$S2/s5-agent.py" "$ROOTFS/usr/lib/s2/s5-agent.py"
+# The gate's agent is the real one (run v).
+[ ! -x "$ISLAND/target/release/flare-agent" ] || copy_with_libs "$ISLAND/target/release/flare-agent" /usr/bin/flare-agent
 mkdir -p "$ROOTFS"/{proc,dev,sys,tmp,work,run/taso}
 : > "$ROOTFS/run/taso/field.sock"
 LLM=/run/island/llm.sock   # where the agent sees the inference socket
@@ -896,6 +925,281 @@ run_m() {
     check m "the provider was sent no key" \
         "$(python3 -c 'import json, sys; print(sorted({r["auth"] for r in map(json.loads, open(sys.argv[1]))}, key=str))' "$j/stub-requests.jsonl")" \
         "[None]"
+}
+
+# ── v: the server gate, flare-agent with the scripted model ───────────
+V_PRIME=40
+V_FORKS="41 42 43 44 45 46"
+V_FORK_WAIT=45   # seconds the prime waits for children that never finish
+
+# v_config <out>: flare-home's shape (docs/slice-2.md, "The Vessel and the
+# agent"): a long-lived dispatching prime with fork slots, running flare-agent
+v_config() {
+    python3 - "$1" "$SOCK" "$WORK" "$ROOTFS" "$NS" "$LANDLOCK" "$BLK_SOCK" "$MNT" "$V_PRIME" "$V_FORKS" "$V_FORK_WAIT" <<'PY'
+import json, sys
+out, sock, work, rootfs, ns, landlock, blk_sock, mnt, slot, forks, wait = sys.argv[1:12]
+rt = {"rootfs": rootfs, "host_uid_base": 200000,
+      "args": ["/usr/bin/flare-agent", "--fork-wait", wait],
+      "memory_bytes": 1073741824, "pids": 128}
+if landlock == "1":
+    rt["landlock_shim"] = "/usr/lib/taso/landlock"
+json.dump({
+    "warden": 1, "coordinator": {"remote": sock},
+    "storage": {"blk": {"socket": blk_sock, "mounts": mnt, "spool": f"{work}/spool"}},
+    "root": "gate/v", "state_dir": f"{work}/state", "store": f"{work}/store",
+    "prefix": "vessels", "run_dir": f"{work}/run", "runtime": rt,
+    "vessels": [{"namespace": ns, "subject": "v-prime", "uid_slot": int(slot), "effects": "dispatch",
+                 "restart": "always", "forks": {"slots": [int(s) for s in forks.split()]}}],
+}, open(out, "w"), indent=1)
+PY
+}
+
+# sx <expression>: over the session main's events E; R the agent's replies
+# (payloads), N the fork notes, W the actions waiting and A those settled
+# (events), U the messages said (events)
+sx() {
+    python3 - "$V/flare/sessions/main.jsonl" "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        E = [json.loads(line) for line in fh if line.strip()]
+except FileNotFoundError:
+    E = []
+R = [e["payload"] for e in E if e["kind"] == "agent_text"]
+N = [e["payload"] for e in E if e["kind"] == "fork_note"]
+W = [e for e in E if e["kind"] == "action_waiting"]
+A = [e for e in E if e["kind"] == "action_settled"]
+U = [e for e in E if e["kind"] == "user_message"]
+r = eval(sys.argv[2])
+print(json.dumps(r) if isinstance(r, (list, dict, bool)) or r is None else r)
+PY
+}
+swait() {   # swait <seconds> <expression>: until sx says true
+    local secs=$1
+    for _ in $(seq $((secs * 5))); do [ "$(sx "$2" 2>/dev/null)" = true ] && return 0; sleep 0.2; done
+    return 1
+}
+
+vdir() { echo "$MNT/$(ds_of "${ERR:-/dev/null}")"; }   # the prime's dataset, mounted
+
+# vlog <expression>: over the events d of flare-agent's log in the prime's
+# dataset (.flare/log.jsonl: what its last Seal held, and this start)
+vlog() {
+    python3 - "$(vdir)/.flare/log.jsonl" "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = [json.loads(line) for line in fh if line.strip()]
+except FileNotFoundError:
+    d = []
+r = eval(sys.argv[2])
+print(json.dumps(r) if isinstance(r, (list, dict, bool)) or r is None else r)
+PY
+}
+vlog_wait() {   # vlog_wait <seconds> <expression>
+    local secs=$1
+    for _ in $(seq $((secs * 5))); do [ "$(vlog "$2" 2>/dev/null)" = true ] && return 0; sleep 0.2; done
+    return 1
+}
+
+# vsay <client> <text> [seconds]: say it in the session with flare-tui and
+# wait for the agent's reply; prints what the terminal showed
+vsay() {
+    printf '%s\n' "$2" | timeout $(( ${3:-120} + 30 )) "$IBIN/flare-tui" \
+        --server "ws://127.0.0.1:$V_SESSION/session" --session main --client "$1" --after 999999999 \
+        --root "$ISL_ROOT" --broker "http://127.0.0.1:$ISL_PORT" --replica "$V/replica-$1.log" \
+        --reply-wait "${3:-120}" 2>&1 || true
+}
+vtask() { sx "([e['seq'] for e in U if e['payload']['client'] == '$1'] or [-1])[-1]"; }   # the task a client's message became
+
+v_whoami() {   # what the island socket tells the prime about itself, as its uid
+    python3 - "$ROOTFS/run/island/island.sock" "$((200000 + V_PRIME * 65536))" "$1" <<'PY' 2>/dev/null || echo no-answer
+import http.client, json, os, socket, sys
+os.setgid(int(sys.argv[2])); os.setuid(int(sys.argv[2]))
+c = http.client.HTTPConnection("island")
+c.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+c.sock.connect(sys.argv[1])
+c.request("GET", "/whoami")
+print(json.loads(c.getresponse().read())[sys.argv[3]])
+PY
+}
+
+v_socket_up() {
+    rm -f "$ROOTFS/run/island/island.sock"   # a killed one's, or another run's
+    "$IBIN/island-socket" serve --config "$V/socket.toml" 2>>"$V/socket.err" &
+    V_SOCKET=$!
+    BG_PIDS+=("$V_SOCKET")
+    for _ in $(seq 100); do [ -S "$ROOTFS/run/island/island.sock" ] && return 0; sleep 0.05; done
+    echo "island-socket did not start; see $V/socket.err" >&2; return 1
+}
+
+v_warden() {   # v_warden <name>: start the Warden and wait for the prime's agent to start under it
+    # Its starts are told apart by their ids: the log shows the last Seal's
+    # history, so a start that was never sealed is gone from it.
+    local last
+    last=$(vlog '[e["start"] for e in d if e["event"] == "start" and "fork" not in e][-1:]')
+    start "$1" "$WORK/v.json"
+    V_WARDEN=$PID
+    vlog_wait 120 "[e['start'] for e in d if e['event'] == 'start' and 'fork' not in e][-1:] not in ([], $last)" \
+        || { echo "flare-agent did not start under Warden $1:" >&2; tail -5 "$ERR" >&2; return 1; }
+}
+
+run_v() {
+    echo "-- v: the server gate: flare-agent in a Vessel, a task, a fork, a promotion, kills"
+    island_setup
+    V=$OUT/v
+    mkdir -p "$V/vessels"
+    : >"$V/model-requests.jsonl"
+    local port vessel pub out task seq before n
+
+    # The Warden config first: island-socket reads its callers from it,
+    # and the Vessel's writer key is named by its id.
+    v_config "$WORK/v.json"
+    vessel=$("$IBIN/island-socket" vessels --warden-config "$WORK/v.json" | awk '$2 == "v-prime" { print $1 }')
+    "$IBIN/island-cli" keygen "$V/vessels/$vessel.key" >/dev/null
+    pub=$("$IBIN/island-cli" public "$V/vessels/$vessel.key")
+    "$IBIN/island-cli" grant --broker "http://127.0.0.1:$ISL_PORT" --root-key "$ISL/root.key" \
+        --holder "$pub" --scope flare --rights verse >>"$OUT/island-init.out"
+
+    port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+    python3 "$ISLAND/scripts/s4/scripted_model.py" --listen "127.0.0.1:$port" \
+        --requests "$V/model-requests.jsonl" >"$V/model.out" 2>&1 &
+    BG_PIDS+=("$!")
+    V_SESSION=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+    "$IBIN/flare-server" --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" --data "$V/flare" \
+        --listen "127.0.0.1:$V_SESSION" --agent-socket "$V/agent.sock" --task-reader 0 --reply-sender 0 \
+        >"$V/flare-server.out" 2>&1 &
+    BG_PIDS+=("$!")
+    for _ in $(seq 100); do [ -S "$V/agent.sock" ] && break; sleep 0.05; done
+    [ -S "$V/agent.sock" ] || { echo "flare-server did not start; see $V/flare-server.out" >&2; return 1; }
+    printf '%s\n' \
+        "socket = \"$ROOTFS/run/island/island.sock\"" \
+        "warden_config = \"$WORK/v.json\"" \
+        "state_dir = \"$V/socket-state\"" \
+        "broker = \"http://127.0.0.1:$ISL_PORT\"" \
+        "root = \"$ISL_ROOT\"" \
+        "key = \"$ISL/socket.key\"" \
+        "access_every_secs = 2" \
+        "tasks = \"$V/agent.sock\"" \
+        "instructions = \"$V/no-instructions.md\"" \
+        "default = \"scripted\"" \
+        "[provider.scripted]" \
+        "base_url = \"http://127.0.0.1:$port/v1\"" \
+        "models = [\"scripted\"]" \
+        "budget = { calls = 1000, bytes = 100000000 }" >"$V/socket.toml"
+    mkdir -p "$ROOTFS/run/island"
+    v_socket_up
+    "$IBIN/island-sender" --senders "$WORK/run/senders" --broker "http://127.0.0.1:$ISL_PORT" \
+        --root "$ISL_ROOT" --key "$ISL/sender.key" --session-socket "$V/agent.sock" \
+        --vessel-keys "$V/vessels" --interval-ms 200 >"$V/sender.out" 2>"$V/sender.err" &
+    BG_PIDS+=("$!")
+
+    v_warden v-1 || { check v "flare-agent starts in its Vessel" no yes; return 0; }
+    check v "whoami: the island socket knows the prime, with its six fork slots" \
+        "$(v_whoami role) $(v_whoami forks_left)" "prime 6"
+
+    # v1: a task answered through the session
+    out=$(vsay gate-1 "hello from the gate")
+    task=$(vtask gate-1)
+    check v "v1: a message said in the session is answered there" \
+        "$(grep -c "agent (to #$task): I wrote hello.txt for: hello from the gate" <<<"$out" || true)" 1
+    check v "v1: the agent wrote the file in its Vessel" \
+        "$(cat "$(vdir)/hello.txt" 2>/dev/null || echo missing)" "hello from the gate"
+    check v "v1: the reply is in the session once" "$(sx "len([r for r in R if r['task'] == $task])")" 1
+
+    # v2: the Warden killed while a task is in work
+    before=$(wc -l <"$V/model-requests.jsonl")
+    vsay gate-2 "write this slowly" 180 >"$V/say-2.out" &
+    local saying=$!
+    for _ in $(seq 300); do [ "$(wc -l <"$V/model-requests.jsonl")" -gt "$before" ] && break; sleep 0.1; done
+    killw "$V_WARDEN"
+    v_warden v-2 || { check v "v2: flare-agent starts again after the kill" no yes; return 0; }
+    wait "$saying" || true
+    task=$(vtask gate-2)
+    check v "v2: killed in a task, the next start works it again and replies" \
+        "$(grep -c "agent (to #$task): I wrote hello.txt for: write this slowly" "$V/say-2.out" || true)" 1
+    check v "v2: the reply is in the session once" "$(sx "len([r for r in R if r['task'] == $task])")" 1
+    note v "v2: the agent's starts and turns: $(vlog '[(e["event"], e.get("turn"), e.get("cursor")) for e in d if e["event"] in ("start", "turn")][-4:]')"
+
+    # v3: a fork, the notes, a promotion; a kill while the adopted verse waits
+    out=$(vsay gate-3 "fork this two ways" 240)
+    task=$(vtask gate-3)
+    check v "v3: the promoted child's held answer is the reply to the task" \
+        "$(grep -c "agent (to #$task): Child 2 drafted draft-2.md." <<<"$out" || true)" 1
+    check v "v3: each child said it started and what it made" \
+        "$(sx "sorted((n['child'], n['done']) for n in N)")" \
+        '[["v-prime-fork-41", false], ["v-prime-fork-41", true], ["v-prime-fork-42", false], ["v-prime-fork-42", true]]'
+    vlog_wait 60 'd[-1]["event"] == "promoted"' || true
+    check v "v3: the prime is started again on the promoted child's files" \
+        "$(vlog '[e["child"] for e in d if e["event"] == "promoted"]')" '["v-prime-fork-42"]'
+    check v "v3: its files are the promoted child's, not the other's" \
+        "$(ls "$(vdir)" 2>/dev/null | grep -c '^draft-[12].md$' || true) $(head -c 20 "$(vdir)/draft-2.md" 2>/dev/null || true)" \
+        "1 Draft it as a list, "
+    check v "v3: the fork set's task file is gone from them" \
+        "$([ -e "$(vdir)/.flare/fork-tasks.json" ] && echo there || echo gone)" gone
+    check v "v3: two fork slots are used" "$(v_whoami forks_left)" 4
+    swait 30 "len(W) == 1" || true
+    check v "v3: the child's verse was adopted and waits for approval" \
+        "$(sx "[e['payload']['shown'] for e in W]")" '["a verse on flare: [decision] \"Fork child 2 drafted it as a list\""]'
+    check v "v3: nothing is written before the approval" \
+        "$("$IBIN/island-cli" tail --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" -n 500 | grep -c " verse flare ${pub:0:8}" || true)" 0
+    killw "$V_WARDEN"
+    v_warden v-3 || { check v "v3: flare-agent starts again after the kill" no yes; return 0; }
+    sleep 2
+    check v "v3: after a Warden kill the verse still waits, shown once, and nothing was sent" \
+        "$(sx "len(W)") $(sx "len(A)")" "1 0"
+    seq=$(sx "(W or [{'seq': -1}])[0]['seq']")
+    printf '/approve %s\n' "$seq" | timeout 60 "$IBIN/flare-tui" --server "ws://127.0.0.1:$V_SESSION/session" \
+        --session main --client gate-approver --root "$ISL_ROOT" --broker "http://127.0.0.1:$ISL_PORT" \
+        --replica "$V/replica-approver.log" --key "$ISL/approver.key" --reply-wait 1 >"$V/approve.out" 2>&1 || true
+    swait 60 "len(A) == 1" || true
+    check v "v3: approved, it is sent" "$(sx "[e['payload']['settled'] for e in A]")" '["sent"]'
+    check v "v3: the verse is in the log once, signed with the Vessel's key" \
+        "$("$IBIN/island-cli" tail --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" -n 500 | grep -c " verse flare ${pub:0:8}.*Fork child 2 drafted it as a list" || true)" 1
+    out=$(vsay gate-3b "and after the promotion")
+    task=$(vtask gate-3b)
+    check v "v3: with its effect authority back, the agent answers the next task" \
+        "$(grep -c "agent (to #$task): I wrote hello.txt for: and after the promotion" <<<"$out" || true)" 1
+
+    # v4: the Warden killed while the children of a fork work
+    n=$(sx "len(N)")
+    vsay gate-4 "fork this two ways, slowly" 300 >"$V/say-4.out" &
+    saying=$!
+    swait 120 "len([x for x in N[$n:] if not x['done']]) == 2" || true
+    killw "$V_WARDEN"
+    v_warden v-4 || { check v "v4: flare-agent starts again after the kill" no yes; return 0; }
+    wait "$saying" || true
+    task=$(vtask gate-4)
+    check v "v4: killed in a fork, the prime waits on from the fork's Seal and answers without the lost children" \
+        "$(grep -c "agent (to #$task): No child finished; nothing was promoted." "$V/say-4.out" || true)" 1
+    check v "v4: the reply is in the session once" "$(sx "len([r for r in R if r['task'] == $task])")" 1
+    check v "v4: no child was forked a second time: four slots used" "$(v_whoami forks_left)" 2
+    check v "v4: nothing more was promoted" "$(vlog 'len([e for e in d if e["event"] == "promoted"])')" 1
+    note v "v4: the children's notes: $(sx "[(x['child'], x['done']) for x in N[$n:]]")"
+
+    # v5: island-socket killed while the children of a fork work
+    n=$(sx "len(N)")
+    vsay gate-5 "fork this two ways, slowly" 300 >"$V/say-5.out" &
+    saying=$!
+    swait 120 "len([x for x in N[$n:] if not x['done']]) >= 1" || true
+    kill -KILL "$V_SOCKET" 2>/dev/null || true
+    wait "$V_SOCKET" 2>/dev/null || true
+    sleep 3
+    v_socket_up
+    wait "$saying" || true
+    task=$(vtask gate-5)
+    swait 200 "len({x['child'] for x in N[$n:] if x['done']}) == 2" || true
+    check v "v5: island-socket killed in a fork: both children's last notes still arrive" \
+        "$(sx "sorted({x['child'] for x in N[$n:] if x['done']})")" '["v-prime-fork-45", "v-prime-fork-46"]'
+    check v "v5: the task is answered, once" "$(sx "len([r for r in R if r['task'] == $task])")" 1
+    note v "v5: the reply: $(sx "[r['text'][:120] for r in R if r['task'] == $task]")"
+    check v "every reply is in the session once, by its key" "$(sx "len(R) == len({r['key'] for r in R})")" true
+    check v "every action waited and was settled at most once" \
+        "$(sx "len(W) == len({e['payload']['request_hash'] for e in W}) and len(A) == len({e['payload']['request_hash'] for e in A})")" true
+    check v "all six fork slots are used, each once" "$(v_whoami forks_left)" 0
+    note v "island-sender's last words: $(tail -n 3 "$V/sender.err" 2>/dev/null | tr '\n' ' ')"
+    killw "$V_WARDEN"
+    kill "$V_SOCKET" 2>/dev/null || true
 }
 
 for r in $ONLY; do "run_$r"; done

@@ -8,9 +8,11 @@
 //! | `POST /v1/chat/completions` | the model's answer, streamed as it comes  |
 //! | `GET /instructions`         | the agent's instructions, from the config's file; 404 if there is none |
 //! | `GET /task?after=N`         | the next message said to the agent after N, from `flare-server`, or 204 after waiting up to 50 s (the prime only) |
+//! | `POST /note`                | a fork child's note for its prime: `{ set, text, done, failed }`, the text at most 16 KiB (forks only) |
+//! | `GET /notes`                | `{ notes }`: the newest note of each of the prime's children (the prime only) |
 //!
-//! The rest of the table (tasks, log reads, repos, notes) comes with the
-//! steps that use it; until then it is a 404.
+//! The rest of the table (log reads, repos) comes with the step that uses
+//! it; until then it is a 404.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -29,6 +31,7 @@ use serde_json::{Value, json};
 use crate::access::{Batches, CallDigest};
 use crate::callers::{Caller, Callers, Role};
 use crate::config::Config;
+use crate::notes::{MAX_NOTE, MAX_SET, Note, Notes, Posted};
 use crate::usage::{Usage, today};
 
 /// The largest request body: a long conversation, not a file upload.
@@ -44,6 +47,12 @@ pub struct Shared {
     pub callers: Mutex<(Callers, Option<SystemTime>)>,
     /// Today's usage.
     pub usage: Mutex<Usage>,
+    /// The fork children's notes.
+    pub notes: Mutex<Notes>,
+    /// The digest of the notes each prime was last given: a read that
+    /// brings something new goes into the next `access` entry, the polls
+    /// between wait for the hourly one.
+    pub notes_read: Mutex<std::collections::BTreeMap<String, island_core::Hash>>,
     /// Calls not yet in an `access` entry.
     pub batches: Arc<tokio::sync::Mutex<Batches>>,
     /// The client to the providers.
@@ -75,6 +84,8 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/chat/completions", post(chat))
         .route("/task", get(task))
         .route("/instructions", get(instructions))
+        .route("/note", post(note))
+        .route("/notes", get(notes))
         .fallback(not_here)
         .layer(DefaultBodyLimit::max(MAX_REQUEST))
         .with_state(shared)
@@ -108,10 +119,11 @@ impl Shared {
         let caller = callers.0.of_uid(uid).cloned().ok_or_else(refused)?;
         drop(callers);
         if caller.role == Role::Fork {
-            self.usage
-                .lock()
-                .expect("not poisoned")
-                .saw_fork(&caller.prime, caller.slot);
+            self.usage.lock().expect("not poisoned").saw_fork(
+                &caller.prime,
+                caller.slot,
+                &caller.fork_slots,
+            );
         }
         Ok(caller)
     }
@@ -147,6 +159,7 @@ async fn whoami(
         "slot": caller.slot,
         "prime": caller.prime,
         "forks_left": forks_left,
+        "fork_slots": caller.fork_slots,
         "default_model": default_model,
     }))
     .into_response()
@@ -172,7 +185,7 @@ async fn not_here(ConnectInfo(_peer): ConnectInfo<Peer>) -> Response {
     error(
         StatusCode::NOT_FOUND,
         "not_found",
-        "not served (yet): this socket answers /whoami, /v1/models, /v1/chat/completions, /task and /instructions",
+        "not served (yet): this socket answers /whoami, /v1/models, /v1/chat/completions, /task, /instructions, /note and /notes",
     )
 }
 
@@ -486,4 +499,184 @@ fn error_response_not_found(path: &std::path::Path) -> Response {
             path.display()
         ),
     )
+}
+
+/// The time now, in microseconds since the epoch.
+fn now_micros() -> u64 {
+    use island_env::Clock;
+    island_env::SystemClock.now_micros()
+}
+
+/// A fork child's note: kept for its prime, counted as access of kind
+/// note, and shown in the session as a `fork_note`.
+async fn note(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    request: Bytes,
+) -> Response {
+    let caller = match shared.caller(peer) {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    let (status, body) = post_note(&shared, &caller, &request, now_micros()).await;
+    let mut response = (status, body).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+fn error_body(kind: &str, message: impl Into<String>) -> Vec<u8> {
+    json!({ "error": { "message": message.into(), "type": kind } })
+        .to_string()
+        .into_bytes()
+}
+
+/// `POST /note` for `caller`: the status and the body to answer with.
+pub async fn post_note(
+    shared: &Shared,
+    caller: &Caller,
+    request: &[u8],
+    at: u64,
+) -> (StatusCode, Vec<u8>) {
+    if caller.role != Role::Fork {
+        return (
+            StatusCode::FORBIDDEN,
+            error_body("forbidden", "a note is a fork child's word to its prime"),
+        );
+    }
+    let posted: Posted = match serde_json::from_slice(request) {
+        Ok(posted) => posted,
+        Err(why) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                error_body(
+                    "invalid_request_error",
+                    format!("a note is {{ set, text, done, failed }}: {why}"),
+                ),
+            );
+        }
+    };
+    if posted.text.len() > MAX_NOTE || posted.set.is_empty() || posted.set.len() > MAX_SET {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            error_body(
+                "invalid_request_error",
+                format!(
+                    "a note's text is at most {MAX_NOTE} bytes, its set 1 to {MAX_SET}; \
+                     this text is {} bytes",
+                    posted.text.len()
+                ),
+            ),
+        );
+    }
+    let note = Note {
+        child: caller.subject.clone(),
+        slot: caller.slot,
+        set: posted.set,
+        text: posted.text,
+        done: posted.done,
+        failed: posted.failed,
+        at,
+    };
+    let kept = shared
+        .notes
+        .lock()
+        .expect("not poisoned")
+        .put(&caller.prime, note.clone());
+    if let Err(why) = kept {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_body("notes_unavailable", format!("the note was not kept: {why}")),
+        );
+    }
+    let body = json!({ "child": note.child, "slot": note.slot, "done": note.done })
+        .to_string()
+        .into_bytes();
+    shared.batches.lock().await.add(
+        caller.vessel,
+        island_core::AccessKind::Note,
+        "",
+        request.len() as u64,
+        body.len() as u64,
+        crate::access::note_digest(request, &body),
+        true,
+    );
+    // The session shows it; a session server that is down loses the
+    // event, not the note.
+    let event = json!({ "child": note.child, "text": note.text, "done": note.done }).to_string();
+    match crate::upstream::post_unix(&shared.config.tasks, "/note", Bytes::from(event)).await {
+        Ok((status, _)) if status.is_success() => {}
+        Ok((status, answer)) => eprintln!(
+            "island-socket: the session server took no fork_note for {}: {status}: {}",
+            note.child,
+            String::from_utf8_lossy(&answer)
+        ),
+        Err(why) => eprintln!(
+            "island-socket: no fork_note in the session for {}: {why}",
+            note.child
+        ),
+    }
+    (StatusCode::OK, body)
+}
+
+/// The notes of the prime's children.
+async fn notes(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    uri: axum::http::Uri,
+) -> Response {
+    let caller = match shared.caller(peer) {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    let target = uri
+        .path_and_query()
+        .map_or_else(|| "/notes".to_owned(), |path| path.as_str().to_owned());
+    let (status, body) = get_notes(&shared, &caller, target.as_bytes()).await;
+    let mut response = (status, body).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+/// `GET /notes` for `caller`: the status and the body to answer with.
+pub async fn get_notes(shared: &Shared, caller: &Caller, target: &[u8]) -> (StatusCode, Vec<u8>) {
+    if caller.role != Role::Prime {
+        return (
+            StatusCode::FORBIDDEN,
+            error_body(
+                "forbidden",
+                "notes are read by the prime they were posted for",
+            ),
+        );
+    }
+    let notes = shared
+        .notes
+        .lock()
+        .expect("not poisoned")
+        .of(&caller.subject);
+    let body = json!({ "notes": notes }).to_string().into_bytes();
+    let digest = crate::access::note_digest(target, &body);
+    // A read that brought the prime something new goes out with the next
+    // entry; its polls in between wait for the hourly one.
+    let news = shared
+        .notes_read
+        .lock()
+        .expect("not poisoned")
+        .insert(caller.subject.clone(), digest)
+        != Some(digest);
+    shared.batches.lock().await.add(
+        caller.vessel,
+        island_core::AccessKind::Note,
+        "",
+        target.len() as u64,
+        body.len() as u64,
+        digest,
+        news && !notes.is_empty(),
+    );
+    (StatusCode::OK, body)
 }

@@ -424,11 +424,106 @@ island-cli grant --broker http://10.77.0.1:4747 --root-key .island/root.key \
 socket serves them fresh at every task, so an edit needs no restart.
 Each task's transcript records their digest and whether they came from
 the socket or, when the file is missing, are the agent's built-in copy.
+(The agent asks for them since step 6; see section 9.)
 
 The model is `island-socket`'s default (section 7). Its answers, tool
 calls and their results are in `flare-home`'s Chronicle as transcript
 entries, each model call with the digest its `access` entry counts; the
 Island log holds the counts only.
+
+## 9. Forks
+
+The agent can try a task more than one way (slice 2, step 6; docs/slice-2.md,
+"Forking, step by step"). Its tool `fork` takes one task per child. It
+writes them to `/work/.flare/fork-tasks.json`, ends the turn, and asks
+Taso for one child Vessel per task, each forked from that Seal. A child is
+`flare-agent` again in a Vessel of its own, `flare-home-fork-<slot>`, with
+a copy of the files and the conversation: it does its task, every message
+and verse of its held by Taso, ends its turn and exits. Nothing of a
+child's leaves its Vessel except its notes, which go through the island
+socket (`POST /note`, counted as access of kind `note`) to the agent and
+into the session, where the terminal shows them:
+
+```text
+#31 14:02:11  fork flare-home-fork-11: started: Draft it plainly
+#33 14:02:40  fork flare-home-fork-11, done: The plain draft is in plain.md. ...
+```
+
+`fork` returns the notes to the agent, which then calls `promote` with
+one child's name or carries on itself. Promoted, the child's files
+replace the agent's and its held actions become the agent's: its answer
+is the reply to your task (it ends with which child it came from and how
+many fork slots are left), and a verse it proposed waits for you as any
+verse does. Taso ends the agent's run for the adoption and the Warden
+starts it again, about two seconds later, on the child's files. Not
+promoted, the children stay as they are, sent nowhere.
+
+Three things to know:
+
+- **Slots.** `flare-home` has eight fork slots (11 to 18 in
+  `/etc/taso/warden.json`), each used once, for good, promoted or not.
+  `scripts/node/check.sh` notes how many are left; the agent is told with
+  each fork, and its instructions say to fork only when alternatives are
+  worth a slot each. More slots are an edit of `forks.slots` in
+  `/etc/taso/warden.json` (new numbers, no other Vessel's) and `systemctl
+  restart taso-wardend`; `island-socket` reads the file again when it
+  changes. A finished child's dataset stays
+  mounted while the Warden runs.
+- **After a promotion the agent may be silent until you answer.** The
+  adopted actions come back from Taso as unknown, and until each is
+  settled the Vessel may let nothing new out. The reply is settled at
+  once. A verse is settled by your `/approve N` or `/decline N`: until
+  then the agent works on what you say but its replies wait. `/waiting`
+  shows what it is waiting for. The same holds for a verse that was
+  waiting when the Warden restarted.
+- **While its children work the agent ends no turn**, since a prime that
+  seals again can no longer promote them. If it is killed then, it starts
+  again on the fork's Seal and waits on; it forks nothing twice. It waits
+  for its children at most 15 minutes (`flare-agent --fork-wait`).
+
+Update the node as in "Updating the server": pull, `install.sh`, restart
+`flare-server island-socket island-sender taso-wardend`, and
+`./islander.sh update` on the laptop (an old terminal does not read the
+new `fork_note` event). The agent's instructions gained a paragraph about
+forking. `install.sh` writes `/etc/island-socket/instructions.md` only
+once, so copy the new text over, or add the paragraph to yours:
+
+```sh
+install -m 640 -o root -g island-socket /root/island/deploy/server/agent-instructions.md /etc/island-socket/instructions.md
+```
+
+Since this step the agent really reads that file. Before, `flare-agent`
+never asked the island socket for it and always ran on its built-in copy
+(each task's transcript said `built-in`); an edit there takes effect now,
+at the next task.
+
+Check it, on the server:
+
+```sh
+scripts/node/check.sh
+scripts/node/check.sh fork
+```
+
+`check.sh fork` asks the agent for two alternatives and reports what came
+of it: the children's notes, the slots used, whether one was promoted and
+the agent started again on its files, and the reply. It uses fork slots
+for good (two, if the model does as asked), and whether the model forks
+is the model's choice, so what it did is noted rather than failed.
+
+**The server gate.** `just vessel-gate` (as root) runs
+the spike's runs and then run v: `flare-agent` itself in a throwaway
+Vessel with fork slots, driven by a scripted model through the real
+`island-socket`, `flare-server` and `island-sender` on a throwaway log. It
+checks a task answered once; the Warden killed in a task; a fork, the
+notes, a promotion, the restart on the child's files, the adopted verse
+waiting across a Warden kill and written once when approved; the Warden
+killed while children work; and `island-socket` killed while children
+work. It touches nothing of the node's: its own block log, its own
+directories, no unit, no firewall rule.
+
+```sh
+cd /root/island && just vessel-gate
+```
 
 ## Updating the server
 

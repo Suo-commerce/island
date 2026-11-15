@@ -1,11 +1,12 @@
 //! The island socket, as the agent asks it (docs/slice-2.md, "The island
-//! socket"): who it is, the next task, and the model.
+//! socket"): who it is, the next task, its instructions, the model, and
+//! the notes between a fork child and its prime.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use flare_core::session::Task;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agent_loop::{Completion, Model};
 use crate::http::ask;
@@ -37,10 +38,77 @@ pub struct Whoami {
     pub role: String,
     /// Its uid slot.
     pub slot: u32,
+    /// The prime's subject: its own, or its parent's.
+    #[serde(default)]
+    pub prime: String,
     /// The forks it has left.
     pub forks_left: u64,
+    /// The prime's fork slots, in the order Taso gives them out.
+    #[serde(default)]
+    pub fork_slots: Vec<u32>,
     /// The model it gets when it names none.
     pub default_model: String,
+}
+
+impl Whoami {
+    /// Whether this is a fork child.
+    pub fn is_fork(&self) -> bool {
+        self.role == "fork"
+    }
+
+    /// The fork slots no child has taken, in the order Taso will give
+    /// them: slots go in the config's order, each once.
+    pub fn free_slots(&self) -> &[u32] {
+        let left = usize::try_from(self.forks_left)
+            .unwrap_or(usize::MAX)
+            .min(self.fork_slots.len());
+        &self.fork_slots[self.fork_slots.len() - left..]
+    }
+}
+
+/// The longest note a fork child may post, in bytes (docs/slice-2.md,
+/// "Forking, step by step").
+pub const MAX_NOTE: usize = 16 * 1024;
+
+/// A fork child's newest note, as its prime reads it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Note {
+    /// The child's name.
+    pub child: String,
+    /// Its uid slot.
+    pub slot: u32,
+    /// The fork set it belongs to.
+    pub set: String,
+    /// What it made.
+    pub text: String,
+    /// Whether it is done.
+    pub done: bool,
+    /// Whether it failed before it could end a turn of its own: it holds
+    /// nothing to promote.
+    #[serde(default)]
+    pub failed: bool,
+}
+
+/// What a fork child says of itself with a note.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// It started on its task.
+    Started,
+    /// Its turn is sealed with the task answered: it can be promoted.
+    Done,
+    /// It failed without a Seal of its own: nothing to promote.
+    Failed,
+}
+
+/// What forking needs from the island socket: Taso tells an agent
+/// neither who it is nor what its children made.
+pub trait Forks {
+    /// Who this is, asked now: the fork slots left change.
+    fn whoami(&mut self) -> Result<Whoami, String>;
+    /// A fork child's note to its prime.
+    fn post_note(&mut self, set: &str, text: &str, progress: Progress) -> Result<(), String>;
+    /// The newest note of each of the prime's children.
+    fn notes(&mut self) -> Result<Vec<Note>, String>;
 }
 
 /// The island socket.
@@ -102,6 +170,75 @@ impl Tasks for Island {
             (204, _) => Ok(None),
             (status, body) => Err(format!(
                 "a task: {status}: {}",
+                String::from_utf8_lossy(&body)
+            )),
+        }
+    }
+
+    /// Island's instructions for the agent, as they are now. Anything but
+    /// a text (none set, the socket restarting) leaves the agent on its
+    /// own built-in ones; the transcript says which it ran on.
+    fn instructions(&mut self) -> Option<String> {
+        match self.get("/instructions", Duration::from_secs(30)) {
+            Ok((200, body)) => String::from_utf8(body)
+                .ok()
+                .filter(|text| !text.trim().is_empty()),
+            Ok((404, _)) => None,
+            Ok((status, body)) => {
+                eprintln!(
+                    "flare-agent: instructions: {status}: {}",
+                    String::from_utf8_lossy(&body)
+                );
+                None
+            }
+            Err(why) => {
+                eprintln!("flare-agent: instructions: {why}");
+                None
+            }
+        }
+    }
+}
+
+impl Forks for Island {
+    fn whoami(&mut self) -> Result<Whoami, String> {
+        Island::whoami(self)
+    }
+
+    fn post_note(&mut self, set: &str, text: &str, progress: Progress) -> Result<(), String> {
+        let body = serde_json::json!({
+            "set": set, "text": text,
+            "done": progress != Progress::Started,
+            "failed": progress == Progress::Failed,
+        })
+        .to_string();
+        let answer = ask(
+            &self.path,
+            "POST",
+            "/note",
+            body.as_bytes(),
+            Duration::from_secs(60),
+        )
+        .map_err(|error| format!("{}: {error}", self.path.display()))?;
+        match answer.status {
+            200 => Ok(()),
+            status => Err(format!(
+                "a note: {status}: {}",
+                String::from_utf8_lossy(&answer.body)
+            )),
+        }
+    }
+
+    fn notes(&mut self) -> Result<Vec<Note>, String> {
+        #[derive(Deserialize)]
+        struct Notes {
+            notes: Vec<Note>,
+        }
+        match self.get("/notes", Duration::from_secs(30))? {
+            (200, body) => serde_json::from_slice::<Notes>(&body)
+                .map(|notes| notes.notes)
+                .map_err(|error| format!("notes: {error}")),
+            (status, body) => Err(format!(
+                "notes: {status}: {}",
                 String::from_utf8_lossy(&body)
             )),
         }

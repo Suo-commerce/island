@@ -84,7 +84,7 @@ s3-test:
     cargo build --locked -p island-cli -p island-broker -p island-socket
     python3 -m unittest scripts/s3/test_socket_local.py
 
-# Step 4 end to end without Taso: a message said in the session, the agent's reply back once.
+# Steps 4 to 6 end to end without Taso: a message said in the session and the agent's reply back once; an approved verse; as root, a fork and a promotion.
 agent-test:
     cargo build --locked -p island-cli -p island-broker -p island-socket -p island-sender -p flare-server -p flare-agent -p flare-tui
     python3 -m unittest scripts/s4/test_converse_local.py
@@ -92,3 +92,7 @@ agent-test:
 # Spike S2 on the server, as root: Island's agent in Taso Vessels (runs a to h, and s: island-sender). TASO names the Taso checkout.
 s2-spike TASO="/root/taso":
     TASO={{TASO}} scripts/s2-spike.sh
+
+# The server gate of slice 2, on the server, as root: the spike's runs, then flare-agent itself in a Vessel with the scripted model: a task, a fork, a promotion, and a kill in each.
+vessel-gate TASO="/root/taso":
+    TASO={{TASO}} ONLY="a b c d e f s v" scripts/s2-spike.sh

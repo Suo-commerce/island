@@ -154,3 +154,43 @@ pub async fn get_unix(
     .map_err(|_| format!("no answer within {} s", QUIET.as_secs()))??;
     Ok(answer)
 }
+
+/// POST `body` as JSON to `target` on an HTTP server on a Unix socket:
+/// its status and whole body (a small one).
+pub async fn post_unix(
+    socket: &std::path::Path,
+    target: &str,
+    body: Bytes,
+) -> Result<(StatusCode, Bytes), String> {
+    let stream = tokio::time::timeout(CONNECT, tokio::net::UnixStream::connect(socket))
+        .await
+        .map_err(|_| format!("{}: no answer", socket.display()))?
+        .map_err(|error| format!("{}: {error}", socket.display()))?;
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+            .await
+            .map_err(|error| chain(&error))?;
+    tokio::spawn(connection);
+    let request = Request::post(target)
+        .header(header::HOST, "flare")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Full::new(body))
+        .map_err(|error| format!("the request: {error}"))?;
+    let answer = tokio::time::timeout(CONNECT, async {
+        let response = sender
+            .send_request(request)
+            .await
+            .map_err(|error| chain(&error))?;
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|error| chain(&error))?
+            .to_bytes();
+        Ok::<_, String>((status, body))
+    })
+    .await
+    .map_err(|_| format!("no answer within {} s", CONNECT.as_secs()))??;
+    Ok(answer)
+}

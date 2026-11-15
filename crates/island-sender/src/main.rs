@@ -300,6 +300,8 @@ fn run(runtime: &tokio::runtime::Runtime, args: &Args) -> Result<(), String> {
     let interval = Duration::from_millis(args.interval_ms.max(50));
     let patience = args.wait.saturating_mul(1000) / interval.as_millis().max(1) as u64;
     let mut waited = 0_u64;
+    // The sockets that did not answer at the last pass, and why.
+    let mut broken: BTreeMap<PathBuf, String> = BTreeMap::new();
     loop {
         let sockets = match (&one, &args.senders) {
             (Some((socket, vessel)), _) => {
@@ -322,12 +324,22 @@ fn run(runtime: &tokio::runtime::Runtime, args: &Args) -> Result<(), String> {
                 match pass(runtime, &mut sender, socket, *vessel, args) {
                     // One Vessel's socket breaking (its agent exited, the
                     // Warden restarted) does not keep the others waiting.
+                    // Said once, not at every pass: a fork child that is
+                    // done may leave a socket nothing answers on.
                     Err(Failed::Passing(error)) if one.is_none() && !args.once => {
-                        eprintln!("island-sender: {error}");
+                        if broken.insert(socket.clone(), error.clone()).as_ref() != Some(&error) {
+                            eprintln!("island-sender: {error}");
+                        }
                     }
-                    other => other?,
+                    other => {
+                        other?;
+                        if broken.remove(socket).is_some() {
+                            eprintln!("island-sender: {} answers again", socket.display());
+                        }
+                    }
                 }
             }
+            broken.retain(|socket, _| sockets.iter().any(|(listed, _)| listed == socket));
             Ok(())
         });
         match result {

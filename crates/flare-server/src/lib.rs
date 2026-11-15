@@ -7,8 +7,9 @@
 //! - [`router`]: the WebSocket at `/session`.
 //! - [`agent_router`]: the agent's side, on a Unix socket only the island
 //!   socket (tasks) and `island-sender` (replies) may use: the next
-//!   message said to the agent, and the agent's reply delivered once per
-//!   action key (docs/slice-2.md, "Actions and the sender").
+//!   message said to the agent, the agent's reply delivered once per
+//!   action key (docs/slice-2.md, "Actions and the sender"), and the
+//!   notes of its fork children.
 //!
 //! The server holds no writer key. A `propose` carries a submission its
 //! client signed; the server hands it to the broker as it is. A `see` is
@@ -32,8 +33,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use flare_core::session::{
     ActionReport, ActionSettled, ActionWaiting, AgentText, ClientMessage, Event, EventKind,
-    MAX_REPLY, MAX_SAY, Place, Problem, ProposeArgs, RECENT, SESSION_VERSION, SayArgs, SayRequest,
-    SeeArgs, ServerMessage, Settled, Task, UserMessage, Verb, VerbCall, VerbResult, valid_session,
+    ForkNote, MAX_NOTE, MAX_REPLY, MAX_SAY, Place, Problem, ProposeArgs, RECENT, SESSION_VERSION,
+    SayArgs, SayRequest, SeeArgs, ServerMessage, Settled, Task, UserMessage, Verb, VerbCall,
+    VerbResult, valid_session,
 };
 use flare_core::{Overview, StreamView, content, hex, kind_name, short};
 use flare_link::{PullError, Replica, pull};
@@ -466,6 +468,51 @@ impl Server {
         Ok(Some(event.seq))
     }
 
+    /// Record a fork child's note as a `fork_note`. The island socket may
+    /// post one again (it tries until it is answered): a note that says
+    /// what the child's last one said is not recorded twice.
+    fn note(&self, note: ForkNote) -> Result<Option<u64>, Undeliverable> {
+        if note.text.len() > MAX_NOTE {
+            return Err(Undeliverable::Malformed(format!(
+                "a note is at most {MAX_NOTE} bytes"
+            )));
+        }
+        if note.child.is_empty() || note.child.len() > 256 {
+            return Err(Undeliverable::Malformed(
+                "a note names its child in 1 to 256 bytes".to_owned(),
+            ));
+        }
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Undeliverable::Down("the sessions are lost".to_owned()))?;
+        let name = self.config.agent_session.clone();
+        let session = self
+            .session(&mut sessions, &name)
+            .map_err(Undeliverable::Down)?;
+        let last = session
+            .store
+            .events()
+            .iter()
+            .rev()
+            .filter(|event| event.kind == EventKind::ForkNote)
+            .filter_map(|event| serde_json::from_value::<ForkNote>(event.payload.clone()).ok())
+            .find(|earlier| earlier.child == note.child);
+        if last.as_ref() == Some(&note) {
+            return Ok(None);
+        }
+        let payload =
+            serde_json::to_value(note).map_err(|error| Undeliverable::Down(error.to_string()))?;
+        let event = session
+            .store
+            .append((self.config.clock)(), EventKind::ForkNote, payload)
+            .map_err(|error| {
+                Undeliverable::Down(format!("{}: {error}", session.store.path().display()))
+            })?;
+        let _ = session.live.send(event.clone());
+        Ok(Some(event.seq))
+    }
+
     /// `see`, from the replica, pulled first.
     async fn see(&self, id: String, args: &SeeArgs) -> VerbResult {
         let mut replica = self.replica.lock().await;
@@ -844,11 +891,13 @@ struct Agent {
 /// | `GET /task?after=N&wait=S` | [`AgentPeers::tasks`] | the next [`Task`] after N, waiting up to S seconds; 204: none |
 /// | `POST /say` `{ vessel, key, request }` | [`AgentPeers::replies`] | `{ event }`: the `agent_text`, recorded once per key |
 /// | `POST /action` [`ActionReport`] | [`AgentPeers::replies`] | `{ event }`: an `action_waiting` or `action_settled`, once per request; `null` if there was one |
+/// | `POST /note` [`ForkNote`] | [`AgentPeers::tasks`] | `{ event }`: a `fork_note`; `null` if the child's last note said the same |
 pub fn agent_router(server: Arc<Server>, peers: AgentPeers) -> Router {
     Router::new()
         .route("/task", get(agent_task))
         .route("/say", axum::routing::post(agent_say))
         .route("/action", axum::routing::post(agent_action))
+        .route("/note", axum::routing::post(agent_note))
         .with_state(Agent { server, peers })
 }
 
@@ -956,6 +1005,29 @@ async fn agent_action(
             .into_response();
     }
     match agent.server.action(report) {
+        Ok(event) => axum::Json(serde_json::json!({ "event": event })).into_response(),
+        Err(Undeliverable::Malformed(why)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, why).into_response()
+        }
+        Err(Undeliverable::Down(why)) => (StatusCode::SERVICE_UNAVAILABLE, why).into_response(),
+    }
+}
+
+async fn agent_note(
+    State(agent): State<Agent>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<Peer>,
+    axum::Json(note): axum::Json<ForkNote>,
+) -> Response {
+    // Notes come through the island socket, which knows which Vessel's
+    // child posted one from its peer uid.
+    if peer.uid != Some(agent.peers.tasks) {
+        return (
+            StatusCode::FORBIDDEN,
+            "fork notes come from the island socket\n",
+        )
+            .into_response();
+    }
+    match agent.server.note(note) {
         Ok(event) => axum::Json(serde_json::json!({ "event": event })).into_response(),
         Err(Undeliverable::Malformed(why)) => {
             (StatusCode::UNPROCESSABLE_ENTITY, why).into_response()

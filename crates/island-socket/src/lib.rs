@@ -3,13 +3,15 @@
 //! root filesystem; the caller is the connection's peer uid, looked up in
 //! Taso's Warden config. It answers who the caller is and passes model
 //! calls to the configured OpenAI-compatible providers, within each
-//! Vessel's daily budget, and writes what it was asked to the Island log
-//! as batched `access` entries. It never writes anything else, and never
+//! Vessel's daily budget, hands the prime its tasks and its instructions,
+//! carries a fork child's note to its prime, and writes what it was asked
+//! to the Island log as batched `access` entries. It never writes anything else, and never
 //! on a caller's behalf.
 
 pub mod access;
 pub mod callers;
 pub mod config;
+pub mod notes;
 pub mod server;
 pub mod upstream;
 pub mod usage;
@@ -27,6 +29,7 @@ pub fn shared(config: config::Config) -> Result<Arc<server::Shared>, String> {
     std::fs::create_dir_all(&config.state_dir)
         .map_err(|error| format!("{}: {error}", config.state_dir.display()))?;
     let usage = usage::Usage::load(&config.state_dir, usage::today())?;
+    let notes = notes::Notes::load(&config.state_dir)?;
     let mut keys = BTreeMap::new();
     for (name, provider) in &config.provider {
         if let Some(path) = &provider.key_file {
@@ -42,6 +45,8 @@ pub fn shared(config: config::Config) -> Result<Arc<server::Shared>, String> {
         keys,
         callers: Mutex::new((callers, modified)),
         usage: Mutex::new(usage),
+        notes: Mutex::new(notes),
+        notes_read: Mutex::default(),
         batches: Arc::default(),
         client,
     }))

@@ -808,3 +808,58 @@ async fn an_action_waits_once_settles_once_and_only_an_approval_is_relayed_as_on
         call.what
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forks_note_is_an_event_once_and_only_from_the_island_socket() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(&dir.path().join("server"), started_log(), None).await;
+    let me = my_uid(dir.path());
+    let socket = dir.path().join("agent.sock");
+    agent_socket(running.server.clone(), &socket, me, me);
+    let (mut laptop, _) = Client::attach(&running.url, "main", None, "laptop").await;
+
+    let note = |text: &str, done: bool| {
+        serde_json::json!({ "child": "flare-home-fork-11", "text": text, "done": done }).to_string()
+    };
+    let (status, body) = agent_ask(&socket, "POST", "/note", &note("started", false)).await;
+    assert_eq!(status, 200, "{body}");
+    let event = laptop.event().await;
+    assert_eq!(event.kind, EventKind::ForkNote);
+    assert_eq!(
+        (
+            event.payload["child"].as_str(),
+            event.payload["text"].as_str(),
+            event.payload["done"].as_bool()
+        ),
+        (Some("flare-home-fork-11"), Some("started"), Some(false))
+    );
+    // Posted again (the island socket was not answered): no second event.
+    let (_, again) = agent_ask(&socket, "POST", "/note", &note("started", false)).await;
+    assert_eq!(again, "{\"event\":null}");
+    // The child is done: a new event; another child's same words too.
+    let (_, done) = agent_ask(
+        &socket,
+        "POST",
+        "/note",
+        &note("a draft, in draft.md", true),
+    )
+    .await;
+    assert_ne!(done, "{\"event\":null}");
+    assert_eq!(laptop.event().await.payload["done"], true);
+    let other = note("a draft, in draft.md", true).replace("fork-11", "fork-12");
+    let (_, other) = agent_ask(&socket, "POST", "/note", &other).await;
+    assert_ne!(other, "{\"event\":null}");
+    // Too long, or not a note: refused for good.
+    let long = note(&"x".repeat(flare_core::session::MAX_NOTE + 1), true);
+    assert_eq!(agent_ask(&socket, "POST", "/note", &long).await.0, 422);
+
+    // Only the island socket's user posts notes.
+    let other_socket = dir.path().join("agent-2.sock");
+    agent_socket(running.server.clone(), &other_socket, me + 1, me);
+    assert_eq!(
+        agent_ask(&other_socket, "POST", "/note", &note("x", false))
+            .await
+            .0,
+        403
+    );
+}

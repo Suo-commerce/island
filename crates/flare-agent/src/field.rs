@@ -1,11 +1,14 @@
 //! The Field socket: the agent's channel to Taso's Warden (docs/slice-2.md,
-//! "The Vessel and the agent"). Turns, the transcript, and actions.
+//! "The Vessel and the agent"). Turns, the transcript, actions, and
+//! forks: a child Vessel from the newest Seal, and the promotion of one.
 
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use taso_core::record::{Consequence, RetryPolicy};
-use taso_field::protocol::{EffectResult, Reply, Request, VERSION, recv_reply, send_request};
+use taso_field::protocol::{
+    EffectResult, ForkResult, PromoteResult, Reply, Request, VERSION, recv_reply, send_request,
+};
 
 /// The default path of the Field socket in a Vessel.
 pub const SOCKET: &str = "/run/taso/field.sock";
@@ -21,6 +24,36 @@ pub enum Declared {
     Refused(String),
 }
 
+/// What became of a request to fork.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Forked {
+    /// A child exists: its name (`<subject>-fork-<uid slot>`) and the
+    /// Seal it was forked from.
+    Child {
+        /// What `promote` names it by.
+        name: String,
+        /// The parent's Seal, as an lsn.
+        seal: u64,
+    },
+    /// Not forked, and why: no slot left, or the Seal is not shipped yet.
+    Refused(String),
+}
+
+/// What became of a request to promote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Promoted {
+    /// Promoted at the child's Seal: its held actions are this Vessel's
+    /// now, as these ops. Taso ends the run for the adoption.
+    Adopted {
+        /// The child's Seal.
+        seal: u64,
+        /// This Vessel's new ops, one per action the child held.
+        ops: Vec<u64>,
+    },
+    /// Not promoted, and why.
+    Refused(String),
+}
+
 /// The Warden, as the agent uses it.
 pub trait Field {
     /// The last turn its Chronicle has a Seal for.
@@ -31,6 +64,11 @@ pub trait Field {
     fn transcript(&mut self, entry: &[u8]) -> Result<(), String>;
     /// End a turn: Taso seals `/work`. The Seal's lsn, if it sealed.
     fn turn_end(&mut self, turn: u64) -> Result<Option<u64>, String>;
+    /// Ask for a child Vessel forked from this Vessel's newest Seal.
+    fn fork(&mut self) -> Result<Forked, String>;
+    /// Ask to adopt `child` at its newest Seal: its files and its held
+    /// actions become this Vessel's.
+    fn promote(&mut self, child: &str) -> Result<Promoted, String>;
 }
 
 /// The Field socket.
@@ -115,6 +153,31 @@ impl Field for Socket {
         })? {
             Reply::TurnEnd { sealed, .. } => Ok(sealed),
             other => Err(format!("TurnEnd answered with {other:?}")),
+        }
+    }
+
+    fn fork(&mut self) -> Result<Forked, String> {
+        match self.ask(&Request::Fork { seal: None })? {
+            Reply::Fork { result } => Ok(match result {
+                ForkResult::Forked { child, seal } => Forked::Child { name: child, seal },
+                ForkResult::Refused { reason } => Forked::Refused(reason),
+            }),
+            other => Err(format!("Fork answered with {other:?}")),
+        }
+    }
+
+    fn promote(&mut self, child: &str) -> Result<Promoted, String> {
+        match self.ask(&Request::Promote {
+            child: child.to_owned(),
+            seal: None,
+        })? {
+            Reply::Promote { result, .. } => Ok(match result {
+                PromoteResult::Promoted { seal, adopted } => {
+                    Promoted::Adopted { seal, ops: adopted }
+                }
+                PromoteResult::Refused { reason } => Promoted::Refused(reason),
+            }),
+            other => Err(format!("Promote answered with {other:?}")),
         }
     }
 }

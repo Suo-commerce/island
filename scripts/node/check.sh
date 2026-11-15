@@ -4,9 +4,9 @@
 # node"):
 #
 #   scripts/node/check.sh          what runs; flare-agent started and
-#                                  carrying on; the old stand-in's action
-#                                  dispatched at most once; every reply
-#                                  in the session once
+#                                  carrying on; no action dispatched
+#                                  twice; every reply in the session
+#                                  once; the fork slots left
 #   scripts/node/check.sh kills    the same, then each kill in turn: the
 #                                  Warden, island-sender, island-socket,
 #                                  flare-server, the block log.
@@ -29,6 +29,18 @@
 #                                  verse, say so in TEXT; approve it from
 #                                  the laptop's terminal with /approve
 #
+#   scripts/node/check.sh fork [TEXT]
+#                                  the same, then a fork: TEXT (by default
+#                                  a request for two alternatives) said to
+#                                  the agent, and what comes of it: the
+#                                  children's notes in the session, the
+#                                  fork slots used, whether a child was
+#                                  promoted and the agent started again on
+#                                  its files, and the reply, once. It uses
+#                                  up fork slots for good, and whether the
+#                                  model forks at all is the model's choice:
+#                                  what it did is noted, not failed
+#
 # After a reboot, the plain check is the reboot test: a reboot is a crash.
 #
 # The island socket is asked as flare-home's own uid (setpriv), the way its
@@ -37,7 +49,9 @@
 # flare-agent notes its starts, tasks and turns in /work/.flare/log.jsonl
 # in its dataset, under /var/lib/taso/mnt.  What it wrote after its last
 # Seal goes at its next start, so the file always shows the Seal's history
-# plus this start.
+# plus this start.  A fork child has a dataset and a sender socket of its
+# own, which stay while the Warden runs: flare-home's are told from them
+# by its Vessel id.
 
 set -euo pipefail
 
@@ -50,6 +64,10 @@ UNITS=(taso-blkd taso-wardend island-sender island-stub-model island-socket flar
 ISOCK=/var/lib/taso/agent-island/run/island/island.sock
 SESSION=/var/lib/island/flare/sessions/main.jsonl
 TUI=$ISLAND/target/release/flare-tui
+# flare-home's Vessel id, which names its dataset and its sender socket.
+VESSEL=$("$ISLAND/target/release/island-socket" vessels 2>/dev/null \
+    | awk '$2 == "flare-home" && $3 == "prime" { print $1 }')
+SENDER_SOCK=/run/taso/run/senders/$VESSEL.sock
 # flare-home's first host uid: what the island socket sees when it asks.
 FLARE_UID=$(python3 -c '
 import json
@@ -75,7 +93,7 @@ check() {   # check <what> <got> <want>
 }
 note() { printf 'NOTE\t%s\n' "$1"; }
 
-agent_log() { find "$MNT" -maxdepth 12 -path '*/.flare/log.jsonl' 2>/dev/null | head -1; }
+agent_log() { find "$MNT" -maxdepth 12 -path "*v-$VESSEL/.flare/log.jsonl" 2>/dev/null | head -1; }
 
 # agent <expression over d (events) and S (the last start and after)>
 agent() {
@@ -93,7 +111,8 @@ PY
 }
 
 # replies <expression over R (the agent_text payloads in the session), W and
-# A (the action_waiting and action_settled events)>
+# A (the action_waiting and action_settled events), N (the fork_note
+# payloads) and U (the user_message events)>
 replies() {
     [ -f "$SESSION" ] || { echo "no-session"; return 0; }
     python3 - "$SESSION" "$1" <<'PY'
@@ -102,6 +121,8 @@ E = [json.loads(line) for line in open(sys.argv[1])]
 R = [e["payload"] for e in E if e.get("kind") == "agent_text"]
 W = [e for e in E if e.get("kind") == "action_waiting"]
 A = [e for e in E if e.get("kind") == "action_settled"]
+N = [e["payload"] for e in E if e.get("kind") == "fork_note"]
+U = [e for e in E if e.get("kind") == "user_message"]
 r = eval(sys.argv[2])
 print(json.dumps(r) if isinstance(r, (list, dict, bool)) or r is None else r)
 PY
@@ -121,10 +142,12 @@ new_start() {
     [ -n "$now" ] && [ "$now" != no-log ] && [ "$now" != "$1" ]
 }
 
-dispatches() {   # dispatch entries for flare-home in the log
-    local v; v=$(basename "$(ls /run/taso/run/senders/*.sock 2>/dev/null | head -1)" .sock)
-    [ -n "$v" ] || { echo "no-socket"; return 0; }
-    "$CLI" tail --broker "$BROKER" --root "$ROOT" -n 1000 | grep -c " dispatch .* vessel $v op " || true
+dispatched_twice() {   # the action keys flare-home's dispatch entries name more than once
+    "$CLI" tail --broker "$BROKER" --root "$ROOT" -n 100000 \
+        | sed -n "s/.* dispatch .* vessel $VESSEL op [0-9]* key \\([0-9a-f]*\\) .*/\\1/p" | sort | uniq -d | wc -l
+}
+forks_left() {
+    island /whoami | python3 -c 'import json, sys; d = json.load(sys.stdin); print(d["forks_left"], "of", len(d["fork_slots"]))' 2>/dev/null || echo no-answer
 }
 
 state() {   # the plain checks
@@ -135,12 +158,11 @@ state() {   # the plain checks
     # the agent first.
     wait_until 180 started || true
     check "$when: the Warden's sender socket for flare-home is there" \
-        "$(ls /run/taso/run/senders/*.sock 2>/dev/null | wc -l)" 1
+        "$([ -S "$SENDER_SOCK" ] && echo there || echo missing)" there
     check "$when: flare-agent started in flare-home" "$(agent 'bool(S)')" true
     note "$when: its starts in its Seal's history and now: $(agent '[(e["start"], e["turn"], e["cursor"]) for e in d if e["event"] == "start"]')"
     note "$when: its last turns: $(agent '[(e["turn"], e["cursor"]) for e in d if e["event"] == "turn"][-3:]')"
-    check "$when: the dispatch entries for it in the log: at most one" \
-        "$(dispatches | awk '{ print ($1 <= 1) ? "ok" : $1 }')" ok
+    check "$when: no action of its was dispatched twice" "$(dispatched_twice)" 0
     check "$when: every reply in the session once, by its key" \
         "$(replies 'len(R) == len({r["key"] for r in R})')" true
     check "$when: every action waiting and settled at most once" \
@@ -149,7 +171,8 @@ state() {   # the plain checks
     wait_until 30 test -S "$ISOCK" || true
     check "$when: the island socket says flare-home is flare-home" \
         "$(island /whoami | python3 -c 'import json, sys; d = json.load(sys.stdin); print(d["subject"], d["role"], d["vessel"])' 2>/dev/null || echo no-answer)" \
-        "flare-home prime $(basename "$(ls /run/taso/run/senders/*.sock 2>/dev/null | head -1)" .sock)"
+        "flare-home prime $VESSEL"
+    note "$when: fork slots left: $(forks_left); fork notes in the session: $(replies 'len(N)')"
     check "$when: the island socket refuses root, which is no Vessel" \
         "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --unix-socket "$ISOCK" http://island/whoami || true)" 403
     note "$when: island-sender's last word on it: $(journalctl -u island-sender -o cat -n 200 --no-pager | grep '^{' | tail -1)"
@@ -189,7 +212,7 @@ case ${1:-} in
         ;;
     think)
         state now
-        vessel=$(basename "$(ls /run/taso/run/senders/*.sock 2>/dev/null | head -1)" .sock)
+        vessel=$VESSEL
         before=$("$CLI" tail --broker "$BROKER" --root "$ROOT" -n 1000 | grep -c " access .*vessel $vessel " || true)
         body=$(python3 -c 'import json, sys
 d = {"messages": [{"role": "user", "content": "hello from check.sh: answer in one short sentence"}]}
@@ -230,8 +253,42 @@ print(d.get("model"), "said:", repr(d["choices"][0]["message"]["content"][:160])
         note "converse: $("$CLI" tail --broker "$BROKER" --root "$ROOT" -n 1000 | grep ' access ' | tail -2 | tr '\n' '|')"
         note "converse: the agent's turns: $(agent '[(e["turn"], e["cursor"]) for e in d if e["event"] == "turn"][-3:]')"
         ;;
+    fork)
+        state now
+        text=${2:-"check.sh asks: try this two ways with fork, one child each: a haiku about an island in haiku.md, and a limerick about one in limerick.md. Promote the one you like better and tell me which."}
+        slots=$(forks_left)
+        notes=$(replies 'len(N)')
+        promoted=$(agent 'len([e for e in d if e["event"] == "promoted"])')
+        note "fork: before: $slots fork slots left"
+        out=$(printf '/say %s\n' "$text" | timeout 1500 "$TUI" --server ws://10.77.0.1:4749/session \
+            --session main --client check-fork --after 999999999 --root "$ROOT" --broker "$BROKER" \
+            --replica /tmp/check-flare-replica.log --reply-wait 1400 2>&1 || true)
+        task=$(printf '%s\n' "$out" | sed -n 's/^#\([0-9]*\) .* check-fork → agent: .*/\1/p' | tail -1)
+        check "fork: said in the session, as a task" "$([ -n "$task" ] && echo yes || echo no)" yes
+        reply=$(printf '%s\n' "$out" | grep -A20 " agent (to #${task:-x}): " || true)
+        check "fork: the agent replied to it" "$([ -n "$reply" ] && echo yes || echo no)" yes
+        note "fork: $(printf '%s' "$reply" | head -c 800)"
+        check "fork: the reply is in the session once" \
+            "$(replies "len([r for r in R if r['task'] == ${task:-0}])")" 1
+        note "fork: the children's notes: $(replies "[(n['child'], n['done'], n['text'][:80]) for n in N[$notes:]]")"
+        note "fork: after: $(forks_left) fork slots left"
+        check "fork: every child that said it started also said its last word" \
+            "$(replies "sorted({n['child'] for n in N[$notes:]}) == sorted({n['child'] for n in N[$notes:] if n['done']})")" true
+        if [ "$(replies "len(N[$notes:])")" = 0 ]; then
+            note "fork: the model did not fork; nothing more to check"
+        elif [ "$(replies "any('forked for this task, promoted' in r['text'] for r in R if r['task'] == ${task:-0})")" = true ]; then
+            sleep 5
+            check "fork: a child was promoted, and the agent was started again on its files" \
+                "$(agent 'len([e for e in d if e["event"] == "promoted"])')" "$((promoted + 1))"
+            note "fork: promoted: $(agent '[e["child"] for e in d if e["event"] == "promoted"][-1:]')"
+            note "fork: waiting for you now: $(replies '[(e["seq"], e["payload"]["shown"][:60]) for e in W if e["payload"]["request_hash"] not in {a["payload"]["request_hash"] for a in A}]')"
+        else
+            note "fork: no child was promoted: the agent answered itself, and the children are dropped"
+        fi
+        state "after the fork"
+        ;;
     *)
-        sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

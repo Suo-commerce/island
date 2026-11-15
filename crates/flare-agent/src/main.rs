@@ -1,11 +1,14 @@
 //! `flare-agent`: Flare's agent, in the Vessel `flare-home`.
 //!
 //! It asks the island socket who it is. As the prime it says Hello on the
-//! Field and works task by task, for as long as it runs. A fork child has
-//! nothing to do until forking is built (slice 2, step 6), and exits.
+//! Field and works task by task, for as long as it runs; when it promotes
+//! a fork child it exits, and the Warden starts it again on that child's
+//! files. As a fork child it does the one task its fork set gives it,
+//! posts its note and exits; Taso never starts a child again.
 //!
-//! Exit codes: 0 for a fork child; 1 when the Field or its files fail,
-//! after which the Warden starts it again on its last Seal.
+//! Exit codes: 0 for a fork child that posted its note, and for the prime
+//! after a promotion; 1 when the Field or its files fail, after which the
+//! Warden starts the prime again on its last Seal.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,8 +16,9 @@ use std::time::Duration;
 
 use clap::Parser;
 use flare_agent::field::{self, Field};
+use flare_agent::island::Whoami;
 use flare_agent::island::{self, Island};
-use flare_agent::run::{Agent, note};
+use flare_agent::run::{Agent, Stepped, note};
 use flare_agent::tools;
 
 /// Flare's agent.
@@ -30,6 +34,10 @@ struct Args {
     /// The work directory.
     #[arg(long, default_value = tools::WORK)]
     work: PathBuf,
+    /// The longest the prime waits for its fork children's notes, in
+    /// seconds, before `fork` returns what there is.
+    #[arg(long, value_name = "SECONDS", default_value_t = 900)]
+    fork_wait: u64,
 }
 
 fn main() -> ExitCode {
@@ -50,11 +58,7 @@ fn main() -> ExitCode {
         "flare-agent: {} {} in slot {}, vessel {}, model {}",
         me.subject, me.role, me.slot, me.vessel, me.default_model
     );
-    if me.role != "prime" {
-        eprintln!("flare-agent: a fork has no task until forking is built; exiting");
-        return ExitCode::SUCCESS;
-    }
-    match work(&args, island) {
+    match work(&args, island, &me) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
             eprintln!("flare-agent: {why}");
@@ -63,15 +67,25 @@ fn main() -> ExitCode {
     }
 }
 
-fn work(args: &Args, island: Island) -> Result<(), String> {
+fn work(args: &Args, island: Island, me: &Whoami) -> Result<(), String> {
     let mut field = field::Socket::connect(&args.field)?;
     eprintln!(
         "flare-agent: last sealed turn {:?}",
         field.last_sealed_turn()
     );
     let mut model = island.clone();
+    let mut forks = island.clone();
     let mut tasks = island;
-    let mut agent = Agent::new(&mut field, &mut model, &mut tasks)?;
+    let mut agent = Agent::new(&mut field, &mut model, &mut tasks)?.with_forks(&mut forks);
+    agent.waits.forks = Duration::from_secs(args.fork_wait);
+    if me.is_fork() {
+        note(serde_json::json!({
+            "event": "start", "start": start_id(), "turn": agent.turn(), "fork": me.subject,
+            "cursor": agent.state().cursor,
+            "working": agent.state().working.as_ref().map(|task| task.id),
+        }));
+        return agent.run_child(me);
+    }
     eprintln!(
         "flare-agent: carrying on after task {:?}, turn {}",
         agent.state().cursor,
@@ -86,6 +100,12 @@ fn work(args: &Args, island: Island) -> Result<(), String> {
     }));
     loop {
         match agent.step() {
+            // Taso ends the run for the adoption, and the Warden starts
+            // the agent again on the child's files.
+            Ok(Stepped::Promoted(child)) => {
+                eprintln!("flare-agent: {child} promoted; ending this run");
+                return Ok(());
+            }
             Ok(_) => {}
             // The island socket restarting, or the session server down:
             // tasks wait. Anything else from the Field or the files ends

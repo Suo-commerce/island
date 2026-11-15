@@ -12,7 +12,9 @@
 //! one change at a time. Left out: steering and follow-up messages (a new
 //! message from Jarmo is the next task), compaction, the before and after
 //! hooks (the seam where Stormgate would sit stays empty in this slice),
-//! and events for a terminal.
+//! and events for a terminal. Added: `fork` and `promote` (docs/slice-2.md,
+//! "Forking, step by step"), which are the run's to carry out; a
+//! promotion ends the loop, since Taso ends the run for it.
 
 use serde_json::{Value, json};
 
@@ -51,6 +53,29 @@ pub trait Host {
     fn record(&mut self, entry: Value);
     /// A round of tool calls ended: the run may end a turn here.
     fn round(&mut self, history: &[Message]) -> Result<(), String>;
+    /// A tool is about to run (its name is known and its arguments are an
+    /// object).
+    fn begin(&mut self, _tool: &str) {}
+    /// Start one fork child per task and wait for their notes (the tool
+    /// `fork`). `call` is the tool call's id and `history` the
+    /// conversation up to it: the turn ends here, and a child starts on
+    /// what that Seal holds.
+    fn fork(
+        &mut self,
+        _tasks: Vec<String>,
+        _call: &str,
+        _history: &[Message],
+    ) -> Result<String, String> {
+        Err("this agent cannot fork".to_owned())
+    }
+    /// Adopt one fork child (the tool `promote`).
+    fn promote(&mut self, _child: &str) -> Result<String, String> {
+        Err("this agent cannot promote".to_owned())
+    }
+    /// Whether the run is over: a promotion ends it, and the loop stops.
+    fn over(&self) -> bool {
+        false
+    }
 }
 
 /// How the loop ended.
@@ -60,6 +85,9 @@ pub enum Ended {
     Answered(String),
     /// It could not go on.
     Failed(String),
+    /// A fork child was promoted: Taso ends the run, and the next start is
+    /// on the child's files.
+    Promoted,
 }
 
 /// The most model calls one task may take.
@@ -105,7 +133,8 @@ pub fn run(
         if answer.calls.is_empty() {
             return Ended::Answered(answer.text);
         }
-        for call in &answer.calls {
+        for (index, call) in answer.calls.iter().enumerate() {
+            let last = index + 1 == answer.calls.len();
             let outcome = if answer.stop == Stop::Length {
                 Outcome::error(format!(
                     "Tool call \"{}\" was not executed: the response hit the output token limit, \
@@ -114,7 +143,7 @@ pub fn run(
                     call.name
                 ))
             } else {
-                call_tool(host, tools, &call.name, &call.arguments)
+                call_tool(host, tools, call, last, history)
             };
             let result = Message::Tool {
                 call_id: call.id.clone(),
@@ -124,6 +153,9 @@ pub fn run(
             };
             host.record(json!({ "kind": "tool", "message": result }));
             history.push(result);
+            if host.over() {
+                return Ended::Promoted;
+            }
         }
         if let Err(why) = host.round(history) {
             return Ended::Failed(why);
@@ -132,7 +164,14 @@ pub fn run(
     Ended::Failed(format!("stopped after {MAX_CALLS} model calls on one task"))
 }
 
-fn call_tool(host: &mut dyn Host, tools: &[Spec], name: &str, arguments: &str) -> Outcome {
+fn call_tool(
+    host: &mut dyn Host,
+    tools: &[Spec],
+    call: &crate::message::ToolCall,
+    last: bool,
+    history: &[Message],
+) -> Outcome {
+    let (name, arguments) = (call.name.as_str(), call.arguments.as_str());
     if !tools.iter().any(|tool| tool.name == name) {
         return Outcome::error(format!("Tool {name} not found"));
     }
@@ -144,6 +183,39 @@ fn call_tool(host: &mut dyn Host, tools: &[Spec], name: &str, arguments: &str) -
             ));
         }
     };
+    if name == "fork" {
+        // The turn ends inside this call, and the children start on what
+        // that Seal holds: a call after it in the same message would be
+        // theirs to run too.
+        if !last {
+            return Outcome::error(
+                "fork was not run: call it alone, as the last tool call of a message, since \
+                 your turn ends there and the children start from it. Call it again.",
+            );
+        }
+        return match fork_tasks(&args) {
+            Ok(tasks) => {
+                host.begin(name);
+                match host.fork(tasks, &call.id, history) {
+                    Ok(done) => Outcome::text(done),
+                    Err(why) => Outcome::error(why),
+                }
+            }
+            Err(why) => Outcome::error(why),
+        };
+    }
+    host.begin(name);
+    if name == "promote" {
+        return match args.get("child").and_then(Value::as_str) {
+            Some(child) => match host.promote(child.trim()) {
+                Ok(done) => Outcome::text(done),
+                Err(why) => Outcome::error(why),
+            },
+            None => {
+                Outcome::error("Validation failed for tool arguments: `child` must be a string")
+            }
+        };
+    }
     if name == "verse" {
         return match verse_of(&args) {
             Ok(verse) => match host.verse(verse) {
@@ -163,6 +235,43 @@ fn call_tool(host: &mut dyn Host, tools: &[Spec], name: &str, arguments: &str) -
         };
     }
     run_file_tool(name, &args).unwrap_or_else(|| Outcome::error(format!("Tool {name} not found")))
+}
+
+/// The tasks the arguments of `fork` give: one per child.
+fn fork_tasks(args: &Value) -> Result<Vec<String>, String> {
+    use crate::tools::{MAX_CHILDREN, MAX_FORK_TASK};
+    let tasks: Vec<String> = match args.get("tasks") {
+        Some(Value::Array(tasks)) => tasks
+            .iter()
+            .map(|task| {
+                task.as_str()
+                    .map(|task| task.trim().to_owned())
+                    .filter(|task| !task.is_empty())
+                    .ok_or("Validation failed for tool arguments: each of `tasks` must be a string with something in it")
+            })
+            .collect::<Result<_, _>>()?,
+        _ => {
+            return Err(
+                "Validation failed for tool arguments: `tasks` must be a list of strings, one \
+                 task per child"
+                    .to_owned(),
+            );
+        }
+    };
+    if tasks.is_empty() || tasks.len() > MAX_CHILDREN {
+        return Err(format!(
+            "fork takes 1 to {MAX_CHILDREN} tasks, one child each, not {}",
+            tasks.len()
+        ));
+    }
+    if let Some(long) = tasks.iter().find(|task| task.len() > MAX_FORK_TASK) {
+        return Err(format!(
+            "a child's task is at most {MAX_FORK_TASK} bytes; one of these is {}. Put the \
+             material in a file first: the children get your files.",
+            long.len()
+        ));
+    }
+    Ok(tasks)
 }
 
 /// The verse the arguments of `verse` describe.
@@ -211,7 +320,7 @@ pub fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::message::ToolCall;
-    use crate::tools::specs;
+    use crate::tools::{specs, specs_with_forks};
 
     /// Answers from a list.
     pub struct Scripted(pub Vec<Assistant>);
@@ -389,6 +498,61 @@ mod tests {
         let results = results(&history);
         assert!(results[1].1 && results[1].0.contains("`evidence` must be"));
         assert!(results[2].1 && results[2].0.contains("64 hex digits"));
+    }
+
+    #[test]
+    fn fork_is_run_only_as_the_last_call_with_its_tasks_and_is_the_runs_to_do() {
+        let two = r#"{"tasks":["one way"," another "]}"#;
+        let mut model = Scripted(vec![
+            answer(
+                "",
+                &[("fork", two), ("say", r#"{"text":"after"}"#)],
+                Stop::ToolUse,
+            ),
+            answer("", &[("fork", r#"{"tasks":[]}"#)], Stop::ToolUse),
+            answer("", &[("fork", r#"{"tasks":"one"}"#)], Stop::ToolUse),
+            answer("", &[("promote", "{}"), ("fork", two)], Stop::ToolUse),
+            answer("ok", &[], Stop::Stop),
+        ]);
+        let mut host = Recorder::default();
+        let mut history = Vec::new();
+        run(&mut model, &mut host, &mut history, &specs_with_forks());
+        let results = results(&history);
+        // Not the last call of its message: not run, and the say after it is.
+        assert!(
+            results[0].1 && results[0].0.contains("call it alone"),
+            "{results:?}"
+        );
+        assert_eq!(results[1], ("Sent.".into(), false));
+        assert!(
+            results[2].1 && results[2].0.contains("1 to 4 tasks"),
+            "{results:?}"
+        );
+        assert!(
+            results[3].1 && results[3].0.contains("list of strings"),
+            "{results:?}"
+        );
+        assert!(
+            results[4].1 && results[4].0.contains("`child` must be a string"),
+            "{results:?}"
+        );
+        // Well formed and last: handed to the run, which here cannot fork.
+        assert_eq!(results[5], ("this agent cannot fork".into(), true));
+        // An agent without the fork tools is not offered them.
+        let mut history = Vec::new();
+        run(
+            &mut Scripted(vec![
+                answer("", &[("fork", two)], Stop::ToolUse),
+                answer("ok", &[], Stop::Stop),
+            ]),
+            &mut host,
+            &mut history,
+            &specs(),
+        );
+        assert_eq!(
+            super::tests::results(&history)[0],
+            ("Tool fork not found".into(), true)
+        );
     }
 
     #[test]

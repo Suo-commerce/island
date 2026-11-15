@@ -5,11 +5,13 @@
 //! holds and `island-sender` carries.
 //!
 //! - [`agent_loop`]: model, tools, results, again; ported from Pi.
-//! - [`tools`]: `read`, `write`, `edit`, `bash` (ported from Pi) and `say`.
+//! - [`tools`]: `read`, `write`, `edit`, `bash` (ported from Pi), `say`,
+//!   `verse`, `fork` and `promote`.
 //! - [`openai`]: the chat request and the streamed answer.
-//! - [`island`]: the island socket: who am I, the next task, the model.
-//! - [`field`]: the Field socket: actions, the transcript, turns.
-//! - [`run`]: one run of the prime, task by task.
+//! - [`island`]: the island socket: who am I, the next task, the model,
+//!   the notes of fork children.
+//! - [`field`]: the Field socket: actions, the transcript, turns, forks.
+//! - [`run`]: one run of the prime, task by task, and a fork child's run.
 //!
 //! The parts ported from Pi (<https://github.com/badlogic/pi-mono>,
 //! Copyright (c) 2025 Mario Zechner) are under the MIT License, in
