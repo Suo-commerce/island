@@ -160,7 +160,7 @@ state() {   # the plain checks
     check "$when: the Warden's sender socket for flare-home is there" \
         "$([ -S "$SENDER_SOCK" ] && echo there || echo missing)" there
     check "$when: flare-agent started in flare-home" "$(agent 'bool(S)')" true
-    note "$when: its starts in its Seal's history and now: $(agent '[(e["start"], e["turn"], e["cursor"]) for e in d if e["event"] == "start"]')"
+    note "$when: its starts in its Seal's history and now: $(agent '[(e["start"], e["turn"], e["cursor"]) + ((e["fork"],) if "fork" in e else ()) for e in d if e["event"] == "start"]')"
     note "$when: its last turns: $(agent '[(e["turn"], e["cursor"]) for e in d if e["event"] == "turn"][-3:]')"
     check "$when: no action of its was dispatched twice" "$(dispatched_twice)" 0
     check "$when: every reply in the session once, by its key" \

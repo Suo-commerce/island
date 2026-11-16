@@ -552,7 +552,11 @@ island_up() {   # the broker on the throwaway log
 }
 island_down() { kill "$ISL_BROKER" 2>/dev/null || true; wait "$ISL_BROKER" 2>/dev/null || true; }
 island_setup() {
-    [ -n "${ISL_ROOT:-}" ] && return 0   # once, for every run that uses it
+    if [ -n "${ISL_ROOT:-}" ]; then   # once, for every run that uses it
+        # A run before this one may have left its broker down (run s does).
+        (exec 3<>"/dev/tcp/127.0.0.1/$ISL_PORT") 2>/dev/null || island_up
+        return 0
+    fi
     ISL=$WORK/island
     mkdir -p "$ISL"
     local who scope
@@ -1024,6 +1028,14 @@ print(json.loads(c.getresponse().read())[sys.argv[3]])
 PY
 }
 
+# v_verses <public key> [text]: the verses on `flare` that key wrote, with
+# that text if one is given.  island-cli pads its columns, so the fields
+# are matched, not the line.
+v_verses() {
+    "$IBIN/island-cli" tail --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" -n 500 \
+        | awk -v w="${1:0:8}" '$3 == "verse" && $4 == "flare" && $5 == w' | grep -c -F -- "${2:-}" || true
+}
+
 v_socket_up() {
     rm -f "$ROOTFS/run/island/island.sock"   # a killed one's, or another run's
     "$IBIN/island-socket" serve --config "$V/socket.toml" 2>>"$V/socket.err" &
@@ -1141,8 +1153,7 @@ run_v() {
     swait 30 "len(W) == 1" || true
     check v "v3: the child's verse was adopted and waits for approval" \
         "$(sx "[e['payload']['shown'] for e in W]")" '["a verse on flare: [decision] \"Fork child 2 drafted it as a list\""]'
-    check v "v3: nothing is written before the approval" \
-        "$("$IBIN/island-cli" tail --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" -n 500 | grep -c " verse flare ${pub:0:8}" || true)" 0
+    check v "v3: nothing is written before the approval" "$(v_verses "$pub")" 0
     killw "$V_WARDEN"
     v_warden v-3 || { check v "v3: flare-agent starts again after the kill" no yes; return 0; }
     sleep 2
@@ -1155,7 +1166,7 @@ run_v() {
     swait 60 "len(A) == 1" || true
     check v "v3: approved, it is sent" "$(sx "[e['payload']['settled'] for e in A]")" '["sent"]'
     check v "v3: the verse is in the log once, signed with the Vessel's key" \
-        "$("$IBIN/island-cli" tail --broker "http://127.0.0.1:$ISL_PORT" --root "$ISL_ROOT" -n 500 | grep -c " verse flare ${pub:0:8}.*Fork child 2 drafted it as a list" || true)" 1
+        "$(v_verses "$pub") $(v_verses "$pub" "Fork child 2 drafted it as a list")" "1 1"
     out=$(vsay gate-3b "and after the promotion")
     task=$(vtask gate-3b)
     check v "v3: with its effect authority back, the agent answers the next task" \

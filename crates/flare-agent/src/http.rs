@@ -45,6 +45,14 @@ fn bad(what: impl Into<String>) -> std::io::Error {
 pub fn read_answer(mut reader: impl BufRead) -> std::io::Result<Answer> {
     let mut line = String::new();
     reader.read_line(&mut line)?;
+    if line.is_empty() {
+        // The other end went away (the island socket restarting, say)
+        // before it answered.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the connection closed before an answer",
+        ));
+    }
     let status = line
         .split_whitespace()
         .nth(1)
@@ -118,5 +126,8 @@ mod tests {
         let empty = read_answer(&b"HTTP/1.1 204 No Content\r\n\r\n"[..]).unwrap();
         assert_eq!((empty.status, empty.body.len()), (204, 0));
         assert!(read_answer(&b"hello"[..]).is_err());
+        // The other end closed without a word: said as that.
+        let closed = read_answer(&b""[..]).unwrap_err();
+        assert_eq!(closed.to_string(), "the connection closed before an answer");
     }
 }
