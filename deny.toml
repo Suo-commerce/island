@@ -19,7 +19,13 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 # is listed here by id with its reason.
 unmaintained = "all"
 unsound = "all"
-ignore = []
+ignore = [
+    # chrono is marked unmaintained (2026-11-17). It is not ours: rmcp, the
+    # MCP library of `island-cli mcp`, pulls it in for timestamps, and no
+    # rmcp without it exists yet. Nothing of Island's calls it. Drop this
+    # line when rmcp moves to jiff or time.
+    "RUSTSEC-2026-0543",
+]
 
 [licenses]
 # A new dependency with a licence not listed here fails `just deps` until it is
