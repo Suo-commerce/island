@@ -4,7 +4,9 @@
 //! - [`store`]: a session's events on disk.
 //! - [`Server`]: the sessions, the server's own verified replica of the
 //!   log, and its way to the broker.
-//! - [`router`]: the WebSocket at `/session`.
+//! - [`router`]: the WebSocket at `/session`; with a face, the page and
+//!   its files, served from this server itself, and `/log` for the page
+//!   to read the log by ([`face`]).
 //! - [`agent_router`]: the agent's side, on a Unix socket only the island
 //!   socket (tasks) and `island-sender` (replies) may use: the next
 //!   message said to the agent, the agent's reply delivered once per
@@ -18,6 +20,7 @@
 
 #![warn(missing_docs)]
 
+pub mod face;
 pub mod store;
 
 use std::collections::BTreeMap;
@@ -32,10 +35,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use flare_core::session::{
-    ActionReport, ActionSettled, ActionWaiting, AgentText, ClientMessage, Event, EventKind,
-    ForkNote, MAX_NOTE, MAX_REPLY, MAX_SAY, Place, Problem, ProposeArgs, RECENT, SESSION_VERSION,
-    SayArgs, SayRequest, SeeArgs, ServerMessage, Settled, Task, UserMessage, Verb, VerbCall,
-    VerbResult, valid_session,
+    ActionReport, ActionSettled, ActionWaiting, AgentPhase, AgentState, AgentText, ClientMessage,
+    Event, EventKind, ForkNote, MAX_NOTE, MAX_REPLY, MAX_SAY, Place, Problem, ProposeArgs, RECENT,
+    SESSION_VERSION, SayArgs, SayRequest, SeeArgs, ServerMessage, Settled, Task, UserMessage, Verb,
+    VerbCall, VerbResult, valid_session,
 };
 use flare_core::{Overview, StreamView, content, hex, kind_name, short};
 use flare_link::{PullError, Replica, pull};
@@ -68,6 +71,10 @@ pub struct Config {
     /// The session the agent listens in: `say` is taken there only, and
     /// its tasks and replies are there.
     pub agent_session: String,
+    /// The face: the directory of the page this server serves from
+    /// itself. With one, that page (and no other) may attach to a
+    /// session and read `/log`; without one, no web page may.
+    pub face: Option<PathBuf>,
 }
 
 /// One session: its events, and the channel new ones go out on.
@@ -178,7 +185,11 @@ impl Server {
             Some(after) => usize::try_from(after.saturating_add(1)).unwrap_or(usize::MAX),
             None => events.len().saturating_sub(RECENT as usize),
         };
-        let replay = events.get(from..).unwrap_or(&[]).to_vec();
+        let mut replay = match after {
+            Some(_) => Vec::new(),
+            None => standing(events, from),
+        };
+        replay.extend_from_slice(events.get(from..).unwrap_or(&[]));
         Ok((replay, session.store.next(), session.live.subscribe()))
     }
 
@@ -501,6 +512,7 @@ impl Server {
         if last.as_ref() == Some(&note) {
             return Ok(None);
         }
+        let child = note.child.clone();
         let payload =
             serde_json::to_value(note).map_err(|error| Undeliverable::Down(error.to_string()))?;
         let event = session
@@ -510,7 +522,54 @@ impl Server {
                 Undeliverable::Down(format!("{}: {error}", session.store.path().display()))
             })?;
         let _ = session.live.send(event.clone());
+        if let Err(why) = tell(session, (self.config.clock)(), Seen::Note(child)) {
+            eprintln!("flare-server: the agent's state was not recorded: {why}");
+        }
         Ok(Some(event.seq))
+    }
+
+    /// Note what the agent socket saw of the agent, as an `agent_state`
+    /// when it is a change. Never an error to whoever asked: the state is
+    /// told beside the work, not instead of it.
+    fn agent_seen(&self, seen: Seen) {
+        let told = (|| {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "the sessions are lost".to_owned())?;
+            let name = self.config.agent_session.clone();
+            let session = self.session(&mut sessions, &name)?;
+            tell(session, (self.config.clock)(), seen)
+        })();
+        if let Err(why) = told {
+            eprintln!("flare-server: the agent's state was not recorded: {why}");
+        }
+    }
+
+    /// The log for the face: the head, and the newest `entries` entries,
+    /// newest first, from the replica, pulled first.
+    pub async fn log(&self, entries: usize) -> face::LogView {
+        let mut replica = self.replica.lock().await;
+        let problem = match pull(&mut replica, &self.plain).await {
+            Ok(_) => None,
+            Err(error) => Some(error.to_string()),
+        };
+        let records = replica.records();
+        face::LogView {
+            head: replica.head().map(|(seq, hash)| Place {
+                seq,
+                hash: hex(&hash),
+            }),
+            entries: records.len() as u64,
+            root: hex(&self.config.root),
+            problem,
+            recent: records
+                .iter()
+                .rev()
+                .take(entries)
+                .map(|record| face::LogLine::of(&flare_core::Line::of(record)))
+                .collect(),
+        }
     }
 
     /// `see`, from the replica, pulled first.
@@ -618,17 +677,142 @@ impl Server {
     }
 }
 
+/// What the agent socket saw of the agent.
+enum Seen {
+    /// It asked for a task and none waits.
+    Asked,
+    /// This task was handed to it.
+    Handed(u64),
+    /// This fork child of it posted a note.
+    Note(String),
+}
+
+/// The newest `agent_state` of a session.
+fn agent_state(events: &[Event]) -> Option<AgentState> {
+    events
+        .iter()
+        .rev()
+        .find(|event| event.kind == EventKind::AgentState)
+        .and_then(|event| serde_json::from_value(event.payload.clone()).ok())
+}
+
+/// Record an `agent_state` if what was seen changes the state.
+fn tell(session: &mut Session, at: u64, seen: Seen) -> Result<(), String> {
+    let now = agent_state(session.store.events());
+    let next = match (seen, &now) {
+        (Seen::Asked, _) => AgentState {
+            state: AgentPhase::Idle,
+            task: None,
+            children: Vec::new(),
+        },
+        // Handed again (the agent or the island socket started again):
+        // still on it, with the children it has.
+        (Seen::Handed(task), Some(now)) if now.task == Some(task) => return Ok(()),
+        (Seen::Handed(task), _) => AgentState {
+            state: AgentPhase::Working,
+            task: Some(task),
+            children: Vec::new(),
+        },
+        (Seen::Note(child), Some(now)) if now.task.is_some() => {
+            let mut children = now.children.clone();
+            if !children.contains(&child) {
+                children.push(child);
+            }
+            AgentState {
+                state: AgentPhase::Forked,
+                task: now.task,
+                children,
+            }
+        }
+        // A note with no task known: nothing to say about the agent.
+        (Seen::Note(_), _) => return Ok(()),
+    };
+    if now.as_ref() == Some(&next) {
+        return Ok(());
+    }
+    let payload = serde_json::to_value(next).map_err(|error| error.to_string())?;
+    let event = session
+        .store
+        .append(at, EventKind::AgentState, payload)
+        .map_err(|error| format!("{}: {error}", session.store.path().display()))?;
+    let _ = session.live.send(event);
+    Ok(())
+}
+
+/// What a client that attaches without a cursor is told from before the
+/// newest events (`events[..from]`): every action still waiting, and the
+/// agent's state if no newer one is among the newest.
+fn standing(events: &[Event], from: usize) -> Vec<Event> {
+    let earlier = events.get(..from).unwrap_or(&[]);
+    let hash = |event: &Event| {
+        event
+            .payload
+            .get("request_hash")
+            .and_then(|hash| hash.as_str())
+            .map(str::to_owned)
+    };
+    let settled: std::collections::BTreeSet<String> = events
+        .iter()
+        .filter(|event| event.kind == EventKind::ActionSettled)
+        .filter_map(hash)
+        .collect();
+    let state = earlier
+        .iter()
+        .rposition(|event| event.kind == EventKind::AgentState)
+        .filter(|_| {
+            !events
+                .get(from..)
+                .unwrap_or(&[])
+                .iter()
+                .any(|event| event.kind == EventKind::AgentState)
+        });
+    earlier
+        .iter()
+        .enumerate()
+        .filter(|(index, event)| {
+            Some(*index) == state
+                || (event.kind == EventKind::ActionWaiting
+                    && hash(event).is_some_and(|hash| !settled.contains(&hash)))
+        })
+        .map(|(_, event)| event.clone())
+        .collect()
+}
+
 /// What a command will do, once its call is recorded.
 enum Work {
     See(SeeArgs),
     Propose(Box<(island_core::Submission, island_core::Signature)>),
 }
 
-/// The server's routes: the session WebSocket at `/session`.
+/// The server's routes: the session WebSocket at `/session`; with a
+/// face, `/log` and the page's files as well.
 pub fn router(server: Arc<Server>) -> Router {
-    Router::new()
-        .route("/session", get(upgrade))
-        .with_state(server)
+    let routes = Router::new().route("/session", get(upgrade));
+    let routes = if server.config.face.is_some() {
+        routes.route("/log", get(face::log)).fallback(face::file)
+    } else {
+        routes
+    };
+    routes.with_state(server)
+}
+
+/// The `Host` a request was addressed to, if it is one of this server's.
+fn addressed(server: &Server, headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(HOST)
+        .and_then(|host| host.to_str().ok())
+        .filter(|host| host_allowed(host, &server.config.hosts))
+        .map(str::to_ascii_lowercase)
+}
+
+/// Whether a request that names an `Origin` comes from this server's own
+/// page: the face is served, and the origin is exactly the address the
+/// request went to. (Plain http: the server is reached over WireGuard.)
+fn own_page(server: &Server, host: &str, origin: &axum::http::HeaderValue) -> bool {
+    server.config.face.is_some()
+        && origin
+            .to_str()
+            .is_ok_and(|origin| origin.eq_ignore_ascii_case(&format!("http://{host}")))
 }
 
 /// Whether `authority` (a `Host` header) is one of `hosts`, with or
@@ -653,23 +837,22 @@ async fn upgrade(
     headers: HeaderMap,
     socket: WebSocketUpgrade,
 ) -> Response {
-    // A web page may open a WebSocket to any address; browsers say where
-    // the page came from, terminals do not. No page may attach.
-    if headers.contains_key(ORIGIN) {
-        return (
-            StatusCode::FORBIDDEN,
-            "no web page may attach to a session\n",
-        )
-            .into_response();
-    }
-    let addressed = headers
-        .get(HOST)
-        .and_then(|host| host.to_str().ok())
-        .is_some_and(|host| host_allowed(host, &server.config.hosts));
-    if !addressed {
+    let Some(host) = addressed(&server, &headers) else {
         return (
             StatusCode::FORBIDDEN,
             "this server does not answer to that host name\n",
+        )
+            .into_response();
+    };
+    // A web page may open a WebSocket to any address; browsers say where
+    // the page came from, terminals do not. No page may attach but the
+    // one this server serves itself.
+    if let Some(origin) = headers.get(ORIGIN)
+        && !own_page(&server, &host, origin)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            "no web page may attach to a session\n",
         )
             .into_response();
     }
@@ -888,7 +1071,7 @@ struct Agent {
 ///
 /// | Request | Who | Answer |
 /// | --- | --- | --- |
-/// | `GET /task?after=N&wait=S` | [`AgentPeers::tasks`] | the next [`Task`] after N, waiting up to S seconds; 204: none |
+/// | `GET /task?after=N&wait=S` | [`AgentPeers::tasks`] | the next [`Task`] after N, waiting up to S seconds; 204: none. The agent asks only when it has no task, so this is also where its `agent_state` is told from |
 /// | `POST /say` `{ vessel, key, request }` | [`AgentPeers::replies`] | `{ event }`: the `agent_text`, recorded once per key |
 /// | `POST /action` [`ActionReport`] | [`AgentPeers::replies`] | `{ event }`: an `action_waiting` or `action_settled`, once per request; `null` if there was one |
 /// | `POST /note` [`ForkNote`] | [`AgentPeers::tasks`] | `{ event }`: a `fork_note`; `null` if the child's last note said the same |
@@ -921,8 +1104,11 @@ async fn agent_task(
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
     };
     if let Some(task) = found {
+        agent.server.agent_seen(Seen::Handed(task.id));
         return axum::Json(task).into_response();
     }
+    // The agent asks only when it has no task.
+    agent.server.agent_seen(Seen::Asked);
     let wait = std::time::Duration::from_secs(query.wait.min(MAX_TASK_WAIT));
     let mut stopping = agent.server.stopping.subscribe();
     let waited = tokio::time::timeout(wait, async {
@@ -948,7 +1134,10 @@ async fn agent_task(
     })
     .await;
     match waited {
-        Ok(Some(task)) => axum::Json(task).into_response(),
+        Ok(Some(task)) => {
+            agent.server.agent_seen(Seen::Handed(task.id));
+            axum::Json(task).into_response()
+        }
         _ => StatusCode::NO_CONTENT.into_response(),
     }
 }

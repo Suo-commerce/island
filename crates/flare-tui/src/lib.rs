@@ -10,8 +10,8 @@
 #![warn(missing_docs)]
 
 use flare_core::session::{
-    ActionSettled, ActionWaiting, AgentText, Event, EventKind, ForkNote, Problem, Settled,
-    UserMessage, VerbCall, VerbResult,
+    ActionSettled, ActionWaiting, AgentPhase, AgentState, AgentText, Event, EventKind, ForkNote,
+    Problem, Settled, UserMessage, VerbCall, VerbResult,
 };
 use flare_core::time;
 use island_core::{Evidence, Hash, Verse};
@@ -288,6 +288,24 @@ pub fn show(event: &Event) -> String {
             ),
             Err(_) => format!("{head}  a fork's note this terminal does not read"),
         },
+        EventKind::AgentState => {
+            match serde_json::from_value::<AgentState>(event.payload.clone()) {
+                Ok(state) => {
+                    let task = state
+                        .task
+                        .map_or_else(String::new, |task| format!(" #{task}"));
+                    match state.state {
+                        AgentPhase::Idle => format!("{head}  the agent is idle"),
+                        AgentPhase::Working => format!("{head}  the agent is on task{task}"),
+                        AgentPhase::Forked => format!(
+                            "{head}  the agent is on task{task}, forked: {}",
+                            state.children.join(", ")
+                        ),
+                    }
+                }
+                Err(_) => format!("{head}  a state of the agent this terminal does not read"),
+            }
+        }
         EventKind::AgentText => match serde_json::from_value::<AgentText>(event.payload.clone()) {
             Ok(reply) => format!(
                 "{head}  agent (to #{}): {}",
@@ -420,6 +438,30 @@ mod shown {
             show(&reply).ends_with("agent (to #4): Here:\n    line two"),
             "{}",
             show(&reply)
+        );
+    }
+
+    #[test]
+    fn the_agents_state_is_one_line() {
+        let state = |payload: serde_json::Value| {
+            show(&Event {
+                seq: 12,
+                at: 1_794_400_002_000_000,
+                kind: EventKind::AgentState,
+                payload,
+            })
+        };
+        assert!(state(serde_json::json!({ "state": "idle" })).ends_with("the agent is idle"));
+        assert!(
+            state(serde_json::json!({ "state": "working", "task": 9 }))
+                .ends_with("the agent is on task #9")
+        );
+        assert!(
+            state(serde_json::json!({
+                "state": "forked", "task": 9,
+                "children": ["flare-home-fork-11", "flare-home-fork-12"]
+            }))
+            .ends_with("the agent is on task #9, forked: flare-home-fork-11, flare-home-fork-12")
         );
     }
 

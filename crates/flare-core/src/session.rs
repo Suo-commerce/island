@@ -21,7 +21,13 @@
 //! that task. A client says which version it speaks when it attaches;
 //! the server answers with the version it will use. Its other events:
 //! `action_waiting` and `action_settled` for an action that needs Jarmo's
-//! answer, and `fork_note` for what a fork child of the agent made.
+//! answer, `fork_note` for what a fork child of the agent made, and
+//! `agent_state` when what the agent is doing changes.
+//!
+//! An attach without a cursor replays the newest [`RECENT`] events and,
+//! before them, what a client needs to know where things stand: every
+//! `action_waiting` not yet settled and the newest `agent_state`, however
+//! old. The events come in order, with gaps.
 //!
 //! A `propose` carries a submission the client signed with its own key;
 //! the server only relays it to the broker. A `see` is answered from the
@@ -239,6 +245,42 @@ pub struct ForkNote {
     pub done: bool,
 }
 
+/// What the agent is doing, as far as `flare-server` can tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPhase {
+    /// It asked for its next task and none is waiting.
+    Idle,
+    /// A task was handed to it, and it has not asked for another.
+    Working,
+    /// It is on a task and fork children of it have posted notes.
+    Forked,
+}
+
+/// The payload of an `agent_state`: one event per change, never one per
+/// request.
+///
+/// `flare-server` tells the state from what passes through its agent
+/// socket: the agent asks for a task only when it has none, so a request
+/// that finds none means idle, and a task handed out means working on it
+/// until the next request. It is what the server saw, not the agent's own
+/// word: an agent that died stays in its last state. The turn and the
+/// fork slots left are the agent's to say and are not in this payload
+/// yet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentState {
+    /// Idle, working or forked.
+    pub state: AgentPhase,
+    /// The task it is on: the `user_message`'s place. `None` when idle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<u64>,
+    /// The fork children that posted a note for this task, in the order
+    /// they first did. Empty unless forked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<String>,
+}
+
 /// A task as `flare-server` hands it to the island socket, and the
 /// island socket to the agent: the next `user_message` after a cursor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +370,8 @@ pub enum EventKind {
     ActionSettled,
     /// A fork child of the agent posted a note: [`ForkNote`].
     ForkNote,
+    /// What the agent is doing changed: [`AgentState`].
+    AgentState,
     /// A client asked for a verb.
     VerbCall,
     /// What came of it.

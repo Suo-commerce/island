@@ -20,7 +20,7 @@ axum = { workspace = true, features = ["ws"] }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "net", "sync", "signal"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "sync", "signal", "fs"] }
 
 [dev-dependencies]
 island-log = { workspace = true }

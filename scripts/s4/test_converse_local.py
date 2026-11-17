@@ -262,6 +262,14 @@ class Converse(unittest.TestCase):
         with open(path) as fh:
             return [e for e in map(json.loads, fh) if e["kind"] == kind]
 
+    def tasks(self):
+        """The places of what was said to the agent: a task's id is its
+        message's place, and the agent's states take places too."""
+        return [e["seq"] for e in self.events("user_message")]
+
+    def states(self):
+        return [(e["payload"]["state"], e["payload"].get("task")) for e in self.events("agent_state")]
+
     def replies(self):
         path = os.path.join(self.tmp, "flare", "sessions", "main.jsonl")
         with open(path) as fh:
@@ -275,37 +283,45 @@ class Converse(unittest.TestCase):
     def test_a_message_becomes_a_task_and_its_reply_comes_back_once(self):
         out = self.say("draft the verse for that")
         self.assertIn("test → agent: draft the verse for that", out, out)
-        self.assertIn("agent (to #0): I wrote hello.txt for: draft the verse for that", out, out)
+        first_task = self.tasks()[0]
+        self.assertIn(f"agent (to #{first_task}): I wrote hello.txt for: draft the verse for that", out, out)
         with open(os.path.join(self.work, "hello.txt")) as fh:
             self.assertEqual(fh.read(), "draft the verse for that")
         replies = self.replies()
-        self.assertEqual([(r["task"], r["vessel"]) for r in replies], [(0, "0123456789abcdef0123456789abcdef")])
+        self.assertEqual([(r["task"], r["vessel"]) for r in replies],
+                         [(first_task, "0123456789abcdef0123456789abcdef")])
         # The task was told with who said it; the model was named by the socket.
         first = ScriptedModel.requests[0]
         self.assertEqual(first["model"], "scripted")
-        self.assertIn("[Task #0 from test]", first["messages"][1]["content"])
+        self.assertIn(f"[Task #{first_task} from test]", first["messages"][1]["content"])
         # The turn ended: the Warden sealed it, the transcript holds the calls.
         wait_for("the turn", lambda: self.warden.last_sealed == 1)
         log = self.agent_log()
         self.assertEqual([e["event"] for e in log], ["start", "task", "turn"])
         # The reply was released, delivered and settled.
         wait_for("the reply settled", lambda: not self.warden.released)
+        # The session said what the agent was doing: on the task, then
+        # idle again once it asked for the next one.
+        wait_for("the agent idle again", lambda: self.states()[-1:] == [("idle", None)])
+        self.assertIn(("working", first_task), self.states())
+        self.assertIn(f"the agent is on task #{first_task}", out, out)
 
         # A new start goes on after the task: the second message only.
         self.procs["flare-agent"].kill()
         self.procs["flare-agent"].wait()
         self.start_agent()
         out = self.say("and another")
-        self.assertIn("agent (to #2): I wrote hello.txt for: and another", out, out)
-        self.assertEqual([r["task"] for r in self.replies()], [0, 2])
+        second_task = self.tasks()[1]
+        self.assertIn(f"agent (to #{second_task}): I wrote hello.txt for: and another", out, out)
+        self.assertEqual([r["task"] for r in self.replies()], [first_task, second_task])
         self.assertEqual(len({r["key"] for r in self.replies()}), 2)
         starts = [e for e in self.agent_log() if e["event"] == "start"]
-        self.assertEqual(starts[-1]["cursor"], 0)
+        self.assertEqual(starts[-1]["cursor"], first_task)
 
 
     def test_a_verse_waits_for_approval_and_is_written_once_signed_as_the_vessel(self):
         out = self.say("please propose a verse about this")
-        self.assertIn("agent (to #0): I proposed a verse; it waits for you.", out, out)
+        self.assertIn(f"agent (to #{self.tasks()[0]}): I proposed a verse; it waits for you.", out, out)
         wait_for("the action waiting", lambda: self.events("action_waiting"))
         waiting = self.events("action_waiting")
         self.assertEqual(len(waiting), 1)
@@ -414,7 +430,12 @@ class Converse(unittest.TestCase):
         self.keep_the_prime_running()
         out = self.say("please fork this into two drafts")
         # The promoted child's held answer is the reply to the task.
-        self.assertIn("agent (to #0): Child 2 drafted draft-2.md.", out, out)
+        task = self.tasks()[0]
+        self.assertIn(f"agent (to #{task}): Child 2 drafted draft-2.md.", out, out)
+        # The session said the agent forked, and which children.
+        forked = [e["payload"] for e in self.events("agent_state") if e["payload"]["state"] == "forked"]
+        self.assertEqual((forked[-1]["task"], sorted(forked[-1]["children"])),
+                         (task, ["flare-home-fork-90", "flare-home-fork-91"]))
         self.assertEqual(self.promotions, ["flare-home-fork-91"])
         # Each child said it started and what it made; the session shows it.
         notes = [e["payload"] for e in self.events("fork_note")]
@@ -441,7 +462,7 @@ class Converse(unittest.TestCase):
         log = self.agent_log()
         self.assertEqual([e["event"] for e in log],
                          ["start", "task", "turn", "start", "child", "turn", "start", "promoted"], log)
-        self.assertEqual(log[2].get("fork_set"), "0-1")
+        self.assertEqual(log[2].get("fork_set"), f"{task}-1")
         self.assertEqual(log[7]["child"], "flare-home-fork-91")
         # Two fork slots, both used, for good.
         self.assertEqual(self.whoami()["forks_left"], 0)
@@ -456,9 +477,9 @@ class Converse(unittest.TestCase):
         asking = threading.Thread(target=lambda: said.update(out=self.say("and another")))
         asking.start()
         wait_for("the next task worked on",
-                 lambda: any(e["event"] == "task" and e["task"] != 0 for e in self.agent_log()))
+                 lambda: any(e["event"] == "task" and e["task"] != task for e in self.agent_log()))
         time.sleep(2)
-        self.assertEqual([r["task"] for r in self.replies()], [0], "its reply waits for the verse's answer")
+        self.assertEqual([r["task"] for r in self.replies()], [task], "its reply waits for the verse's answer")
         # From another terminal: a terminal knows its commands by its name.
         out = self.say(f"/approve {waiting[0]['seq']}", "--key", self.daily, after=None, client="laptop")
         self.assertIn("approve request", out, out)
@@ -476,7 +497,7 @@ class Converse(unittest.TestCase):
         told = [m["content"] for body in ScriptedModel.requests for m in body["messages"]
                 if m["role"] == "user" and "and another" in m["content"]]
         self.assertTrue(told and told[-1].startswith(
-            "[Flare: on task #0 you forked 2 child(ren) and promoted flare-home-fork-91 (child 2)."), told)
+            f"[Flare: on task #{task} you forked 2 child(ren) and promoted flare-home-fork-91 (child 2)."), told)
         # A third fork has no slot: said to the model before any Seal.
         out = self.say("fork it again")
         self.assertIn("I could not fork: not forked: 2 task(s), but 0 of this Vessel's 2 fork slots are left.",

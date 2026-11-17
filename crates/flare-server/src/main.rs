@@ -40,6 +40,11 @@ struct Args {
     /// socket, replies from island-sender.
     #[arg(long, value_name = "PATH")]
     agent_socket: Option<PathBuf>,
+    /// Serve the face from this directory: the page and its files, and
+    /// /log for it to read the log by. That page alone may then attach
+    /// to a session; without this, no web page may.
+    #[arg(long, value_name = "DIR")]
+    face: Option<PathBuf>,
     /// The user that may take tasks: the island socket's.
     #[arg(long, value_name = "USER", default_value = "island-socket")]
     task_reader: String,
@@ -141,6 +146,14 @@ async fn run(args: Args) -> Result<(), String> {
             hosts.push(host);
         }
     }
+    if let Some(face) = &args.face
+        && !face.join("index.html").is_file()
+    {
+        return Err(format!(
+            "{}: no index.html there; --face names the directory of the built page",
+            face.display()
+        ));
+    }
     let server = Server::new(Config {
         broker: args.broker.clone(),
         root: args.root,
@@ -148,6 +161,7 @@ async fn run(args: Args) -> Result<(), String> {
         hosts: hosts.clone(),
         clock: now,
         agent_session: args.agent_session.clone(),
+        face: args.face.clone(),
     })?;
     let agent = match &args.agent_socket {
         None => None,
@@ -176,6 +190,10 @@ async fn run(args: Args) -> Result<(), String> {
     println!("broker        {}", args.broker);
     println!("answers to    {}", hosts.join(", "));
     println!("agent         session {}", args.agent_session);
+    match &args.face {
+        Some(face) => println!("face          http://{address}/ from {}", face.display()),
+        None => println!("face          none; no web page may attach"),
+    }
     if let (Some(path), Some((_, peers))) = (&args.agent_socket, &agent) {
         println!(
             "agent socket  {} (tasks: uid {}, replies: uid {})",

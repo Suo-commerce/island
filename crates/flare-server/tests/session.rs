@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flare_core::session::{
-    ClientMessage, Event, EventKind, ProposeArgs, RECENT, SeeArgs, ServerMessage, Verb, VerbCall,
-    VerbResult,
+    AgentPhase, AgentState, ClientMessage, Event, EventKind, ProposeArgs, RECENT, SeeArgs,
+    ServerMessage, Verb, VerbCall, VerbResult,
 };
 use flare_server::{Config, Server, router};
 use futures_util::{SinkExt, StreamExt};
@@ -38,6 +38,16 @@ struct Running {
 }
 
 async fn start(data: &Path, log: Shared, broker: Option<String>) -> Running {
+    start_with(data, log, broker, None).await
+}
+
+/// The server, serving the face in `face` if there is one.
+async fn start_with(
+    data: &Path,
+    log: Shared,
+    broker: Option<String>,
+    face: Option<&Path>,
+) -> Running {
     let broker = match broker {
         Some(url) => url,
         None => broker::serve(log.clone()).await,
@@ -51,6 +61,7 @@ async fn start(data: &Path, log: Shared, broker: Option<String>) -> Running {
             .to_vec(),
         clock: tick,
         agent_session: "main".to_owned(),
+        face: face.map(Path::to_owned),
     })
     .expect("the server starts");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -569,6 +580,13 @@ fn agent_socket(server: Arc<Server>, path: &Path, tasks: u32, replies: u32) {
     });
 }
 
+/// An `agent_state` event's state and task.
+fn state(event: &Event) -> (AgentPhase, Option<u64>) {
+    assert_eq!(event.kind, EventKind::AgentState, "{event:?}");
+    let state: AgentState = serde_json::from_value(event.payload.clone()).expect("agent state");
+    (state.state, state.task)
+}
+
 fn my_uid(dir: &Path) -> u32 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(dir).expect("the temp dir").uid()
@@ -583,8 +601,11 @@ async fn a_say_is_a_task_and_the_reply_comes_back_once() {
     agent_socket(running.server.clone(), &socket, me, me);
     let (mut laptop, _) = Client::attach(&running.url, "main", None, "laptop").await;
 
-    // No task yet: a short wait ends with nothing.
+    // No task yet: a short wait ends with nothing. The agent asks only
+    // when it has no task: it is idle, said once however often it asks.
     assert_eq!(agent_ask(&socket, "GET", "/task?wait=0", "").await.0, 204);
+    assert_eq!(agent_ask(&socket, "GET", "/task?wait=0", "").await.0, 204);
+    assert_eq!(state(&laptop.event().await), (AgentPhase::Idle, None));
 
     // Said in the session, it is the agent's next task.
     laptop
@@ -602,6 +623,12 @@ async fn a_say_is_a_task_and_the_reply_comes_back_once() {
     assert_eq!(task.id, said.seq);
     assert_eq!(task.text, "draft the verse for that");
     assert_eq!(task.client, "laptop");
+    // Handed a task, it is working on it; handed it again, nothing new.
+    assert_eq!(
+        state(&laptop.event().await),
+        (AgentPhase::Working, Some(task.id))
+    );
+    assert_eq!(agent_ask(&socket, "GET", "/task", "").await.0, 200);
 
     // After it, a waiting request gets the next one as it is said.
     let waiting = {
@@ -609,7 +636,8 @@ async fn a_say_is_a_task_and_the_reply_comes_back_once() {
         let target = format!("/task?after={}&wait=20", task.id);
         tokio::spawn(async move { agent_ask(&socket, "GET", &target, "").await })
     };
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // It asked for the next one: it is done with the first.
+    assert_eq!(state(&laptop.event().await), (AgentPhase::Idle, None));
     laptop
         .command(
             "s-2",
@@ -618,10 +646,15 @@ async fn a_say_is_a_task_and_the_reply_comes_back_once() {
         )
         .await;
     let second = laptop.event().await;
+    assert_eq!(second.kind, EventKind::UserMessage);
     let (status, body) = waiting.await.expect("the wait ends");
     assert_eq!(status, 200, "{body}");
     let next: flare_core::session::Task = serde_json::from_str(&body).expect("a task");
     assert_eq!((next.id, next.text.as_str()), (second.seq, "and another"));
+    assert_eq!(
+        state(&laptop.event().await),
+        (AgentPhase::Working, Some(next.id))
+    );
 
     // The reply is delivered once per key: every client sees it once.
     let delivery = serde_json::json!({
@@ -862,4 +895,208 @@ async fn a_forks_note_is_an_event_once_and_only_from_the_island_socket() {
             .0,
         403
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forks_show_in_the_agents_state_and_a_new_client_is_told_where_things_stand() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(&dir.path().join("server"), started_log(), None).await;
+    let me = my_uid(dir.path());
+    let socket = dir.path().join("agent.sock");
+    agent_socket(running.server.clone(), &socket, me, me);
+    let (mut laptop, _) = Client::attach(&running.url, "main", None, "laptop").await;
+
+    // Two actions wait; one of them is settled.
+    let report = |text: &str, state: &str| {
+        let verse = island_core::Verse::new(Evidence::Decision, text, Vec::new());
+        let request = island_client::actions::verse_request("flare", &verse);
+        let hash = island_client::approval::request_hash(island_client::actions::VERSE, &request);
+        serde_json::json!({
+            "vessel": "914c503c980b8f7f1750c664b5743d2c", "op": 7, "provider": "island.verse",
+            "request_hash": island_client::approval::hex(&hash),
+            "request": island_client::approval::hex(&request),
+            "state": state, "entry": null, "why": null,
+        })
+        .to_string()
+    };
+    for (text, state) in [
+        ("still waits", "waiting"),
+        ("answered", "waiting"),
+        ("answered", "declined"),
+    ] {
+        let (status, body) = agent_ask(&socket, "POST", "/action", &report(text, state)).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    let waits = laptop.event().await;
+    assert_eq!(waits.kind, EventKind::ActionWaiting);
+    laptop.events(2).await;
+
+    // A task, and two children of the agent at work on it.
+    laptop
+        .command("s-1", Verb::Say, serde_json::json!({ "text": "two ways" }))
+        .await;
+    let said = laptop.event().await;
+    assert_eq!(agent_ask(&socket, "GET", "/task", "").await.0, 200);
+    assert_eq!(
+        state(&laptop.event().await),
+        (AgentPhase::Working, Some(said.seq))
+    );
+    let note = |child: &str, text: &str| {
+        serde_json::json!({ "child": child, "text": text, "done": false }).to_string()
+    };
+    let children = |event: &Event| {
+        let state: AgentState = serde_json::from_value(event.payload.clone()).expect("a state");
+        assert_eq!(
+            (state.state, state.task),
+            (AgentPhase::Forked, Some(said.seq))
+        );
+        state.children
+    };
+    agent_ask(&socket, "POST", "/note", &note("home-fork-11", "started")).await;
+    assert_eq!(laptop.event().await.kind, EventKind::ForkNote);
+    assert_eq!(children(&laptop.event().await), ["home-fork-11"]);
+    agent_ask(&socket, "POST", "/note", &note("home-fork-12", "started")).await;
+    assert_eq!(laptop.event().await.kind, EventKind::ForkNote);
+    let forked = laptop.event().await;
+    assert_eq!(children(&forked), ["home-fork-11", "home-fork-12"]);
+    // A child's next note changes nothing about the agent.
+    agent_ask(&socket, "POST", "/note", &note("home-fork-11", "half")).await;
+    assert_eq!(laptop.event().await.kind, EventKind::ForkNote);
+
+    // Much later, a client attaches without a cursor: the newest events,
+    // and before them what still stands, however old: the action that
+    // waits (not the one answered) and the agent's state.
+    for round in 0..RECENT {
+        laptop.see(&format!("c-{round}"), None).await;
+        laptop.events(2).await;
+    }
+    let (mut phone, next) = Client::attach(&running.url, "main", None, "phone").await;
+    let told = phone.events(2 + RECENT as usize).await;
+    assert_eq!(
+        (told[0].seq, told[0].kind),
+        (waits.seq, EventKind::ActionWaiting)
+    );
+    assert_eq!(told[1], forked);
+    assert_eq!(told[2].seq, next - RECENT);
+    assert!(told.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+
+    // With a cursor, only what came after it.
+    let (mut again, _) = Client::attach(&running.url, "main", Some(next - 3), "phone").await;
+    assert_eq!(again.event().await.seq, next - 2);
+    running.serving.abort();
+}
+
+/// One plain HTTP request to the server: the status, the headers (lower
+/// case) and the body.
+async fn http_get(url: &str, target: &str, host: &str) -> (u16, String, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let address = url.trim_start_matches("ws://").trim_end_matches("/session");
+    let mut stream = TcpStream::connect(address).await.expect("connects");
+    let request = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.expect("sent");
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).await.expect("read");
+    let answer = String::from_utf8_lossy(&answer).into_owned();
+    let (head, body) = answer.split_once("\r\n\r\n").expect("a head and a body");
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .expect("a status line");
+    (status, head.to_ascii_lowercase(), body.to_owned())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_face_is_served_from_the_server_and_only_its_page_may_attach() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let face = dir.path().join("face");
+    std::fs::create_dir_all(face.join("assets")).expect("the face");
+    std::fs::write(
+        face.join("index.html"),
+        "<!doctype html><title>Flare</title>",
+    )
+    .expect("page");
+    std::fs::write(face.join("assets/app-1a2b.js"), "console.log(1)").expect("script");
+    std::fs::write(dir.path().join("secret.txt"), "not the face's").expect("a file outside");
+    std::os::unix::fs::symlink(dir.path().join("secret.txt"), face.join("leak.txt"))
+        .expect("a link out");
+    let running = start_with(&dir.path().join("server"), started_log(), None, Some(&face)).await;
+    let address = running
+        .url
+        .trim_start_matches("ws://")
+        .trim_end_matches("/session")
+        .to_owned();
+    let get = |target: &'static str| http_get(&running.url, target, &address);
+
+    // The page, at / and at each of its own routes; its files.
+    for route in ["/", "/session-view", "/island/ledger"] {
+        let (status, head, body) = get(route).await;
+        assert_eq!(status, 200, "{route}");
+        assert!(head.contains("content-type: text/html"), "{head}");
+        assert!(head.contains("cache-control: no-cache"), "{head}");
+        assert!(
+            head.contains(&format!("connect-src 'self' ws://{address};")),
+            "{head}"
+        );
+        assert!(body.contains("<title>Flare</title>"));
+    }
+    let (status, head, body) = get("/assets/app-1a2b.js").await;
+    assert_eq!((status, body.as_str()), (200, "console.log(1)"));
+    assert!(head.contains("content-type: text/javascript"), "{head}");
+    assert!(head.contains("immutable"), "{head}");
+    assert!(head.contains("x-content-type-options: nosniff"), "{head}");
+    // Nothing that is not there, nothing outside, nothing by a link out.
+    for target in ["/assets/none.js", "/../secret.txt", "/leak.txt", "/.env"] {
+        assert_eq!(get(target).await.0, 404, "{target}");
+    }
+    // Only by this server's names.
+    assert_eq!(
+        http_get(&running.url, "/", "flare.evil.example").await.0,
+        403
+    );
+    assert_eq!(
+        http_get(&running.url, "/log", "flare.evil.example").await.0,
+        403
+    );
+
+    // The log, as the page reads it: the head and the newest entries.
+    let (status, head, body) = get("/log?entries=1").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(head.contains("cache-control: no-store"), "{head}");
+    assert!(!head.contains("access-control-allow-origin"), "{head}");
+    let log: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let entries = running.log.lock().expect("the log").records.len() as u64;
+    assert_eq!(log["entries"], entries);
+    assert_eq!(log["head"]["seq"], entries - 1);
+    assert_eq!(log["problem"], serde_json::Value::Null);
+    assert_eq!(log["recent"].as_array().map(Vec::len), Some(1));
+    assert_eq!(log["recent"][0]["seq"], entries - 1);
+    assert_eq!(log["recent"][0]["writer"].as_str().map(str::len), Some(64));
+
+    // The server's own page may attach; any other page may not.
+    let upgrade = |origin: String| {
+        let url = running.url.replace("ws://", "http://");
+        let host = address.clone();
+        async move { reqwest_like(&url, &host, Some(&origin)).status().await }
+    };
+    assert_eq!(upgrade(format!("http://{address}")).await, 101);
+    assert_eq!(upgrade("https://evil.example".to_owned()).await, 403);
+    assert_eq!(upgrade(format!("https://{address}")).await, 403);
+    assert_eq!(upgrade(format!("http://{address}.evil.example")).await, 403);
+    assert_eq!(upgrade("null".to_owned()).await, 403);
+    running.serving.abort();
+
+    // Without a face there is no page, no /log, and no page may attach.
+    let plain = start(&dir.path().join("plain"), started_log(), None).await;
+    let address = plain
+        .url
+        .trim_start_matches("ws://")
+        .trim_end_matches("/session")
+        .to_owned();
+    assert_eq!(http_get(&plain.url, "/", &address).await.0, 404);
+    assert_eq!(http_get(&plain.url, "/log", &address).await.0, 404);
+    let url = plain.url.replace("ws://", "http://");
+    let own = format!("http://{address}");
+    assert_eq!(reqwest_like(&url, &address, Some(&own)).status().await, 403);
+    plain.serving.abort();
 }
