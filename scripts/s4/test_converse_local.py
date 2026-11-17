@@ -175,13 +175,15 @@ class Converse(unittest.TestCase):
         self.addCleanup(model.shutdown)
 
         self.agent_sock = os.path.join(self.tmp, "agent.sock")
-        self.session_port = free_port()
+        # FLARE_FACE: serve the built page too (scripts/s4/face_stack.py).
+        self.session_port = int(os.environ.get("FLARE_FACE_PORT") or free_port())
+        face = ["--face", os.environ["FLARE_FACE"]] if os.environ.get("FLARE_FACE") else []
         uid = str(os.getuid())
         self.spawn("flare-server", [os.path.join(BIN, "flare-server"), "--broker", self.broker,
                                     "--root", self.root, "--data", os.path.join(self.tmp, "flare"),
                                     "--listen", f"127.0.0.1:{self.session_port}",
                                     "--agent-socket", self.agent_sock, "--task-reader", uid,
-                                    "--reply-sender", uid])
+                                    "--reply-sender", uid, *face])
         wait_for("flare-server", lambda: os.path.exists(self.agent_sock))
 
         base = os.getuid() - os.getuid() % RANGE

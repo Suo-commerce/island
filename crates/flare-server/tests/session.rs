@@ -1029,7 +1029,9 @@ async fn the_face_is_served_from_the_server_and_only_its_page_may_attach() {
     let get = |target: &'static str| http_get(&running.url, target, &address);
 
     // The page, at / and at each of its own routes; its files.
-    for route in ["/", "/session-view", "/island/ledger"] {
+    // /session is the WebSocket and, loaded by a browser, the page's own
+    // Session screen.
+    for route in ["/", "/session", "/session-view", "/island/ledger"] {
         let (status, head, body) = get(route).await;
         assert_eq!(status, 200, "{route}");
         assert!(head.contains("content-type: text/html"), "{head}");
@@ -1073,6 +1075,26 @@ async fn the_face_is_served_from_the_server_and_only_its_page_may_attach() {
     assert_eq!(log["recent"][0]["seq"], entries - 1);
     assert_eq!(log["recent"][0]["writer"].as_str().map(str::len), Some(64));
 
+    // A page of another site may not even ask.
+    for (site, status) in [
+        ("cross-site", 403),
+        ("same-site", 403),
+        ("same-origin", 200),
+    ] {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = TcpStream::connect(&address).await.expect("connects");
+        let request = format!(
+            "GET /log HTTP/1.1\r\nHost: {address}\r\nSec-Fetch-Site: {site}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.expect("sent");
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).await.expect("read");
+        assert!(
+            answer.starts_with(&format!("HTTP/1.1 {status}")),
+            "{site}: {answer}"
+        );
+    }
+
     // The server's own page may attach; any other page may not.
     let upgrade = |origin: String| {
         let url = running.url.replace("ws://", "http://");
@@ -1095,6 +1117,7 @@ async fn the_face_is_served_from_the_server_and_only_its_page_may_attach() {
         .to_owned();
     assert_eq!(http_get(&plain.url, "/", &address).await.0, 404);
     assert_eq!(http_get(&plain.url, "/log", &address).await.0, 404);
+    assert_ne!(http_get(&plain.url, "/session", &address).await.0, 200);
     let url = plain.url.replace("ws://", "http://");
     let own = format!("http://{address}");
     assert_eq!(reqwest_like(&url, &address, Some(&own)).status().await, 403);

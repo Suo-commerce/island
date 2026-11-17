@@ -107,6 +107,19 @@ pub(crate) async fn log(
     if addressed(&server, &headers).is_none() {
         return refused();
     }
+    // Another site's page cannot read the answer, but it could still ask;
+    // a browser says when a request comes from elsewhere.
+    let elsewhere = headers
+        .get("sec-fetch-site")
+        .and_then(|site| site.to_str().ok())
+        .is_some_and(|site| site != "same-origin" && site != "none");
+    if elsewhere {
+        return (
+            StatusCode::FORBIDDEN,
+            "the log is read by this server's own page\n",
+        )
+            .into_response();
+    }
     let entries = query.entries.unwrap_or(LOG_ENTRIES).min(MAX_LOG_ENTRIES);
     let mut response = axum::Json(server.log(entries).await).into_response();
     response
@@ -128,6 +141,7 @@ pub fn content_type(path: &Path) -> Option<&'static str> {
         "png" => "image/png",
         "ico" => "image/x-icon",
         "woff2" => "font/woff2",
+        "woff" => "font/woff",
         "txt" => "text/plain; charset=utf-8",
         _ => return None,
     })

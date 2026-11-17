@@ -834,9 +834,20 @@ pub fn host_allowed(authority: &str, hosts: &[String]) -> bool {
 
 async fn upgrade(
     State(server): State<Arc<Server>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
-    socket: WebSocketUpgrade,
+    socket: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
+    let socket = match socket {
+        Ok(socket) => socket,
+        // Not a WebSocket: with a face, /session is also one of the
+        // page's own screens, and a browser that loads it gets the page.
+        Err(_) if server.config.face.is_some() => {
+            return face::file(State(server), method, uri, headers).await;
+        }
+        Err(rejection) => return rejection.into_response(),
+    };
     let Some(host) = addressed(&server, &headers) else {
         return (
             StatusCode::FORBIDDEN,

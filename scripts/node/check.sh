@@ -176,6 +176,31 @@ state() {   # the plain checks
     check "$when: the island socket refuses root, which is no Vessel" \
         "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --unix-socket "$ISOCK" http://island/whoami || true)" 403
     note "$when: island-sender's last word on it: $(journalctl -u island-sender -o cat -n 200 --no-pager | grep '^{' | tail -1)"
+    note "$when: the agent's state in the session: $(replies '([e["payload"] for e in E if e.get("kind") == "agent_state"] or ["none yet"])[-1]')"
+    face "$when"
+}
+
+# The face: the page flare-server serves from itself, the log as the page
+# reads it, and who may attach: that page, and no other.
+FACE=http://10.77.0.1:4749
+knock() {   # knock <origin> [host]: the status a browser's WebSocket request gets
+    curl -s -o /dev/null -w '%{http_code}' --max-time 3 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+        -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+        -H "Origin: $1" ${2:+-H "Host: $2"} "$FACE/session" || true
+}
+face() {
+    local when=$1 head
+    check "$when: flare-server serves the face" \
+        "$(curl -s -o /dev/null -w '%{http_code} %{content_type}' --max-time 10 "$FACE/" || true)" "200 text/html; charset=utf-8"
+    head=$(curl -s --max-time 10 "$BROKER/head" | python3 -c 'import json, sys; print(json.load(sys.stdin)["seq"])' 2>/dev/null || echo -1)
+    check "$when: the log as the face reads it is at the broker's head" \
+        "$(curl -s --max-time 30 "$FACE/log?entries=1" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d["problem"] is None and d["head"]["seq"] >= int(sys.argv[1]) and d["recent"][0]["seq"] == d["head"]["seq"])' "$head" 2>/dev/null || echo no-answer)" True
+    check "$when: the face's own page may attach to the session" "$(knock "$FACE")" 101
+    check "$when: a page from elsewhere may not" "$(knock https://flare.example)" 403
+    check "$when: nor the page under a name that is not the server's" "$(knock http://flare.example flare.example)" 403
 }
 
 kill_one() {   # kill_one <unit>: SIGKILL it, then the plain checks

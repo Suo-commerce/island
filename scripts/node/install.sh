@@ -10,7 +10,8 @@
 #   1. builds Taso (taso-blkd, taso-wardend, taso-ctl, the Landlock shim),
 #      island-sender, island-socket, flare-server, flare-agent and
 #      flare-tui, release, and installs the services' programs in
-#      /usr/local/bin;
+#      /usr/local/bin, and the face (face/dist, built on the laptop and
+#      kept in the repo) in /usr/local/share/flare/face;
 #   2. builds the agents' image, /var/lib/taso/agent-island, without
 #      Docker: flare-agent (step 4), bash and the everyday commands it
 #      runs, python3 and its standard library (spike S4's stand-in agent
@@ -75,6 +76,18 @@ install -m 755 "$TASO/target/release/taso-blkd" "$TASO/target/release/taso-warde
     "$TASO/target/release/taso-ctl" "$ISLAND/target/release/island-sender" \
     "$ISLAND/target/release/island-socket" "$ISLAND/target/release/flare-server" /usr/local/bin/
 say "installed taso-blkd, taso-wardend, taso-ctl, island-sender, island-socket, flare-server in /usr/local/bin"
+# The face: the page flare-server serves. It is built on the laptop and
+# kept in the repo (face/dist), so nothing of Node runs on this machine.
+[ -f "$ISLAND/face/dist/index.html" ] || die "$ISLAND/face/dist has no index.html: the built face is missing from the checkout"
+mkdir -p /usr/local/share/flare
+rm -rf /usr/local/share/flare/face.new
+cp -r "$ISLAND/face/dist" /usr/local/share/flare/face.new
+chmod -R u=rwX,go=rX /usr/local/share/flare/face.new
+rm -rf /usr/local/share/flare/face.old
+[ ! -e /usr/local/share/flare/face ] || mv /usr/local/share/flare/face /usr/local/share/flare/face.old
+mv /usr/local/share/flare/face.new /usr/local/share/flare/face
+rm -rf /usr/local/share/flare/face.old
+say "installed the face in /usr/local/share/flare/face"
 if ! id island-socket >/dev/null 2>&1; then
     useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin island-socket
     say "made the user island-socket"

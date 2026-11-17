@@ -525,6 +525,36 @@ directories, no unit, no firewall rule.
 cd /root/island && just vessel-gate
 ```
 
+## 10. The face
+
+`flare-server` serves Flare's face, a web page, at `http://10.77.0.1:4749/`:
+open it in a browser on any device inside the tunnel, the laptop or the
+phone. It is one more client of the shared session, beside the terminal
+(docs/slice-2.md, "The face, first cut").
+
+- **Now** shows what waits for you, what the agent is doing, the log's
+  head and its newest entries. **Session** is the stream; what you type
+  there is said to the agent, and `/see` works as in the terminal.
+  **Sing**, **Agent** and **Island** show sample data and say so.
+- The page holds no key, so it cannot approve: an action that waits is
+  shown with the command that answers it in the terminal, `/approve N`.
+- Everything on it is marked "server says": the page does not check
+  signatures yet. The terminal still checks against its own replica.
+- The page's name in the session (bottom left; `browser` or `phone` at
+  first) can be changed with a click; it is kept in that browser.
+
+The page is built on the laptop (`just face`, which needs Node 22 and
+npm) and kept in the repo as `face/dist`; `scripts/node/install.sh`
+copies it to `/usr/local/share/flare/face`, and the unit names it with
+`--face`. Nothing of Node runs on the server. `flare-server` lets that
+page attach, and no other: a browser says which page a request comes
+from, and only `http://` plus the address the request went to is taken.
+It answers only to its own names, as before. `scripts/node/check.sh`
+checks all three.
+
+To try the page on the laptop without the server: `just face-stack`
+starts a throwaway log, session and scripted agent and prints the address.
+
 ## Updating the server
 
 `islander.sh update` updates only the laptop. After merging a bundle, the
@@ -543,7 +573,9 @@ and since step 4 `flare-server`, are built on the server: pull, then run
 `scripts/node/install.sh` again, and restart what changed (`systemctl
 restart flare-server island-socket island-sender`; a new image is used at
 the agent's next start, `systemctl restart taso-wardend`). `flare-server`
-no longer needs copying from the laptop.
+no longer needs copying from the laptop. The face goes the same way:
+`install.sh` copies `face/dist` from the checkout, and a reload of the
+page shows the new one.
 
 ## Later
 

@@ -1,0 +1,40 @@
+{
+  "name": "flare-face",
+  "private": true,
+  "type": "module",
+  "description": "Flare's face: the page flare-server serves from itself.",
+  "scripts": {
+    "dev": "vite dev",
+    "dev:mock": "VITE_FLARE_MOCK=1 vite dev",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fontsource/cinzel": "^5.2.0",
+    "@fontsource/ibm-plex-mono": "^5.2.0",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@tanstack/react-router": "1.170.41",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.575.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tailwind-merge": "^3.5.0",
+    "tw-animate-css": "^1.3.4",
+    "vaul": "^1.1.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.1",
+    "@tanstack/router-plugin": "1.168.42",
+    "@types/node": "^22.16.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "jsdom": "^26.0.0",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.8.3",
+    "vite": "8.1.5",
+    "vitest": "^4.1.10"
+  }
+}

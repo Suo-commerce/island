@@ -89,6 +89,15 @@ agent-test:
     cargo build --locked -p island-cli -p island-broker -p island-socket -p island-sender -p flare-server -p flare-agent -p flare-tui
     python3 -m unittest scripts/s4/test_converse_local.py
 
+# The face: build the page flare-server serves, into face/dist (kept in the repo). Needs Node 22 and npm.
+face:
+    cd face && npm ci && npm test && npm run build
+
+# The face on this machine against a real session, without Taso or the server: the local stack of agent-test with the page served. Ctrl-C stops it.
+face-stack:
+    cargo build --locked -p island-cli -p island-broker -p island-socket -p island-sender -p flare-server -p flare-agent -p flare-tui
+    python3 scripts/s4/face_stack.py
+
 # Spike S2 on the server, as root: Island's agent in Taso Vessels (runs a to h, and s: island-sender). TASO names the Taso checkout.
 s2-spike TASO="/root/taso":
     TASO={{TASO}} scripts/s2-spike.sh

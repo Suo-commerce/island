@@ -7,7 +7,9 @@
 # It listens on the server's WireGuard address only. Its agent socket,
 # /run/flare-server/agent.sock, hands the agent's tasks to island-socket
 # and takes its replies from island-sender, each told by its uid
-# (docs/slice-2.md, "Actions and the sender").
+# (docs/slice-2.md, "Actions and the sender"). It serves the face, the
+# page in /usr/local/share/flare/face, at http://10.77.0.1:4749/, and
+# lets that page alone attach to a session (docs/server.md, section 10).
 [Unit]
 Description=Flare session server
 Requires=wg-quick@wg-island.service
@@ -18,7 +20,7 @@ After=wg-quick@wg-island.service island-broker.service
 User=island
 Group=island
 EnvironmentFile=/etc/island/island.env
-ExecStart=/usr/local/bin/flare-server --broker http://10.77.0.1:4747 --root ${ISLAND_ROOT} --data /var/lib/island/flare --listen 10.77.0.1:4749 --agent-socket /run/flare-server/agent.sock --task-reader island-socket
+ExecStart=/usr/local/bin/flare-server --broker http://10.77.0.1:4747 --root ${ISLAND_ROOT} --data /var/lib/island/flare --listen 10.77.0.1:4749 --agent-socket /run/flare-server/agent.sock --task-reader island-socket --face /usr/local/share/flare/face
 RuntimeDirectory=flare-server
 RuntimeDirectoryMode=0755
 # The broker may still be starting.
