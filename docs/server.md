@@ -202,21 +202,47 @@ then `systemctl --user restart island-helper flare-link`. `islander.sh`
 (in `scripts/`; copy it to your home directory again) reads both, starts
 only the helper and the replica, and opens Flare on the server.
 
-For the phone, make the tunnel in the WireGuard app, so its private key is
-made on the phone: address `10.77.0.3/32`, peer the server's public key,
-endpoint the server's public address and port 51820, allowed IPs
-`10.77.0.1/32`. Add the phone's public key on the server:
+For the phone, make the tunnel in the WireGuard app ("Create from
+scratch", then the generate button in the private key field), so its
+private key is made on the phone: address `10.77.0.3/32`, "Listen port"
+left empty, peer the server's public key (`wg show wg-island public-key`
+on the server), endpoint the server's public address and port 51820,
+allowed IPs `10.77.0.1/32`, persistent keepalive 25.
+
+**Never read a key off a screen or type one.** Keys are base64: `I` and
+`l`, `0` and `O` look alike, the app clips the key without showing that
+it scrolls, and a wrong character is accepted and then simply never
+connects. Tap the key to copy it and send it to the other device (public
+keys are not secret: a message to yourself will do), or show it as a QR
+code (`qrencode -t ansiutf8`).
+
+Add the phone's public key on the server. The key goes to the running
+tunnel first, and into the file only if the tunnel took it: a block with
+a bad key in the file would stop the tunnel at its next start, and the
+tunnel is the only way in.
 
 ```sh
-read -rp "phone public key: " PHONE
-cat >> /etc/wireguard/wg-island.conf <<END
+read -rp "phone public key (pasted): " PHONE; echo "${#PHONE} characters"   # 44
+```
+
+```sh
+wg set wg-island peer "$PHONE" allowed-ips 10.77.0.3/32 && cat >> /etc/wireguard/wg-island.conf <<END
 
 # phone
 [Peer]
 PublicKey = $PHONE
 AllowedIPs = 10.77.0.3/32
 END
-wg set wg-island peer "$PHONE" allowed-ips 10.77.0.3/32
+wg show wg-island | tail -4
+```
+
+Switch the tunnel on on the phone; `wg show wg-island` on the server
+shows a `latest handshake` for it once it has connected. Then
+`http://10.77.0.1:4749/` in the phone's browser is the face (section 10).
+To see that the file holds what runs:
+
+```sh
+diff <(wg show wg-island peers | sort) <(grep PublicKey /etc/wireguard/wg-island.conf | awk '{ print $3 }' | sort) && echo "file and tunnel agree"
 ```
 
 To take a device out, delete its `[Peer]` block and run
