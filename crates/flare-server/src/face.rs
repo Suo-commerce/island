@@ -32,6 +32,7 @@ use flare_core::session::Place;
 use flare_core::{Line, hex, kind_name};
 use serde::{Deserialize, Serialize};
 
+use crate::tls::Scheme;
 use crate::{Server, addressed};
 
 /// The most entries one `/log` answers with.
@@ -237,17 +238,19 @@ pub fn resolve(root: &Path, path: &str) -> Option<PathBuf> {
 
 /// What the page may load and talk to: itself, and the session at the
 /// address it was served from.
-fn policy(host: &str) -> String {
+fn policy(scheme: Scheme, host: &str) -> String {
     format!(
-        "default-src 'self'; connect-src 'self' ws://{host}; \
+        "default-src 'self'; connect-src 'self' {}://{host}; \
          style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
-         base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+         base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        scheme.socket()
     )
 }
 
 /// A file of the page.
 pub(crate) async fn file(
     State(server): State<Arc<Server>>,
+    axum::Extension(scheme): axum::Extension<Scheme>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -302,7 +305,7 @@ pub(crate) async fn file(
         HeaderValue::from_static("nosniff"),
     );
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    if let Ok(policy) = HeaderValue::from_str(&policy(&host)) {
+    if let Ok(policy) = HeaderValue::from_str(&policy(scheme, &host)) {
         headers.insert(CONTENT_SECURITY_POLICY, policy);
     }
     response
@@ -351,8 +354,12 @@ mod tests {
 
     #[test]
     fn the_policy_names_the_address_the_page_came_from() {
-        let policy = policy("10.77.0.1:4749");
+        let policy = policy(Scheme::Plain, "10.77.0.1:4749");
         assert!(policy.contains("connect-src 'self' ws://10.77.0.1:4749;"));
+        assert!(
+            super::policy(Scheme::Tls, "flare.example")
+                .contains("connect-src 'self' wss://flare.example;")
+        );
         assert!(policy.contains("default-src 'self'"));
     }
 }

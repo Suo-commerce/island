@@ -1204,3 +1204,150 @@ async fn the_face_is_served_from_the_server_and_only_its_page_may_attach() {
     assert_eq!(reqwest_like(&url, &address, Some(&own)).status().await, 403);
     plain.serving.abort();
 }
+
+/// A certificate for this machine's names, as the files a renewal
+/// writes; and a client that trusts it and nothing else.
+fn certificate(dir: &Path) -> tokio_rustls::TlsConnector {
+    let made =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+            .expect("a certificate");
+    std::fs::write(dir.join("cert.pem"), made.cert.pem()).expect("the certificate");
+    std::fs::write(dir.join("key.pem"), made.signing_key.serialize_pem()).expect("its key");
+    let mut trusted = rustls::RootCertStore::empty();
+    trusted.add(made.cert.der().clone()).expect("trusted");
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("protocol versions")
+        .with_root_certificates(trusted)
+        .with_no_client_auth();
+    tokio_rustls::TlsConnector::from(Arc::new(config))
+}
+
+/// One request over TLS: the answer's head, lower case; `None` if the
+/// client does not trust what the server showed.
+async fn over_tls(client: &tokio_rustls::TlsConnector, port: u16, request: &str) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let tcp = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connects");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("a name");
+    let mut stream = client.connect(name, tcp).await.ok()?;
+    stream.write_all(request.as_bytes()).await.expect("sent");
+    let mut answer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    // The head is enough; an upgraded connection never ends by itself.
+    while !answer.windows(4).any(|window| window == b"\r\n\r\n") {
+        match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk)).await {
+            Ok(Ok(read)) if read > 0 => answer.extend_from_slice(&chunk[..read]),
+            _ => break,
+        }
+    }
+    Some(String::from_utf8_lossy(&answer).to_ascii_lowercase())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_page_over_tls_attaches_over_tls_only_and_a_renewed_certificate_is_read() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let face = dir.path().join("face");
+    std::fs::create_dir_all(&face).expect("the face");
+    std::fs::write(
+        face.join("index.html"),
+        "<!doctype html><title>Flare</title>",
+    )
+    .expect("page");
+    let running = start_with(&dir.path().join("server"), started_log(), None, Some(&face)).await;
+    let first = certificate(dir.path());
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let port = tcp.local_addr().expect("an address").port();
+    let secure = flare_server::tls::Listener::new(
+        tcp,
+        flare_server::tls::Files {
+            cert: dir.path().join("cert.pem"),
+            key: dir.path().join("key.pem"),
+        },
+    )
+    .expect("the certificate is read");
+    let app = flare_server::tls_router(running.server.clone());
+    let serving = tokio::spawn(async move {
+        let _ = axum::serve(secure, app).await;
+    });
+    let host = format!("127.0.0.1:{port}");
+    let knock = |origin: String| {
+        format!(
+            "GET /session HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+             Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nOrigin: {origin}\r\n\r\n"
+        )
+    };
+    let status = |head: Option<String>| {
+        head.and_then(|head| head.split_whitespace().nth(1).map(str::to_owned))
+            .unwrap_or_else(|| "no answer".to_owned())
+    };
+
+    // The page, with the session's address as it is over TLS.
+    let page = over_tls(
+        &first,
+        port,
+        &format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"),
+    )
+    .await
+    .expect("trusted");
+    assert!(page.starts_with("http/1.1 200"), "{page}");
+    assert!(
+        page.contains(&format!("connect-src 'self' wss://{host};")),
+        "{page}"
+    );
+
+    // Loaded over https, the page attaches over TLS; a page that says it
+    // was loaded plainly does not, and nor does the https page over the
+    // plain listener.
+    assert_eq!(
+        status(over_tls(&first, port, &knock(format!("https://{host}"))).await),
+        "101"
+    );
+    assert_eq!(
+        status(over_tls(&first, port, &knock(format!("http://{host}"))).await),
+        "403"
+    );
+    assert_eq!(
+        status(over_tls(&first, port, &knock("https://flare.example".to_owned())).await),
+        "403"
+    );
+    let plain = running
+        .url
+        .trim_start_matches("ws://")
+        .trim_end_matches("/session")
+        .to_owned();
+    let url = running.url.replace("ws://", "http://");
+    assert_eq!(
+        reqwest_like(&url, &plain, Some(&format!("https://{plain}")))
+            .status()
+            .await,
+        403
+    );
+    // A terminal names no origin and attaches over TLS as well.
+    let bare = knock(String::new()).replace("Origin: \r\n", "");
+    assert_eq!(status(over_tls(&first, port, &bare).await), "101");
+
+    // A renewal: new files. The next connection is shown the new
+    // certificate, with no restart; the old one is not served any more.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let renewed = certificate(dir.path());
+    let get = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    assert!(over_tls(&first, port, &get).await.is_none());
+    let page = over_tls(&renewed, port, &get).await.expect("trusted");
+    assert!(page.starts_with("http/1.1 200"), "{page}");
+
+    // Files that cannot be read leave the certificate in use as it is.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    std::fs::write(dir.path().join("cert.pem"), "not a certificate").expect("spoiled");
+    let page = over_tls(&renewed, port, &get)
+        .await
+        .expect("still the last good one");
+    assert!(page.starts_with("http/1.1 200"), "{page}");
+
+    serving.abort();
+    running.serving.abort();
+}

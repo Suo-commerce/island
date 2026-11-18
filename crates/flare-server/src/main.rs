@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use flare_server::{AgentPeers, Config, Peer, Server, agent_router, router};
+use flare_server::{AgentPeers, Config, Peer, Server, agent_router, router, tls, tls_router};
 use island_core::PublicKey;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
@@ -45,6 +45,18 @@ struct Args {
     /// to a session; without this, no web page may.
     #[arg(long, value_name = "DIR")]
     face: Option<PathBuf>,
+    /// Serve the same over TLS on this address as well, for the page:
+    /// a browser gives a page protected keys only over https. Needs
+    /// --tls-cert and --tls-key, and the certificate's name as --allow-host.
+    #[arg(long, value_name = "ADDRESS", requires_all = ["tls_cert", "tls_key"])]
+    tls_listen: Option<String>,
+    /// The certificate and the chain above it, as a PEM file. Read again
+    /// when it changes: a renewal needs no restart.
+    #[arg(long, value_name = "FILE", requires = "tls_listen")]
+    tls_cert: Option<PathBuf>,
+    /// The certificate's private key, as a PEM file.
+    #[arg(long, value_name = "FILE", requires = "tls_listen")]
+    tls_key: Option<PathBuf>,
     /// The user that may take tasks: the island socket's.
     #[arg(long, value_name = "USER", default_value = "island-socket")]
     task_reader: String,
@@ -208,6 +220,35 @@ async fn run(args: Args) -> Result<(), String> {
         tokio::spawn(async move {
             let mut stopped = stopping.stopped();
             let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = stopped.wait_for(|stop| *stop).await;
+                })
+                .await;
+        });
+    }
+
+    // The page over https, beside the plain listener the terminals use.
+    if let (Some(listen), Some(cert), Some(key)) = (&args.tls_listen, &args.tls_cert, &args.tls_key)
+    {
+        if args.face.is_none() {
+            return Err("--tls-listen serves the page: it needs --face".to_owned());
+        }
+        let tcp = TcpListener::bind(listen)
+            .await
+            .map_err(|error| format!("{listen}: {error}"))?;
+        let secure = tls::Listener::new(
+            tcp,
+            tls::Files {
+                cert: cert.clone(),
+                key: key.clone(),
+            },
+        )?;
+        println!("face, https   {listen} with {}", cert.display());
+        let app = tls_router(server.clone());
+        let stopping = server.clone();
+        tokio::spawn(async move {
+            let mut stopped = stopping.stopped();
+            let _ = axum::serve(secure, app)
                 .with_graceful_shutdown(async move {
                     let _ = stopped.wait_for(|stop| *stop).await;
                 })

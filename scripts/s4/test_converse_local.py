@@ -181,6 +181,17 @@ class Converse(unittest.TestCase):
         built = os.environ.get("FLARE_FACE") or os.path.join(HERE, "..", "..", "face", "dist")
         face = ["--face", built] if os.path.isfile(os.path.join(built, "index.html")) else []
         self.face = bool(face)
+        # FLARE_TLS_PORT: the page over https too, with a certificate made
+        # here for this machine's names (scripts/s4/face_stack.py).
+        self.tls_port = None
+        if face and os.environ.get("FLARE_TLS_PORT"):
+            self.tls_port = int(os.environ["FLARE_TLS_PORT"])
+            cert, key = os.path.join(self.tmp, "cert.pem"), os.path.join(self.tmp, "key.pem")
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                            "-nodes", "-days", "2", "-subj", "/CN=localhost", "-keyout", key, "-out", cert,
+                            "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"],
+                           check=True, capture_output=True)
+            face += ["--tls-listen", f"127.0.0.1:{self.tls_port}", "--tls-cert", cert, "--tls-key", key]
         uid = str(os.getuid())
         self.spawn("flare-server", [os.path.join(BIN, "flare-server"), "--broker", self.broker,
                                     "--root", self.root, "--data", os.path.join(self.tmp, "flare"),

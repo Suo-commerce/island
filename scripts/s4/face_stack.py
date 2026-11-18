@@ -7,6 +7,7 @@ with the scripted model), with flare-server serving the built page, and
 leaves it running until Ctrl-C. Nothing of the real Island is touched.
 
     just face-stack            then open the address it prints
+    FLARE_TLS_PORT=4760 just face-stack     the same, over https as well
 
 The scripted model (scripts/s4/scripted_model.py) answers by rule: any
 message is "written to hello.txt"; "propose a verse" makes an action that
@@ -53,6 +54,8 @@ def main():
             running.keep_the_prime_running()
         port = running.session_port
         print(f"\nthe face      http://127.0.0.1:{port}/", flush=True)
+        if running.tls_port:
+            print(f"over https    https://localhost:{running.tls_port}/ (a certificate made for this run: the browser will warn)", flush=True)
         print("the terminal  " + " ".join([
             os.path.join(stack.BIN, "flare-tui"), "--server", f"ws://127.0.0.1:{port}/session",
             "--session", "main", "--client", "laptop", "--root", running.root,

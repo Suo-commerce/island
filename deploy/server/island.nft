@@ -1,5 +1,6 @@
 # The Island server's firewall: from the open network, only WireGuard's
-# UDP port answers. SSH, the broker (4747) and the session server (4749)
+# UDP port answers. SSH, the broker (4747), the session server (4749) and
+# the face over https (443)
 # answer only inside the tunnel, on wg-island. If the tunnel is down,
 # they are closed. Outgoing traffic is not limited.
 #
@@ -18,7 +19,7 @@ table inet island {
         meta l4proto { icmp, ipv6-icmp } accept
         udp dport { 68, 546 } accept comment "DHCP leases for the public address"
         udp dport 51820 accept
-        iifname "wg-island" tcp dport { 22, 4747, 4749 } accept
+        iifname "wg-island" tcp dport { 22, 443, 4747, 4749 } accept
     }
     chain forward {
         type filter hook forward priority filter; policy drop;

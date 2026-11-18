@@ -23,6 +23,7 @@
 pub mod face;
 pub mod state;
 pub mod store;
+pub mod tls;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -806,6 +807,16 @@ enum Work {
 /// The server's routes: the session WebSocket at `/session`; with a
 /// face, `/log` and the page's files as well.
 pub fn router(server: Arc<Server>) -> Router {
+    routes(server, tls::Scheme::Plain)
+}
+
+/// The same routes for the TLS listener: there the server's own page has
+/// an `https` origin, and its session a `wss` address.
+pub fn tls_router(server: Arc<Server>) -> Router {
+    routes(server, tls::Scheme::Tls)
+}
+
+fn routes(server: Arc<Server>, scheme: tls::Scheme) -> Router {
     let routes = Router::new().route("/session", get(upgrade));
     let routes = if server.config.face.is_some() {
         routes
@@ -815,7 +826,7 @@ pub fn router(server: Arc<Server>) -> Router {
     } else {
         routes
     };
-    routes.with_state(server)
+    routes.layer(axum::Extension(scheme)).with_state(server)
 }
 
 /// The `Host` a request was addressed to, if it is one of this server's.
@@ -829,12 +840,19 @@ fn addressed(server: &Server, headers: &HeaderMap) -> Option<String> {
 
 /// Whether a request that names an `Origin` comes from this server's own
 /// page: the face is served, and the origin is exactly the address the
-/// request went to. (Plain http: the server is reached over WireGuard.)
-fn own_page(server: &Server, host: &str, origin: &axum::http::HeaderValue) -> bool {
+/// request went to, with the scheme of the listener it came in by. So
+/// the page loaded over https attaches over TLS only, and the page
+/// loaded plainly (inside the tunnel) over the plain listener only.
+fn own_page(
+    server: &Server,
+    scheme: tls::Scheme,
+    host: &str,
+    origin: &axum::http::HeaderValue,
+) -> bool {
     server.config.face.is_some()
         && origin
             .to_str()
-            .is_ok_and(|origin| origin.eq_ignore_ascii_case(&format!("http://{host}")))
+            .is_ok_and(|origin| origin.eq_ignore_ascii_case(&format!("{}://{host}", scheme.page())))
 }
 
 /// Whether `authority` (a `Host` header) is one of `hosts`, with or
@@ -856,6 +874,7 @@ pub fn host_allowed(authority: &str, hosts: &[String]) -> bool {
 
 async fn upgrade(
     State(server): State<Arc<Server>>,
+    axum::Extension(scheme): axum::Extension<tls::Scheme>,
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: HeaderMap,
@@ -866,7 +885,7 @@ async fn upgrade(
         // Not a WebSocket: with a face, /session is also one of the
         // page's own screens, and a browser that loads it gets the page.
         Err(_) if server.config.face.is_some() => {
-            return face::file(State(server), method, uri, headers).await;
+            return face::file(State(server), axum::Extension(scheme), method, uri, headers).await;
         }
         Err(rejection) => return rejection.into_response(),
     };
@@ -881,7 +900,7 @@ async fn upgrade(
     // the page came from, terminals do not. No page may attach but the
     // one this server serves itself.
     if let Some(origin) = headers.get(ORIGIN)
-        && !own_page(&server, &host, origin)
+        && !own_page(&server, scheme, &host, origin)
     {
         return (
             StatusCode::FORBIDDEN,
