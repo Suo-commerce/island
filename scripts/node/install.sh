@@ -290,10 +290,14 @@ Next:
    island-sender  $SENDER_PUB  'dispatch' on 'approvals'
    island-socket  $SOCKET_PUB  'access' on 'access'
    flare-home     $VESSEL_PUB  'verse' on 'flare'
-2. Start, or restart what changed:
+2. Restart, every time this script has run:
    systemctl restart flare-server island-stub-model island-socket island-sender
-   systemctl start taso-blkd taso-wardend
-   A new image reaches flare-home at its next start: systemctl restart taso-wardend
+   systemctl restart taso-wardend
+   The Warden's restart is not optional: this script put a new image in the
+   old one's place, and the island socket moved with it. A flare-home that
+   keeps running has the old image, cannot reach the socket, and takes no
+   task until it starts again. (First install: systemctl start taso-blkd
+   taso-wardend.)
 3. Check it:        scripts/node/check.sh
    Talk to it:      scripts/node/check.sh converse
 END

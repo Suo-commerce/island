@@ -110,6 +110,36 @@ print(json.dumps(r) if isinstance(r, (list, dict, bool)) or r is None else r)
 PY
 }
 
+# Whether the agent runs on the image that is installed. install.sh puts a
+# new image in the old one's place, and the island socket moves with it:
+# an agent started before that still has the old image, where the socket
+# is dead, and asks in vain until the Warden starts it again. Told from
+# the agent's start (its id ends in its start time, in clock ticks since
+# boot) against the image directory's birth.
+IMAGE=/var/lib/taso/agent-island
+on_image() {
+    local born start
+    born=$(stat -c %W "$IMAGE" 2>/dev/null || echo 0)
+    start=$(agent 'S[0]["start"] if S else ""')
+    python3 - "$born" "$start" <<'PY'
+import os, sys, time
+born, start = int(sys.argv[1] or 0), sys.argv[2]
+try:
+    ticks = int(start.rsplit("-", 1)[1])
+    boot = next(int(line.split()[1]) for line in open("/proc/stat") if line.startswith("btime "))
+except (IndexError, ValueError, StopIteration, OSError):
+    ticks = boot = None
+if born <= 0 or ticks is None:
+    print("cannot tell")
+else:
+    started = boot + ticks / os.sysconf("SC_CLK_TCK")
+    at = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t))
+    # A second's slack: the two clocks are read apart.
+    print("yes" if started + 1 >= born else f"no: it started {at(started)} UTC, the image is from {at(born)} UTC; systemctl restart taso-wardend")
+PY
+}
+image_ok() { case "$(on_image)" in no*) return 1 ;; esac; }
+
 # replies <expression over R (the agent_text payloads in the session), W and
 # A (the action_waiting and action_settled events), N (the fork_note
 # payloads) and U (the user_message events)>
@@ -160,6 +190,14 @@ state() {   # the plain checks
     check "$when: the Warden's sender socket for flare-home is there" \
         "$([ -S "$SENDER_SOCK" ] && echo there || echo missing)" there
     check "$when: flare-agent started in flare-home" "$(agent 'bool(S)')" true
+    # Just after a Warden restart the log still ends in the old start.
+    wait_until 60 image_ok || true
+    local on; on=$(on_image)
+    if [ "$on" = "cannot tell" ]; then
+        note "$when: whether the agent runs on the installed image cannot be told here (no birth time for $IMAGE, or no start in its log)"
+    else
+        check "$when: the agent runs on the installed image, where the island socket is" "$on" yes
+    fi
     note "$when: its starts in its Seal's history and now: $(agent '[(e["start"], e["turn"], e["cursor"]) + ((e["fork"],) if "fork" in e else ()) for e in d if e["event"] == "start"]')"
     note "$when: its last turns: $(agent '[(e["turn"], e["cursor"]) for e in d if e["event"] == "turn"][-3:]')"
     check "$when: no action of its was dispatched twice" "$(dispatched_twice)" 0

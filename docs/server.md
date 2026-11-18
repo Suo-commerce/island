@@ -571,9 +571,13 @@ curl -s http://10.77.0.1:4747/head
 The head names the build it runs. The Taso node's programs and image,
 and since step 4 `flare-server`, are built on the server: pull, then run
 `scripts/node/install.sh` again, and restart what changed (`systemctl
-restart flare-server island-socket island-sender`; a new image is used at
-the agent's next start, `systemctl restart taso-wardend`). `flare-server`
-no longer needs copying from the laptop. The face goes the same way:
+restart flare-server island-socket island-sender`), and always restart
+the Warden after it: `systemctl restart taso-wardend`. `install.sh` puts
+a new image in the old one's place every time it runs, and the island
+socket moves with it; an agent that keeps running has the old image,
+cannot reach the socket and takes no task (this happened on 2026-11-18).
+`check.sh` fails on it: "the agent runs on the installed image".
+`flare-server` no longer needs copying from the laptop. The face goes the same way:
 `install.sh` copies `face/dist` from the checkout, and a reload of the
 page shows the new one.
 
