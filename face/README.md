@@ -10,13 +10,17 @@ src/lib/view.ts        events → what the screens show (pure, tested)
 src/components/flare/  the shell, the stream, the waiting list, the marks;
                        store.tsx is the one seam between screens and data
 src/routes/            the screens: index (Now), session, sing, agent, island
-src/lib/*mock.ts       the prototype's sample data
+src/lib/island.ts      the log's state → Island, Agent and Sing (pure, tested)
+src/lib/mock.ts, sample-state.ts   sample data, for dev:mock only
 dist/                  the built page, kept in the repo
 ```
 
-**Live:** Now and Session. **Sample data, marked on the screen:** Sing,
-Agent, Island. The page signs nothing and checks no signature yet, so
+Every screen reads the real session and log; Island, Agent and Sing
+only read (`src/lib/island.ts` derives what they show from
+`GET /log/state`). The page signs nothing and checks no signature yet, so
 every mark reads "server says" (docs/slice-2.md, "The face, first cut").
+`npm run dev:mock` runs the page on `src/lib/sample-state.ts` and the
+prototype's sample session instead.
 
 ## Working on it
 

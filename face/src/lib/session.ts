@@ -198,8 +198,56 @@ export type LogView = {
   recent: LogLine[];
 };
 
-export async function readLog(entries: number, signal?: AbortSignal): Promise<LogView> {
-  const answer = await fetch(`/log?entries=${entries}`, { cache: "no-store", ...(signal ? { signal } : {}) });
+export type LogFilter = { stream?: string; kind?: string; before?: number };
+
+async function read<T>(target: string, signal?: AbortSignal): Promise<T> {
+  const answer = await fetch(target, { cache: "no-store", ...(signal ? { signal } : {}) });
   if (!answer.ok) throw new Error(`the server answered ${answer.status}`);
-  return (await answer.json()) as LogView;
+  return (await answer.json()) as T;
+}
+
+export function readLog(entries: number, signal?: AbortSignal, only: LogFilter = {}): Promise<LogView> {
+  const query = new URLSearchParams({ entries: String(entries) });
+  if (only.stream !== undefined) query.set("stream", only.stream);
+  if (only.kind !== undefined) query.set("kind", only.kind);
+  if (only.before !== undefined) query.set("before", String(only.before));
+  return read<LogView>(`/log?${query.toString()}`, signal);
+}
+
+/** What the log amounts to: `GET /log/state` (crates/flare-server/src/state.rs). */
+export type Counted = { calls: number; bytes_in: number; bytes_out: number };
+export type GrantLine = {
+  id: string; seq: number; at: number; by: string; holder: string; scope: string[]; rights: string[];
+  role: "ordinary" | "root" | "appender"; narrows: string | null; ended_at: number | null; ended_by: string | null;
+};
+export type PolicyLine = { seq: number; at: number; evaluator: string; invariants: string[] };
+export type VerdictLine = { seq: number; at: number; stream: string; writer: string; kind: string; reason: string; content: string };
+export type ApprovalLine = { seq: number; at: number; by: string; request: string; verdict: "approve" | "decline"; used_by: number | null };
+export type DispatchLine = { seq: number; at: number; by: string; vessel: string; op: number; request: string; approval: number };
+export type VesselLine = {
+  vessel: string; inference_today: Counted; inference: Counted; providers: Record<string, Counted>;
+  reads: Counted; tasks: Counted; notes: Counted; last_access: number | null; last_access_at: number | null; dispatched: number;
+};
+export type LogState = {
+  head: { seq: number; hash: string } | null;
+  entries: number;
+  root: string;
+  appender: string | null;
+  state_hash: string;
+  problem: string | null;
+  now: number;
+  kinds: Record<string, number>;
+  streams: { name: string; entries: number; last: number; last_at: number }[];
+  grants: GrantLine[];
+  policy: PolicyLine[];
+  refused: number;
+  verdicts: VerdictLine[];
+  approvals: ApprovalLine[];
+  dispatches: DispatchLine[];
+  vessels: VesselLine[];
+  writers: { key: string; entries: number; last: number; last_at: number }[];
+};
+
+export function readState(signal?: AbortSignal): Promise<LogState> {
+  return read<LogState>("/log/state", signal);
 }

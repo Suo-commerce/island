@@ -1,11 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
+
+import { Dot, Key, LinkMark, Sample, Trust, Unread } from "@/components/flare/marks";
+import { useFlare } from "@/components/flare/store";
+import { bytes, inForce, keysOf, ledgerOf, policySteps, when, type KeyStatus } from "@/lib/island";
+import type { LogState } from "@/lib/session";
 import { useTitle } from "@/lib/title";
-import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Dot, Key, Sample, Trust } from "@/components/flare/marks";
-import { entries } from "@/lib/mock";
-import * as I from "@/lib/island-mock";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/island")({
@@ -17,14 +17,17 @@ type Tab = (typeof tabs)[number];
 
 function Island() {
   useTitle("Island");
+  const { state, live, log } = useFlare();
   const [tab, setTab] = useState<Tab>("Integrity");
   return (
     <div className="mx-auto max-w-[1100px] px-4 py-6 md:px-10 md:py-10">
-      <Sample what="Island" className="mb-6" />
+      {!live && <Sample className="mb-6" />}
       <header className="mb-8">
         <p className="label-caps">island · the system itself</p>
         <h1 className="mt-1 text-[22px] font-normal tracking-tight">Soundness and rules</h1>
-        <p className="mt-1 max-w-xl text-[13px] text-muted-foreground">Things here change rarely. Root actions are signed elsewhere with the offline root key.</p>
+        <p className="mt-1 max-w-xl text-[13px] text-muted-foreground">
+          Everything here is replayed from the log by the server. This page changes none of it: grants, revokes and the policy are signed elsewhere, with the root key.
+        </p>
       </header>
       <div className="md:grid md:grid-cols-[150px_1fr] md:gap-10">
         <nav className="-mx-4 mb-6 flex gap-1 overflow-x-auto border-b border-border px-4 pb-2 md:mx-0 md:flex-col md:border-0 md:px-0">
@@ -34,14 +37,18 @@ function Island() {
           ))}
         </nav>
         <div className="min-w-0">
-          {tab === "Integrity" && <Integrity />}
-          {tab === "Authority" && <Authority />}
-          {tab === "Policy" && <Policy />}
-          {tab === "Gate" && <Gate />}
-          {tab === "Vessels" && <Vessels />}
-          {tab === "Ledger" && <Ledger />}
-          {tab === "Repos" && <Repos />}
-          {tab === "Server" && <Server />}
+          {!state ? <Unread error={log.error} /> : (
+            <>
+              {tab === "Integrity" && <Integrity s={state} />}
+              {tab === "Authority" && <Authority s={state} />}
+              {tab === "Policy" && <Policy s={state} />}
+              {tab === "Gate" && <Gate s={state} />}
+              {tab === "Vessels" && <Vessels s={state} />}
+              {tab === "Ledger" && <Ledger s={state} />}
+              {tab === "Repos" && <Repos s={state} />}
+              {tab === "Server" && <Server s={state} />}
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -49,253 +56,262 @@ function Island() {
 }
 
 function H({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) {
-  return <div className="mb-4 flex items-baseline justify-between border-b border-border pb-2"><h2 className="text-[15px] font-medium">{children}</h2>{right}</div>;
+  return <div className="mb-4 flex items-baseline justify-between gap-3 border-b border-border pb-2"><h2 className="text-[15px] font-medium">{children}</h2>{right}</div>;
 }
 function Row({ k, children }: { k: string; children: React.ReactNode }) {
-  return <div className="grid grid-cols-[140px_1fr] gap-3 border-b border-border/60 py-2.5 text-[13px] sm:grid-cols-[200px_1fr]"><span className="text-muted-foreground">{k}</span><span className="min-w-0 break-all">{children}</span></div>;
+  return <div className="grid grid-cols-[120px_1fr] gap-3 border-b border-border/60 py-2.5 text-[13px] sm:grid-cols-[200px_1fr]"><span className="text-muted-foreground">{k}</span><span className="min-w-0 break-all">{children}</span></div>;
+}
+function Note({ children }: { children: React.ReactNode }) {
+  return <p className="mb-4 rounded-sm border border-dashed border-border px-3 py-2 text-[12.5px] text-muted-foreground">{children}</p>;
+}
+function Empty({ children }: { children: React.ReactNode }) {
+  return <p className="py-8 text-center text-[13px] text-muted-foreground">{children}</p>;
 }
 const mono = "font-mono text-[12.5px]";
+const said = <Trust verified={false} />;
 
-function Integrity() {
-  const [p, setP] = useState<number | null>(null);
-  const [at, setAt] = useState(I.integrity.verifiedAt);
-  useEffect(() => {
-    if (p === null || p >= 100) return;
-    const t = setTimeout(() => setP((x) => Math.min(100, (x ?? 0) + 7)), 90);
-    return () => clearTimeout(t);
-  }, [p]);
-  useEffect(() => { if (p === 100) setAt("just now"); }, [p]);
-  const running = p !== null && p < 100;
+function Integrity({ s }: { s: LogState }) {
+  const kinds = Object.entries(s.kinds).sort((a, b) => b[1] - a[1]);
   return (
     <section>
-      <H right={<Button size="sm" variant="outline" disabled={running} onClick={() => setP(0)}>{running ? "verifying…" : "Verify again"}</Button>}>Integrity</H>
-      {p !== null && (
-        <div className="mb-4">
-          <div className="h-1 overflow-hidden rounded-full bg-muted"><div className="h-full bg-verified transition-all" style={{ width: `${p}%` }} /></div>
-          <p className="mt-1 font-mono text-[11px] text-muted-foreground">{running ? `checking entry ${Math.round((p / 100) * I.integrity.head)} of ${I.integrity.head}` : `all ${I.integrity.head} signatures and links hold`}</p>
-        </div>
-      )}
-      <Row k="log head"><span className={mono}>#{I.integrity.head}</span></Row>
-      <Row k="head hash"><span className={mono}>{I.integrity.headHash}</span></Row>
-      <Row k="verification"><span className="flex items-center gap-2"><Trust verified /> from genesis on this device · {at}</span></Row>
-      <Row k="pinned root key"><span className={mono}>{I.integrity.rootKey}</span></Row>
-      <Row k="appender key"><Key id={I.integrity.appender} label="observer" /></Row>
-      <Row k="state hash"><span className={mono}>{I.integrity.stateHash}</span></Row>
-    </section>
-  );
-}
-
-function RootSign({ open, onOpenChange, what }: { open: boolean; onOpenChange: (o: boolean) => void; what: string }) {
-  const [sig, setSig] = useState("");
-  const hash = "a71f03e9c2d84b56e0f1937ab2c4d58e";
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="text-[15px] font-medium">Sign with root key</DialogTitle>
-          <DialogDescription>{what}. This needs the offline root key <span className="font-mono">11c0ffee</span>; sign the hash on that device and paste the signature here.</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3">
-          <div><p className="label-caps mb-1">1 · copy hash</p>
-            <div className="flex gap-2"><code className="flex-1 truncate rounded-sm border border-border bg-muted/50 px-2 py-1.5 font-mono text-[12px]">{hash}</code>
-              <Button size="sm" variant="outline" onClick={() => navigator.clipboard?.writeText(hash)}>Copy</Button></div></div>
-          <div><p className="label-caps mb-1">2 · paste signature</p>
-            <textarea value={sig} onChange={(e) => setSig(e.target.value)} rows={3} placeholder="ed25519 signature (hex)" className="w-full rounded-sm border border-input bg-card p-2 font-mono text-[12px] focus:outline-none focus:ring-1 focus:ring-ring" /></div>
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button disabled={sig.trim().length < 16} onClick={() => onOpenChange(false)}>Submit to log</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function Authority() {
-  const [dlg, setDlg] = useState<string | null>(null);
-  const tone = { root: "muted", active: "verified", narrowed: "unverified", revoked: "destructive" } as const;
-  return (
-    <section>
-      <H right={<Button size="sm" variant="outline" onClick={() => setDlg("New root grant for a key")}>Grant… <span className="ml-1 font-mono text-[10px] text-muted-foreground">root</span></Button>}>Authority</H>
-      <p className="mb-4 rounded-sm border border-dashed border-border px-3 py-2 text-[12.5px] text-muted-foreground">
-        A grant can only be narrowed. Widening is impossible; it takes a new root grant signed with the root key.
-      </p>
-      <ul className="divide-y divide-border">
-        {I.keys.map((k) => (
-          <li key={k.id} className="grid gap-2 py-3 md:grid-cols-[200px_1fr_auto] md:items-start">
-            <div className="flex items-center gap-2"><Dot tone={tone[k.status]} /><Key id={k.id} label={k.label} /></div>
-            <div className="text-[12.5px]">
-              <div><span className="text-muted-foreground">streams </span><span className="font-mono">{k.streams}</span></div>
-              <div><span className="text-muted-foreground">kinds </span><span className="font-mono">{k.kinds}</span></div>
-              <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                {k.history.map((h) => <span key={h.seq} className="mr-3">{h.what} #{h.seq} · {h.when}</span>)}
-              </div>
-            </div>
-            {k.status !== "root" && k.status !== "revoked" && (
-              <div className="flex gap-1.5">
-                <Button size="sm" variant="ghost" onClick={() => setDlg(`Narrow grant for ${k.label}`)}>Narrow</Button>
-                <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setDlg(`Revoke ${k.label}`)}>Revoke</Button>
-                <Button size="sm" variant="ghost" disabled title="Widening is impossible; issue a new root grant">Widen</Button>
-              </div>
-            )}
+      <H right={said}>Integrity</H>
+      <Note>
+        The server keeps its own copy of the log and checks every entry's hash and signatures against the root key before it shows anything. This page has not checked them itself, so it says "server says".
+      </Note>
+      <Row k="head">{s.head ? <span className={mono}>#{s.head.seq} <span className="text-muted-foreground">{s.head.hash}</span></span> : "the log is empty"}</Row>
+      <Row k="entries"><span className={mono}>{s.entries}</span></Row>
+      <Row k="root key"><span className={mono}>{s.root}</span></Row>
+      <Row k="appender's key"><span className={mono}>{s.appender ?? "none in force"}</span></Row>
+      <Row k="state hash"><span className={mono}>{s.state_hash}</span></Row>
+      <Row k="server's copy">
+        {s.problem
+          ? <span className="text-unverified">could not be brought up to date: {s.problem}. This is the log as the server last saw it.</span>
+          : <span className="inline-flex items-center gap-1.5"><Dot tone="verified" /> at the broker's head as of {when(s.now)}</span>}
+      </Row>
+      <h3 className="label-caps mb-2 mt-8">entries by kind</h3>
+      <ul className="grid grid-cols-2 gap-x-6 sm:grid-cols-3">
+        {kinds.map(([kind, count]) => (
+          <li key={kind} className="flex justify-between border-b border-border/60 py-1.5 font-mono text-[12.5px]"><span className="text-muted-foreground">{kind}</span><span>{count}</span></li>
+        ))}
+      </ul>
+      <h3 className="label-caps mb-2 mt-8">streams</h3>
+      <ul className="divide-y divide-border/60">
+        {s.streams.map((stream) => (
+          <li key={stream.name} className="grid grid-cols-[1fr_auto_auto] gap-4 py-1.5 font-mono text-[12.5px]">
+            <span>{stream.name}</span>
+            <span className="text-muted-foreground">{stream.entries} {stream.entries === 1 ? "entry" : "entries"}</span>
+            <span className="text-muted-foreground">newest #{stream.last} · {when(stream.last_at, s.now)}</span>
           </li>
         ))}
       </ul>
-      <RootSign open={!!dlg} onOpenChange={(o) => !o && setDlg(null)} what={dlg ?? ""} />
     </section>
   );
 }
 
-function Policy() {
-  const [proposal, setProposal] = useState("");
-  const would = proposal.trim().length > 3
-    ? entries.filter((e) => e.kind === "verse" && (proposal.match(/\d+/) ? e.content.length > Number(proposal.match(/\d+/)![0]) : !e.evidence || e.content.length > 60)).slice(0, 6)
-    : [];
+function Authority({ s }: { s: LogState }) {
+  const tone: Record<KeyStatus, "muted" | "verified" | "unverified" | "destructive"> = { root: "muted", appender: "muted", active: "verified", narrowed: "unverified", revoked: "destructive" };
+  const keys = keysOf(s);
   return (
-    <section className="space-y-8">
-      <div>
-        <H right={<span className="font-mono text-[11px] text-muted-foreground">override requests <span className="text-foreground">{I.overrideCount.total}</span> total · {I.overrideCount.last30} in 30 days</span>}>Rules in force</H>
+    <section>
+      <H right={said}>Authority</H>
+      <Note>A grant can only be narrowed or revoked. Widening is impossible: it takes a new grant, signed with the root key. The log knows keys by their bytes; it holds no names for them.</Note>
+      <ul className="divide-y divide-border">
+        {keys.map((k) => (
+          <li key={k.key} className="grid gap-2 py-3 md:grid-cols-[170px_1fr] md:items-start">
+            <div className="flex items-center gap-2">
+              <Dot tone={tone[k.status]} /><Key id={k.key.slice(0, 8)} />
+              <span className="font-mono text-[11px] text-muted-foreground">{k.status}</span>
+            </div>
+            <div className="min-w-0 text-[12.5px]">
+              {k.holds.length === 0 && <div className="text-muted-foreground">holds no grant in force</div>}
+              {k.holds.map((h) => (
+                <div key={h.grant}>
+                  <span className="text-muted-foreground">may write </span><span className="font-mono">{h.rights.join(", ")}</span>
+                  <span className="text-muted-foreground"> on </span><span className="font-mono">{h.scope.join(", ")}</span>
+                  <span className="ml-2 font-mono text-[11px] text-muted-foreground">grant {h.grant}</span>
+                </div>
+              ))}
+              <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                {k.history.map((h, i) => <div key={i}>#{h.seq}{h.at === undefined ? "" : ` · ${when(h.at, s.now)}`} · {h.what}</div>)}
+                <div>{k.wrote ? `wrote ${k.wrote.entries} ${k.wrote.entries === 1 ? "entry" : "entries"}, last #${k.wrote.last} · ${when(k.wrote.at, s.now)}` : "has written nothing"}</div>
+              </div>
+              <div className="mt-1 break-all font-mono text-[10.5px] text-muted-foreground/70">{k.key}</div>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function Policy({ s }: { s: LogState }) {
+  const now = inForce(s.policy);
+  const steps = policySteps(s.policy).slice().reverse();
+  return (
+    <section>
+      <H right={said}>Policy</H>
+      <Note>The policy only tightens. An entry that would loosen it is refused by the gate and shows under Gate.</Note>
+      <h3 className="label-caps mb-2">in force</h3>
+      {now.length === 0 ? <Empty>No policy entry yet: nothing is required of a verse.</Empty> : (
         <ul className="divide-y divide-border/60">
-          {I.rules.map((r) => (
-            <li key={r.id} className="flex items-baseline gap-3 py-2 text-[13.5px]">
-              <span className="w-6 font-mono text-[11px] text-muted-foreground">{r.id}</span><span className="flex-1">{r.text}</span>
-              <span className="font-mono text-[11px] text-muted-foreground">since #{r.since}</span>
+          {now.map((rule) => (
+            <li key={rule.invariant} className="flex items-baseline justify-between gap-3 py-2">
+              <span className={mono}>{rule.invariant}</span>
+              <span className="font-mono text-[11px] text-muted-foreground">since #{rule.since}</span>
             </li>
           ))}
         </ul>
-      </div>
-      <div>
-        <H>Ratchet · only ever tightens</H>
-        <ol className="relative ml-1.5 border-l border-border">
-          {I.policyHistory.map((h) => (
-            <li key={h.seq} className="relative py-2 pl-5">
-              <span className={cn("absolute top-[13px] -left-[4px] size-[7px] rounded-full", h.kind === "tighten" ? "bg-foreground/70" : "border border-unverified bg-background")} />
-              <div className="flex flex-wrap items-baseline gap-x-3">
-                <span className="font-mono text-[11px] text-muted-foreground">#{h.seq} · {h.when}</span>
-                <span className={cn("text-[13px]", h.kind === "refused" && "text-unverified line-through decoration-1")}>{h.text}</span>
+      )}
+      <h3 className="label-caps mb-2 mt-8">history</h3>
+      <ul className="divide-y divide-border/60">
+        {steps.map((step) => (
+          <li key={step.seq} className="grid grid-cols-[52px_1fr] gap-x-3 py-2">
+            <span className="font-mono text-[11.5px] text-muted-foreground">#{step.seq}</span>
+            <div className="min-w-0">
+              {step.changes.map((change) => <p key={change} className={mono}>{change}</p>)}
+              <p className="font-mono text-[11px] text-muted-foreground">{when(step.at, s.now)} · judged by build {step.evaluator.slice(0, 7) || "unnamed"}</p>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function Gate({ s }: { s: LogState }) {
+  return (
+    <section>
+      <H right={<span className="font-mono text-[11px] text-muted-foreground">{s.refused} refused in all</span>}>Gate</H>
+      <Note>Every submission the gate refused is kept in the log as a verdict, with what was refused and why.</Note>
+      {s.verdicts.length === 0 ? <Empty>The gate has refused nothing.</Empty> : (
+        <ul className="divide-y divide-border">
+          {s.verdicts.map((v) => (
+            <li key={v.seq} className="grid grid-cols-[52px_1fr] gap-x-3 py-2.5">
+              <span className="font-mono text-[11.5px] text-muted-foreground">#{v.seq}</span>
+              <div className="min-w-0">
+                <p className="text-[13px] text-destructive">{v.reason}</p>
+                <p className="truncate text-[12.5px] text-muted-foreground" title={v.content}>{v.content}</p>
+                <p className="flex flex-wrap items-center gap-x-2 font-mono text-[11px] text-muted-foreground">
+                  <span>{v.kind} for {v.stream}</span><Key id={v.writer.slice(0, 8)} /><span>{when(v.at, s.now)}</span>
+                </p>
               </div>
             </li>
           ))}
-        </ol>
-      </div>
-      <div>
-        <H>Propose a tightening</H>
-        <input value={proposal} onChange={(e) => setProposal(e.target.value)} placeholder='e.g. "verse text at most 80 bytes"'
-          className="h-10 w-full rounded-sm border border-input bg-card px-3 text-[13.5px] focus:outline-none focus:ring-1 focus:ring-ring" />
-        {would.length > 0 && (
-          <div className="mt-3">
-            <p className="mb-1 text-[12.5px] text-muted-foreground">Would have refused {would.length} past entries. History is not changed; this applies from the next entry on.</p>
-            <ul className="font-mono text-[12px]">
-              {would.map((e) => <li key={e.seq} className="truncate py-0.5"><span className="text-muted-foreground">#{e.seq} {e.stream} </span>{e.content}</li>)}
-            </ul>
-            <Button size="sm" className="mt-3" variant="outline">Submit proposal (laptop key)</Button>
-          </div>
-        )}
-      </div>
+        </ul>
+      )}
     </section>
   );
 }
 
-function Gate() {
+function Vessels({ s }: { s: LogState }) {
   return (
     <section>
-      <H>Recent verdicts</H>
-      <ul className="divide-y divide-border">
-        {I.verdicts.map((v) => (
-          <li key={v.seq} className="grid grid-cols-[52px_1fr] gap-3 py-2.5 sm:grid-cols-[52px_90px_1fr_auto]">
-            <span className="font-mono text-[12px] text-muted-foreground">#{v.seq}</span>
-            <span className="font-mono text-[12px]">{v.stream}</span>
-            <span className="col-span-2 text-[13px] sm:col-span-1"><span className="mr-2 font-mono text-[11px] text-unverified">{v.rule}</span>{v.text}</span>
-            <span className="col-span-2 font-mono text-[11px] text-muted-foreground sm:col-span-1">{v.writer.label} · {v.when}</span>
-          </li>
-        ))}
-      </ul>
+      <H right={said}>Vessels</H>
+      <Note>What each Vessel was given through the island socket, counted from the log's access entries, and how many of its actions were let out. The log knows a Vessel by its id, not by a name.</Note>
+      {s.vessels.length === 0 ? <Empty>No Vessel has an access or dispatch entry yet.</Empty> : (
+        <ul className="space-y-6">
+          {s.vessels.map((v) => (
+            <li key={v.vessel}>
+              <p className="mb-2 flex flex-wrap items-baseline gap-x-3 font-mono text-[12.5px]">
+                <span>Vessel {v.vessel.slice(0, 8)}</span>
+                <span className="break-all text-[10.5px] text-muted-foreground/70">{v.vessel}</span>
+              </p>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {[
+                  [`${v.inference_today.calls}`, "model calls today (UTC)"],
+                  [`${v.inference.calls}`, "model calls ever"],
+                  [bytes(v.inference.bytes_in), "sent to models"],
+                  [bytes(v.inference.bytes_out), "received from models"],
+                  [`${v.tasks.calls}`, "tasks pulled"],
+                  [`${v.notes.calls}`, "fork notes"],
+                  [`${v.reads.calls}`, "reads"],
+                  [`${v.dispatched}`, "actions let out"],
+                ].map(([value, label]) => (
+                  <div key={label} className="rounded-sm border border-border bg-card p-2.5">
+                    <div className="font-mono text-[14px]">{value}</div>
+                    <div className="font-mono text-[10.5px] text-muted-foreground">{label}</div>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 font-mono text-[11px] text-muted-foreground">
+                {Object.entries(v.providers).map(([name, used]) => `${name || "unnamed"}: ${used.calls} calls`).join(" · ") || "no model call yet"}
+                {v.last_access !== null && v.last_access_at !== null && ` · newest access entry #${v.last_access} · ${when(v.last_access_at, s.now)}`}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }
 
-function Vessels() {
+function Ledger({ s }: { s: LogState }) {
+  const rows = ledgerOf(s);
   return (
     <section>
-      <H>Agents and Vessels</H>
-      <div className="grid gap-3 md:grid-cols-3">
-        {I.vessels.map((v) => (
-          <div key={v.name} className="rounded-sm border border-border bg-card p-3 text-[12.5px]">
-            <div className="mb-2 flex items-center gap-2 font-mono text-[12px]"><Dot tone={v.state === "done" ? "verified" : "primary"} pulse={v.state !== "done"} />{v.name}</div>
-            <dl className="grid grid-cols-[90px_1fr] gap-y-1">
-              <dt className="text-muted-foreground">state</dt><dd>{v.state}</dd>
-              {v.slotsTotal > 0 && (<><dt className="text-muted-foreground">slots</dt><dd className="font-mono">{v.slotsUsed} used · {v.slotsTotal - v.slotsUsed} left</dd></>)}
-              <dt className="text-muted-foreground">last seal</dt><dd className="font-mono">{v.seal}</dd>
-              <dt className="text-muted-foreground">effects</dt><dd className={v.authority.startsWith("blocked") ? "text-unverified" : ""}>{v.authority}</dd>
-              <dt className="text-muted-foreground">model today</dt><dd className="font-mono">{v.calls}{v.budget ? ` / ${v.budget}` : ""} calls</dd>
-            </dl>
-            {v.budget > 0 && <div className="mt-2 h-1 rounded-full bg-muted"><div className="h-full rounded-full bg-foreground/50" style={{ width: `${(v.calls / v.budget) * 100}%` }} /></div>}
-          </div>
-        ))}
-      </div>
+      <H right={said}>Ledger</H>
+      <Note>Every answer to an action that waited, and the dispatch that used it. An approval lets one action out, once.</Note>
+      {rows.length === 0 ? <Empty>Nothing has been approved or declined yet.</Empty> : (
+        <ul className="divide-y divide-border">
+          {rows.map(({ approval, dispatch, outcome }) => (
+            <li key={approval.seq} className="grid grid-cols-[52px_1fr] gap-x-3 py-2.5">
+              <span className="font-mono text-[11.5px] text-muted-foreground">#{approval.seq}</span>
+              <div className="min-w-0">
+                <p className="flex flex-wrap items-center gap-x-2 text-[13px]">
+                  <span className={outcome === "sent" ? "text-verified" : outcome === "declined" ? "text-destructive" : "text-unverified"}>{outcome}</span>
+                  <span className="font-mono text-[12px] text-muted-foreground">req {approval.request.slice(0, 8)}</span>
+                </p>
+                <p className="flex flex-wrap items-center gap-x-2 font-mono text-[11px] text-muted-foreground">
+                  <span>{approval.verdict === "approve" ? "approved" : "declined"} by</span><Key id={approval.by.slice(0, 8)} /><span>{when(approval.at, s.now)}</span>
+                  {dispatch && <span>· dispatch #{dispatch.seq}, op {dispatch.op} of Vessel {dispatch.vessel.slice(0, 8)}</span>}
+                  {!dispatch && approval.used_by !== null && <span>· dispatch #{approval.used_by}</span>}
+                </p>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }
 
-function Ledger() {
-  return (
-    <section>
-      <H right={<span className="font-mono text-[11px] text-verified">0 sent twice</span>}>Approvals ledger</H>
-      <ul className="divide-y divide-border">
-        {I.ledger.map((l) => (
-          <li key={l.approval + l.outcome} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-2.5 font-mono text-[12px]">
-            <span className={cn("w-16", l.outcome === "approved" ? "text-verified" : l.outcome === "lapsed" ? "text-unverified" : "text-muted-foreground")}>{l.outcome}</span>
-            <span>#{l.approval}</span><span className="text-muted-foreground">{l.by}</span>
-            <span className="text-muted-foreground">→</span><span>{l.action}</span>
-            <span className="text-muted-foreground">→</span><span>{l.entry ? `entry #${l.entry}` : "—"}</span>
-            <span className="w-full font-sans text-[12px] text-muted-foreground sm:ml-auto sm:w-auto">{l.note}</span>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-function Repos() {
+function Repos({ s }: { s: LogState }) {
+  const receipts = s.kinds["receipt"] ?? 0;
   return (
     <section>
       <H>Repos</H>
-      <table className="w-full text-left text-[13px]">
-        <thead className="label-caps"><tr><th className="pb-2 font-normal">repo → stream</th><th className="font-normal">branch</th><th className="font-normal">latest receipt</th><th className="text-right font-normal">uncovered</th></tr></thead>
-        <tbody className="divide-y divide-border/60">
-          {I.repos.map((r) => (
-            <tr key={r.repo}><td className="py-2 font-mono text-[12.5px]">{r.repo} → {r.stream}</td><td className="font-mono text-[12.5px]">{r.branch}</td>
-              <td className="font-mono text-[12.5px]">{r.head} <span className="text-muted-foreground">#{r.seq}</span></td>
-              <td className={cn("text-right font-mono", r.uncovered ? "text-unverified" : "text-muted-foreground")}>{r.uncovered}</td></tr>
-          ))}
-        </tbody>
-      </table>
+      <Empty>
+        {receipts > 0
+          ? `The log holds ${receipts} ${receipts === 1 ? "receipt" : "receipts"}, but this screen does not show them yet.`
+          : "Nothing watches your repos yet: the observer that writes receipts for commits is the next build step (step 7). The log holds no receipt."}
+      </Empty>
     </section>
   );
 }
 
-function Server() {
+function Server({ s }: { s: LogState }) {
+  const { link, session, client, log } = useFlare();
+  const skew = Math.round((Date.now() * 1000 - s.now) / 1_000_000);
   return (
-    <section className="space-y-8">
-      <div><H>Services</H>
-        <ul className="grid gap-2 sm:grid-cols-2">
-          {I.services.map((s) => (
-            <li key={s.name} className="flex items-center gap-2 rounded-sm border border-border px-3 py-2 text-[13px]">
-              <Dot tone={s.up ? "verified" : "destructive"} pulse={!s.up} /><span>{s.name}</span><span className="ml-auto font-mono text-[11px] text-muted-foreground">{s.up ? s.note : s.note}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-      <div><H>Devices in the private network</H>
-        <table className="w-full text-left text-[13px]">
-          <thead className="label-caps"><tr><th className="pb-2 font-normal">device</th><th className="font-normal">last seen</th><th className="font-normal">backup / replica</th></tr></thead>
-          <tbody className="divide-y divide-border/60">
-            {I.devices.map((d) => (
-              <tr key={d.label}><td className="py-2"><Key id={d.key} label={d.label} /></td><td className="font-mono text-[12px]">{d.seen}</td><td className="font-mono text-[12px]">{d.backup}</td></tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+    <section>
+      <H>Server</H>
+      <Row k="session"><span className="inline-flex flex-wrap items-center gap-x-2"><LinkMark state={link.state} reason={link.state === "offline" ? link.reason : undefined} /><span className={mono}>{session}, as {client}</span></span></Row>
+      <Row k="the server's copy of the log">{s.problem ? <span className="text-unverified">behind: {s.problem}</span> : <span className="inline-flex items-center gap-1.5"><Dot tone="verified" /> up to date with the broker</span>}</Row>
+      <Row k="log last read"><span className={mono}>{log.readAt ?? when(s.now)}</span></Row>
+      <Row k="server's clock"><span className={mono}>{when(s.now)}{Math.abs(skew) > 90 ? `, ${Math.abs(skew)} s ${skew > 0 ? "behind" : "ahead of"} this device's` : ""}</span></Row>
+      <h3 className="label-caps mb-2 mt-8">keys that wrote, newest first</h3>
+      <ul className="divide-y divide-border/60">
+        {s.writers.map((w) => (
+          <li key={w.key} className="grid grid-cols-[auto_1fr_auto] items-center gap-4 py-1.5 font-mono text-[12.5px]">
+            <Key id={w.key.slice(0, 8)} />
+            <span className="text-muted-foreground">{w.entries} {w.entries === 1 ? "entry" : "entries"}</span>
+            <span className="text-muted-foreground">last #{w.last} · {when(w.last_at, s.now)}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-4 text-[12.5px] text-muted-foreground">
+        Whether the services on the server are running is not something the log says. On the server, <span className="font-mono">scripts/node/check.sh</span> does.
+      </p>
     </section>
   );
 }

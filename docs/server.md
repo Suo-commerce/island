@@ -561,7 +561,14 @@ phone. It is one more client of the shared session, beside the terminal
 - **Now** shows what waits for you, what the agent is doing, the log's
   head and its newest entries. **Session** is the stream; what you type
   there is said to the agent, and `/see` works as in the terminal.
-  **Sing**, **Agent** and **Island** show sample data and say so.
+- **Island** is the system read from the log: integrity, every key and
+  what it may write, the policy and its history, what the gate refused,
+  what each Vessel was given, the ledger of approvals and dispatches.
+  **Agent** is the agent's state, use and actions. **Sing** composes a
+  verse against the real streams and the policy's size bound and gives
+  the `/verse` command to paste into the terminal. All three only read.
+- Keys show as their first bytes and Vessels as their ids: the log
+  holds no names for them.
 - The page holds no key, so it cannot approve: an action that waits is
   shown with the command that answers it in the terminal, `/approve N`.
 - Everything on it is marked "server says": the page does not check

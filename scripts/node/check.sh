@@ -236,6 +236,12 @@ face() {
 import json, sys
 d = json.load(sys.stdin)
 print(d["problem"] is None and d["head"]["seq"] >= int(sys.argv[1]) and d["recent"][0]["seq"] == d["head"]["seq"])' "$head" 2>/dev/null || echo no-answer)" True
+    check "$when: the log's state as the face reads it has flare-home and its grants" \
+        "$(curl -s --max-time 30 "$FACE/log/state" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d["problem"] is None and d["head"]["seq"] >= int(sys.argv[2]) and any(v["vessel"] == sys.argv[1] for v in d["vessels"])
+      and any(g["role"] == "root" for g in d["grants"]) and len(d["policy"]) > 0)' "$VESSEL" "$head" 2>/dev/null || echo no-answer)" True
     check "$when: the face's own page may attach to the session" "$(knock "$FACE")" 101
     check "$when: a page from elsewhere may not" "$(knock https://flare.example)" 403
     check "$when: nor the page under a name that is not the server's" "$(knock http://flare.example flare.example)" 403

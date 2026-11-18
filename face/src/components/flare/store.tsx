@@ -1,13 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { initialSession, initialWaiting, logHead } from "@/lib/mock";
-import { SessionLink, clientName, readLog, sessionUrl, type LinkState, type LogView, type SessionEvent } from "@/lib/session";
+import { sampleState } from "@/lib/sample-state";
+import { SessionLink, clientName, readLog, readState, sessionUrl, type LinkState, type LogState, type LogView, type SessionEvent } from "@/lib/session";
 import { agentOf, line, settledOf, waitingOf, type AgentView, type Line, type Settled, type Waiting } from "@/lib/view";
 
 export type { Settled } from "@/lib/view";
 
 /** What the page knows of the log, and when it last asked. */
-export type LogState = { view: LogView | null; readAt: string | null; error: string | null };
+export type LogRead = { view: LogView | null; readAt: string | null; error: string | null };
 
 type Ctx = {
   /** Live: on the real session. Otherwise the prototype's sample data. */
@@ -23,7 +24,9 @@ type Ctx = {
   /** Live only: what the server last said the agent is doing. */
   agent: AgentView | null;
   /** Live only. */
-  log: LogState;
+  log: LogRead;
+  /** What the log amounts to: streams, grants, policy, Vessels. Sample data when not live. */
+  state: LogState | null;
   /** The newest entry's place, as far as the page was told. */
   head: number | null;
   /** Say `text` to the agent, or run a `/see`. A string: why nothing was sent. */
@@ -72,7 +75,8 @@ function LiveProvider({ children }: { children: ReactNode }) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [link, setLink] = useState<LinkState>({ state: "connecting" });
   const [client, setClient] = useState(storedClient);
-  const [log, setLog] = useState<LogState>({ view: null, readAt: null, error: null });
+  const [log, setLog] = useState<LogRead>({ view: null, readAt: null, error: null });
+  const [state, setState] = useState<LogState | null>(null);
   const linkRef = useRef<SessionLink | null>(null);
 
   useEffect(() => {
@@ -107,6 +111,9 @@ function LiveProvider({ children }: { children: ReactNode }) {
     const abort = new AbortController();
     const read = () => {
       if (document.visibilityState === "hidden") return;
+      readState(abort.signal).then(setState).catch(() => {
+        // The log's own read says what is wrong.
+      });
       readLog(LOG_ENTRIES, abort.signal)
         .then((view) => setLog({ view, readAt: new Date().toTimeString().slice(0, 8), error: null }))
         .catch((error: unknown) => {
@@ -167,10 +174,11 @@ function LiveProvider({ children }: { children: ReactNode }) {
     settled: settledOf(events),
     agent: agentOf(events),
     log,
+    state,
     head: log.view?.head?.seq ?? null,
     send,
     settle: () => undefined,
-  }), [events, link, client, rename, log, send]);
+  }), [events, link, client, rename, log, state, send]);
   return <C.Provider value={value}>{children}</C.Provider>;
 }
 
@@ -208,6 +216,7 @@ function SampleProvider({ children }: { children: ReactNode }) {
     waiting, lines, settled,
     agent: null,
     log: { view: null, readAt: null, error: null },
+    state: sampleState,
     head: nextSeq - 1,
     send, settle,
   };

@@ -7,10 +7,10 @@ import { Button } from "@/components/ui/button";
 import { radialSelectionRotation } from "@/lib/radial-menu";
 
 const nav = [
-  { to: "/", label: "Now", sample: false },
-  { to: "/session", label: "Session", sample: false },
-  { to: "/sing", label: "Sing", sample: true },
-  { to: "/agent", label: "Agent", sample: true },
+  { to: "/", label: "Now" },
+  { to: "/session", label: "Session" },
+  { to: "/sing", label: "Sing" },
+  { to: "/agent", label: "Agent" },
 ] as const;
 const later = ["Streams", "Approvals"];
 
@@ -173,7 +173,6 @@ export function Shell({ children }: { children: ReactNode }) {
               className="flex items-center justify-between rounded-sm px-2 py-1.5 text-[13px] text-sidebar-foreground/75 hover:bg-sidebar-accent data-[status=active]:bg-sidebar-accent data-[status=active]:text-sidebar-foreground">
               {n.label}
               {n.to === "/" && waiting.length > 0 && <span className="font-mono text-[11px] text-primary">{waiting.length}</span>}
-              {live && n.sample && <span className="font-mono text-[10px] text-unverified">sample</span>}
             </Link>
           ))}
           {later.map((l) => (
@@ -182,7 +181,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </nav>
         <div className="mx-2 mt-6 border-t border-sidebar-border pt-3">
           <Link to="/island" className="flex items-center justify-between rounded-sm px-2 py-1.5 text-[13px] text-sidebar-foreground/75 hover:bg-sidebar-accent data-[status=active]:bg-sidebar-accent data-[status=active]:text-sidebar-foreground">
-            Island <span className={live ? "font-mono text-[10px] text-unverified" : "font-mono text-[10px] text-muted-foreground"}>{live ? "sample" : "system"}</span>
+            Island <span className="font-mono text-[10px] text-muted-foreground">system</span>
           </Link>
         </div>
         <div className="mt-auto space-y-1.5 border-t border-sidebar-border px-4 py-3 font-mono text-[11px] text-muted-foreground">

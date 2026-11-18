@@ -40,13 +40,18 @@ export function Section({ title, right, children, className }: { title: string; 
   );
 }
 
-/** Said on every screen that is not connected yet: what it shows is not Island. */
-export function Sample({ what, className }: { what: string; className?: string }) {
+/** Said on a screen when the page runs on the prototype's sample data (`npm run dev:mock`). */
+export function Sample({ className }: { className?: string }) {
   return (
     <p role="note" className={cn("rounded-sm border border-dashed border-unverified/60 bg-unverified/10 px-3 py-2 font-mono text-[11.5px] text-foreground/80", className)}>
-      <span className="text-unverified">sample data</span> · {what} is not connected yet. Nothing here is read from Island, and nothing done here is sent.
+      <span className="text-unverified">sample data</span> · this page was started on sample data. Nothing here is read from Island, and nothing done here is sent.
     </p>
   );
+}
+
+/** Said in place of a screen's content until the log's state has been read. */
+export function Unread({ error }: { error: string | null }) {
+  return <p className="py-10 text-center text-[13px] text-muted-foreground">{error ? `The log could not be read: ${error}.` : "Reading the log…"}</p>;
 }
 
 /** Whether the page is attached to its session. */
