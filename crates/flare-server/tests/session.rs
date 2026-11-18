@@ -1351,3 +1351,79 @@ async fn the_page_over_tls_attaches_over_tls_only_and_a_renewed_certificate_is_r
     serving.abort();
     running.serving.abort();
 }
+
+/// The page signs approvals itself, so it encodes them itself (in
+/// TypeScript, face/src/lib/approval.ts). These vectors hold both sides to
+/// the same bytes: this test checks them against island-core, the page's
+/// tests against its own encoder. `UPDATE_VECTORS=1` writes them anew.
+#[test]
+fn the_pages_approval_vectors_are_what_island_core_encodes() {
+    use island_core::{Answered, Approval, Body, StreamId, Submission};
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../face/src/test/vectors/approval.json");
+    let key = island_core::SigningKey::from_bytes(&[7; 32]);
+    let writer = island_core::public_key(&key);
+    let cases: [(u64, [u8; 32], Answered); 4] = [
+        (1, [0; 32], Answered::Approve),
+        (2, [0xff; 32], Answered::Decline),
+        (300, std::array::from_fn(|i| i as u8), Answered::Approve),
+        (
+            u64::from(u32::MAX) + 5,
+            std::array::from_fn(|i| (i * 7) as u8),
+            Answered::Decline,
+        ),
+    ];
+    let vectors: Vec<serde_json::Value> = cases
+        .iter()
+        .map(|(counter, request, verdict)| {
+            let submission = Submission {
+                stream: StreamId::from(StreamId::APPROVALS),
+                writer,
+                counter: *counter,
+                body: Body::Approval(Approval {
+                    request: *request,
+                    verdict: *verdict,
+                    proof: None,
+                }),
+            };
+            let hash = submission.hash();
+            let signature = island_core::sign_hash(&key, &hash);
+            let request = codec::append_request(&submission, &signature);
+            // What the server makes of it is the approval that went in.
+            let (parsed, _) = codec::parse_append(&request).expect("canonical");
+            assert_eq!(parsed, submission);
+            serde_json::json!({
+                "writer": flare_core::hex(&writer),
+                "counter": counter.to_string(),
+                "request": flare_core::hex(request_hash_of(&submission)),
+                "approve": *verdict == Answered::Approve,
+                "submission": request.submission,
+                "hash": flare_core::hex(&hash),
+                "signature": request.sig_writer,
+            })
+        })
+        .collect();
+    let now = serde_json::to_string_pretty(&serde_json::json!({
+        "domain": island_core::SUBMISSION_DOMAIN,
+        "stream": StreamId::APPROVALS,
+        "seed": flare_core::hex(&[7; 32]),
+        "vectors": vectors,
+    }))
+    .expect("json")
+        + "\n";
+    if std::env::var_os("UPDATE_VECTORS").is_some() {
+        std::fs::write(&path, &now).expect("the vectors are written");
+    }
+    let kept = std::fs::read_to_string(&path).expect("face/src/test/vectors/approval.json");
+    assert_eq!(
+        kept, now,
+        "run with UPDATE_VECTORS=1 if the encoding was meant to change"
+    );
+}
+
+fn request_hash_of(submission: &island_core::Submission) -> &[u8; 32] {
+    match &submission.body {
+        island_core::Body::Approval(approval) => &approval.request,
+        _ => unreachable!("an approval"),
+    }
+}

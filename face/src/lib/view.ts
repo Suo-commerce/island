@@ -15,6 +15,8 @@ export type Waiting =
       stream?: string | undefined;
       /** The `action_waiting` event: what `/approve N` names in the terminal. Absent in sample data. */
       event?: number | undefined;
+      /** The whole request hash, in hex: what an approval answers. Absent in sample data. */
+      request?: string | undefined;
     }
   | { id: string; type: "nudge"; at: string; repo: string; commits: number; since: string }
   | { id: string; type: "verdict"; at: string; stream: string; reason: string; draft: string }
@@ -121,6 +123,7 @@ export function waitingOf(events: readonly SessionEvent[]): Waiting[] {
         fork: `Vessel ${short(e.payload["vessel"])}`,
         stream: verse?.stream,
         event: e.seq,
+        request: text(e.payload["request_hash"]),
       };
     });
 }

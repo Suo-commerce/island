@@ -2,6 +2,8 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { Dot, Key, LinkMark, Sample, Trust, Unread } from "@/components/flare/marks";
+import { Button } from "@/components/ui/button";
+import { copyText } from "@/lib/sing";
 import { useFlare } from "@/components/flare/store";
 import { bytes, inForce, keysOf, ledgerOf, policySteps, when, type KeyStatus } from "@/lib/island";
 import type { LogState } from "@/lib/session";
@@ -12,7 +14,7 @@ export const Route = createFileRoute("/island")({
   component: Island,
 });
 
-const tabs = ["Integrity", "Authority", "Policy", "Gate", "Vessels", "Ledger", "Repos", "Server"] as const;
+const tabs = ["Integrity", "Authority", "Policy", "Gate", "Vessels", "Ledger", "Repos", "Server", "This device"] as const;
 type Tab = (typeof tabs)[number];
 
 function Island() {
@@ -47,6 +49,7 @@ function Island() {
               {tab === "Ledger" && <Ledger s={state} />}
               {tab === "Repos" && <Repos s={state} />}
               {tab === "Server" && <Server s={state} />}
+              {tab === "This device" && <ThisDevice s={state} />}
             </>
           )}
         </div>
@@ -312,6 +315,69 @@ function Server({ s }: { s: LogState }) {
       <p className="mt-4 text-[12.5px] text-muted-foreground">
         Whether the services on the server are running is not something the log says. On the server, <span className="font-mono">scripts/node/check.sh</span> does.
       </p>
+    </section>
+  );
+}
+
+function ThisDevice({ s }: { s: LogState }) {
+  const { device, makeKey, forgetKey } = useFlare();
+  const [said, setSaid] = useState<string | null>(null);
+  const [sure, setSure] = useState(false);
+  const key = device.state === "ready" || device.state === "ungranted" ? device.key : null;
+  const grant = key
+    ? `island-cli grant --broker http://10.77.0.1:4747 --root-key .island/root.key --holder ${key} --scope approvals --rights approval`
+    : "";
+  const mine = key ? s.grants.filter((g) => g.holder === key) : [];
+  const copy = (text: string, what: string) => void copyText(text).then((done) => setSaid(done ? `${what} copied.` : `This browser would not copy it: select it and copy it by hand.`));
+  return (
+    <section>
+      <H>This device</H>
+      <Note>
+        To approve from here, this browser needs a key of its own. It is made here and never leaves: the browser signs with it, and nothing, this page included, can read it out. It can do nothing until you grant it the one right it asks for, from the laptop, with the root key.
+      </Note>
+      {device.state === "unavailable" && (
+        <>
+          <Row k="key">none</Row>
+          <p className="mt-4 text-[13px] text-muted-foreground">{device.reason}</p>
+          <p className="mt-2 text-[13px] text-muted-foreground">Until then, answer what waits in the terminal with <span className="font-mono">/approve N</span> or <span className="font-mono">/decline N</span>.</p>
+        </>
+      )}
+      {device.state === "none" && (
+        <>
+          <Row k="key">none yet</Row>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button onClick={() => void makeKey().then((why) => setSaid(why ? `The key was not made: ${why}` : "The key is made. Grant it next."))}>Make this device's key</Button>
+            {said && <span role="status" className="font-mono text-[11.5px] text-muted-foreground">{said}</span>}
+          </div>
+        </>
+      )}
+      {key && (
+        <>
+          <Row k="key"><span className="inline-flex items-center gap-2"><Dot tone={device.state === "ready" ? "verified" : "unverified"} /><Key id={key.slice(0, 8)} /><span className="font-mono text-[11px] text-muted-foreground">{device.state === "ready" ? "may approve and decline" : "granted nothing yet"}</span></span></Row>
+          <Row k="public key"><span className={mono}>{key}</span></Row>
+          <Row k="its grants">
+            {mine.length === 0 ? "none in the log" : mine.map((g) => (
+              <span key={g.id} className="block font-mono text-[12px]">{g.rights.join(", ")} on {g.scope.join(", ")} · grant {g.id}{g.ended_at === null ? "" : ` · ended at #${g.ended_at}`}</span>
+            ))}
+          </Row>
+          {device.state === "ungranted" && (
+            <div className="mt-5 rounded-sm border border-border bg-card px-3 py-3">
+              <p className="text-[13px]">Grant it, on the laptop, in <span className="font-mono">/srv/oc-projects/island</span>:</p>
+              <p className="mt-2 select-all whitespace-pre-wrap break-all font-mono text-[12px]">{grant}</p>
+              <p className="mt-2 text-[12.5px] text-muted-foreground">It lets this key approve and decline what the agent wants to send, and nothing else. Copy the command; never type a key by hand. If this is not the laptop, copy it here, send it to yourself, and paste it into the laptop's terminal. This screen notices the grant by itself within half a minute.</p>
+              <Button size="sm" variant="outline" className="mt-3" onClick={() => copy(grant, "The command is")}>Copy the command</Button>
+            </div>
+          )}
+          <div className="mt-5 flex flex-wrap items-center gap-3">
+            <Button size="sm" variant="outline" onClick={() => copy(key, "The public key is")}>Copy the public key</Button>
+            {!sure
+              ? <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setSure(true)}>Forget this key…</Button>
+              : <Button size="sm" variant="ghost" className="text-destructive" onClick={() => void forgetKey().then(() => { setSure(false); setSaid("The key is gone from this browser. Its grant stays in the log until you revoke it."); })}>Yes, delete it from this browser</Button>}
+            {said && <span role="status" className="font-mono text-[11.5px] text-muted-foreground">{said}</span>}
+          </div>
+          {sure && <p className="mt-2 text-[12.5px] text-muted-foreground">A deleted key cannot be brought back, and its grant stays in the log: revoke grant {mine.find((g) => g.ended_at === null)?.id ?? "of this key"} on the laptop as well.</p>}
+        </>
+      )}
     </section>
   );
 }

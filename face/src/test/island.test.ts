@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { bytes, count, inForce, keysOf, ledgerOf, policySteps, singable, verseMax } from "@/lib/island";
+import { bytes, count, inForce, mayApprove, keysOf, ledgerOf, policySteps, singable, verseMax } from "@/lib/island";
 import type { GrantLine, LogState } from "@/lib/session";
 import { verseCommand } from "@/lib/sing";
 
@@ -38,7 +38,7 @@ const state: LogState = {
   ],
   dispatches: [{ seq: 12, at, by: appender, vessel: "91".repeat(16), op: 7, request: "11".repeat(32), approval: 11 }],
   vessels: [],
-  writers: [{ key: laptop, entries: 3, last: 11, last_at: at + 11e6 }, { key: root, entries: 7, last: 9, last_at: at + 9e6 }],
+  writers: [{ key: laptop, entries: 3, last: 11, last_at: at + 11e6, counter: 3 }, { key: root, entries: 7, last: 9, last_at: at + 9e6, counter: 7 }],
 };
 
 describe("the keys", () => {
@@ -90,6 +90,18 @@ describe("the policy", () => {
     expect(verseMax(state)).toBe(2000);
     expect(verseMax({ ...state, policy: [] })).toBeNull();
     expect(verseMax(null)).toBeNull();
+  });
+});
+
+describe("who may approve", () => {
+  it("is a key with approval on approvals in force, and no other", () => {
+    const approver = "ee".repeat(32);
+    const granted = { ...state, grants: [...state.grants,
+      grant({ id: "20.0", seq: 20, holder: approver, rights: ["approval"], scope: ["approvals"] }),
+      grant({ id: "21.0", seq: 21, holder: tablet, rights: ["approval"], scope: ["approvals"], ended_at: 22 }),
+      grant({ id: "23.0", seq: 23, holder: laptop, rights: ["approval"], scope: ["flare"] })] };
+    expect([approver, tablet, laptop, root].map((key) => mayApprove(granted, key))).toEqual([true, false, false, false]);
+    expect(mayApprove(null, approver)).toBe(false);
   });
 });
 

@@ -15,7 +15,8 @@ What it answers, by the last line of the newest message from Jarmo:
                              As a fork child (told so by fork's result):
                              `write` of draft-N.md, a `verse` if its task
                              asks for one, then what it made
-    ... propose a verse ...  the tool call `verse`, then that it did
+    ... propose a verse ...  the tool call `verse` (the usual words, or those
+                             after "saying"), then that it did
     anything else            `write` of hello.txt holding that line, then
                              that it did
     ... slowly ...           the same, each answer after --slow seconds
@@ -82,8 +83,9 @@ def answer(body):
     if "fork" in asked:
         return tool_call("fork", {"tasks": FORK_TASKS}, "call-f")
     if "propose a verse" in asked:
-        return tool_call("verse", {"evidence": "decision",
-                                   "text": "Verses from the agent wait for approval"}, "call-v")
+        # "... propose a verse saying WORDS": that verse; else the usual one.
+        words = asked.split(" saying ", 1)[1].strip() if " saying " in asked else "Verses from the agent wait for approval"
+        return tool_call("verse", {"evidence": "decision", "text": words}, "call-v")
     return tool_call("write", {"path": "hello.txt", "content": asked}, "call-1")
 
 

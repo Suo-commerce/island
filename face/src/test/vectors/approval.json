@@ -1,0 +1,43 @@
+{
+  "domain": "island.submission.v1",
+  "seed": "0707070707070707070707070707070707070707070707070707070707070707",
+  "stream": "approvals",
+  "vectors": [
+    {
+      "approve": true,
+      "counter": "1",
+      "hash": "b4ae4a11c1c0cae551bccc71120bf2d7bc8150d17c8cc449b2ad6eac34d88df8",
+      "request": "0000000000000000000000000000000000000000000000000000000000000000",
+      "signature": "u/PbYqhI9jBTntY2zc6v3oTpcSJ+fbMX+KP6PLuy9F+XYRQlF7XHz90pZ+qhpcRyUeridHgH4NlHH3dkYZm6Dw==",
+      "submission": "CQAAAAAAAABhcHByb3ZhbHPqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLAEAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "writer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+    },
+    {
+      "approve": false,
+      "counter": "2",
+      "hash": "b24ebc2c62c84dd218393285f6670f872c747853eb8b094ec247843a5ca0c2a7",
+      "request": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "signature": "5iYtIr4+1MzKiHvqozupLMFxjA9cndAUxlhVgLjVqai9nWPzCOS8k846AAbkN6LTR6qBevARbh3/d9iz1jKZCQ==",
+      "submission": "CQAAAAAAAABhcHByb3ZhbHPqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLAIAAAAAAAAACv//////////////////////////////////////////AQA=",
+      "writer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+    },
+    {
+      "approve": true,
+      "counter": "300",
+      "hash": "03c6519f598125ed6ab717e298b2081149c8626bd17712dd513e19444aef8dc0",
+      "request": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature": "PvNlSgPh/95hRLfek2lA6V5rUE0GGDEOn9sQMsfq9sEjuudz1PcptRg4ZpINmC41FLzkUszjIifOk3XjYgVuDw==",
+      "submission": "CQAAAAAAAABhcHByb3ZhbHPqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLCwBAAAAAAAACgABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fAAA=",
+      "writer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+    },
+    {
+      "approve": false,
+      "counter": "4294967300",
+      "hash": "90bdebbfe733c0effddbdd2adc3e17b2df3d8ea84c2f3d86da1ee0acebdeb023",
+      "request": "00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9",
+      "signature": "PtMyy9l2JpGY1mp+22ylMVGsecnGNY4X1HEfM60PLBJ2zBXHEHDnWATIbC1nsVlwZl9AEZFmi5M5CJx0DcSuCA==",
+      "submission": "CQAAAAAAAABhcHByb3ZhbHPqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLAQAAAABAAAACgAHDhUcIyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZAQA=",
+      "writer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+    }
+  ]
+}

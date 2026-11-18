@@ -113,12 +113,24 @@ export class SessionLink {
     });
   }
 
+  /**
+   * Answer an action that waits: an approval (or a decline) this device
+   * made and signed, as base64. The command's id, to know its result by;
+   * null: not attached, nothing was sent.
+   */
+  answer(approve: boolean, submission: string, signature: string): string | null {
+    return this.send(approve ? "approve" : "decline", { submission, sig_writer: signature });
+  }
+
   private command(verb: "say" | "see", args: Record<string, unknown>): boolean {
-    if (!this.attached || this.socket?.readyState !== WebSocket.OPEN) return false;
-    this.socket.send(
-      JSON.stringify({ type: "command", id: commandId(this.options.client), verb, args }),
-    );
-    return true;
+    return this.send(verb, args) !== null;
+  }
+
+  private send(verb: "say" | "see" | "approve" | "decline", args: Record<string, unknown>): string | null {
+    if (!this.attached || this.socket?.readyState !== WebSocket.OPEN) return null;
+    const id = commandId(this.options.client);
+    this.socket.send(JSON.stringify({ type: "command", id, verb, args }));
+    return id;
   }
 
   private open(): void {
@@ -245,7 +257,7 @@ export type LogState = {
   approvals: ApprovalLine[];
   dispatches: DispatchLine[];
   vessels: VesselLine[];
-  writers: { key: string; entries: number; last: number; last_at: number }[];
+  writers: { key: string; entries: number; last: number; last_at: number; counter: number }[];
 };
 
 export function readState(signal?: AbortSignal): Promise<LogState> {

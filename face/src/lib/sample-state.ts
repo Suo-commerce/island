@@ -75,11 +75,11 @@ export const sampleState: LogState = {
     },
   ],
   writers: [
-    { key: agent, entries: 3, last: 60, last_at: at(60) },
-    { key: socket, entries: 12, last: 59, last_at: at(59) },
-    { key: sender, entries: 3, last: 58, last_at: at(58) },
-    { key: laptop, entries: 33, last: 57, last_at: at(57) },
-    { key: root, entries: 8, last: 30, last_at: at(30) },
-    { key: appender, entries: 2, last: 47, last_at: at(47) },
+    { key: agent, entries: 3, last: 60, last_at: at(60), counter: 1 },
+    { key: socket, entries: 12, last: 59, last_at: at(59), counter: 1 },
+    { key: sender, entries: 3, last: 58, last_at: at(58), counter: 1 },
+    { key: laptop, entries: 33, last: 57, last_at: at(57), counter: 1 },
+    { key: root, entries: 8, last: 30, last_at: at(30), counter: 1 },
+    { key: appender, entries: 2, last: 47, last_at: at(47), counter: 1 },
   ],
 };

@@ -20,7 +20,7 @@ describe("what waits", () => {
   it("is every action without an answer, named by its event", () => {
     const waiting = waitingOf(events);
     expect(waiting).toHaveLength(1);
-    expect(waiting[0]).toMatchObject({ id: "#5", type: "action", event: 5, hash: "bbbbbbbb", provider: "island.verse", text: "island.mail, 120 bytes", fork: "Vessel 914c503c" });
+    expect(waiting[0]).toMatchObject({ id: "#5", type: "action", event: 5, request: b, hash: "bbbbbbbb", provider: "island.verse", text: "island.mail, 120 bytes", fork: "Vessel 914c503c" });
     expect(waiting[0] && "stream" in waiting[0] ? waiting[0].stream : "none").toBeUndefined();
   });
 

@@ -128,6 +128,11 @@ export function singable(state: LogState | null): { name: string; entries: numbe
   return [...named].filter(([name]) => !SYSTEM.has(name)).map(([name, entries]) => ({ name, entries })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** Whether `key` (hex) holds a grant in force to approve: `approval` on `approvals`. */
+export function mayApprove(state: LogState | null, key: string): boolean {
+  return (state?.grants ?? []).some((g) => g.holder === key && g.ended_at === null && g.rights.includes("approval") && g.scope.includes("approvals"));
+}
+
 /** A count with its noun: `1 task`, `3 tasks`. */
 export function count(n: number, noun: string, plural: string = `${noun}s`): string {
   return `${n} ${n === 1 ? noun : plural}`;

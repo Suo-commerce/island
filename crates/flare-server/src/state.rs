@@ -180,6 +180,8 @@ pub struct WriterLine {
     pub last: u64,
     /// When that was ordered, in microseconds since the epoch.
     pub last_at: u64,
+    /// Its latest counter: its next submission carries the one after.
+    pub counter: u64,
 }
 
 /// What `/log/state` answers with.
@@ -269,6 +271,10 @@ impl LogState {
                 entries: 0,
                 last: entry.seq,
                 last_at: entry.at,
+                counter: state
+                    .writers
+                    .get(&submission.writer)
+                    .map_or(0, |last| last.counter),
             });
             writer.entries += 1;
             writer.last = entry.seq;

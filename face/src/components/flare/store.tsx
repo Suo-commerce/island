@@ -4,11 +4,25 @@ import { initialSession, initialWaiting, logHead } from "@/lib/mock";
 import { sampleState } from "@/lib/sample-state";
 import { SessionLink, clientName, readLog, readState, sessionUrl, type LinkState, type LogState, type LogView, type SessionEvent } from "@/lib/session";
 import { agentOf, line, settledOf, waitingOf, type AgentView, type Line, type Settled, type Waiting } from "@/lib/view";
+import { approvalBytes, b64, hex, submissionHash, unhex } from "@/lib/approval";
+import { mayApprove } from "@/lib/island";
+import * as deviceKey from "@/lib/key";
 
 export type { Settled } from "@/lib/view";
 
 /** What the page knows of the log, and when it last asked. */
 export type LogRead = { view: LogView | null; readAt: string | null; error: string | null };
+
+/** This device's key, and what it may do. */
+export type Device =
+  /** The page cannot hold a key here, and why. */
+  | { state: "unavailable"; reason: string }
+  /** It could, and has none yet. */
+  | { state: "none" }
+  /** It holds a key the log grants nothing to approve with. */
+  | { state: "ungranted"; key: string }
+  /** It holds a key that may approve. */
+  | { state: "ready"; key: string };
 
 type Ctx = {
   /** Live: on the real session. Otherwise the prototype's sample data. */
@@ -31,6 +45,14 @@ type Ctx = {
   head: number | null;
   /** Say `text` to the agent, or run a `/see`. A string: why nothing was sent. */
   send: (text: string) => string | null;
+  /** This device's key. */
+  device: Device;
+  /** Make this device's key. A string: why it was not made. */
+  makeKey: () => Promise<string | null>;
+  /** Delete this device's key. */
+  forgetKey: () => Promise<void>;
+  /** Approve or decline the request with this hash (hex), signed with this device's key. A string: why it did not go through. */
+  answer: (request: string, approve: boolean) => Promise<string | null>;
   /** Sample data only: answer something that waits. */
   settle: (id: string, outcome: Settled["outcome"], label: string, event: Omit<Line, "id" | "time">) => number | undefined;
 };
@@ -78,6 +100,27 @@ function LiveProvider({ children }: { children: ReactNode }) {
   const [log, setLog] = useState<LogRead>({ view: null, readAt: null, error: null });
   const [state, setState] = useState<LogState | null>(null);
   const linkRef = useRef<SessionLink | null>(null);
+  const [key, setKey] = useState<deviceKey.DeviceKey | null>(null);
+  const [keyless, setKeyless] = useState<string | null>("Looking for this device's key…");
+  /** Commands sent and not yet answered: what to do with each one's result. */
+  const pending = useRef(new Map<string, (problem: string | null) => void>());
+
+  // This device's key, if the browser lets the page keep one.
+  useEffect(() => {
+    let gone = false;
+    void (async () => {
+      const why = await deviceKey.unsupported();
+      if (gone) return;
+      if (why !== null) return setKeyless(why);
+      try {
+        const held = await deviceKey.load();
+        if (!gone) { setKey(held); setKeyless(null); }
+      } catch (problem) {
+        if (!gone) setKeyless(`The browser's storage could not be read: ${problem instanceof Error ? problem.message : String(problem)}`);
+      }
+    })();
+    return () => { gone = true; };
+  }, []);
 
   useEffect(() => {
     setEvents([]);
@@ -85,7 +128,19 @@ function LiveProvider({ children }: { children: ReactNode }) {
       url: sessionUrl(window.location),
       session: SESSION,
       client,
-      onEvent: (event) => setEvents((seen) => (seen.length >= KEEP ? [...seen.slice(seen.length - KEEP + 1), event] : [...seen, event])),
+      onEvent: (event) => {
+        // The result of a command this page sent: the server's word on it.
+        if (event.kind === "verb_result" || event.kind === "error") {
+          const id = typeof event.payload["id"] === "string" ? event.payload["id"] : "";
+          const done = pending.current.get(id);
+          if (done) {
+            pending.current.delete(id);
+            const said = typeof event.payload["text"] === "string" ? event.payload["text"].trim() : "";
+            done(event.kind === "error" || event.payload["ok"] === false ? (said || "the server refused it") : null);
+          }
+        }
+        setEvents((seen) => (seen.length >= KEEP ? [...seen.slice(seen.length - KEEP + 1), event] : [...seen, event]));
+      },
       onLink: setLink,
     });
     linkRef.current = session;
@@ -151,6 +206,54 @@ function LiveProvider({ children }: { children: ReactNode }) {
     return notHere(command);
   }, []);
 
+  const publicKey = key ? hex(key.publicKey) : null;
+  const device = useMemo<Device>(() => {
+    if (keyless !== null) return { state: "unavailable", reason: keyless };
+    if (publicKey === null) return { state: "none" };
+    return { state: mayApprove(state, publicKey) ? "ready" : "ungranted", key: publicKey };
+  }, [keyless, publicKey, state]);
+
+  const makeKey = useCallback(async () => {
+    try {
+      setKey(await deviceKey.create());
+      return null;
+    } catch (problem) {
+      return problem instanceof Error ? problem.message : String(problem);
+    }
+  }, []);
+
+  const forgetKey = useCallback(async () => {
+    await deviceKey.forget();
+    setKey(null);
+  }, []);
+
+  const answer = useCallback<Ctx["answer"]>(async (request, approve) => {
+    const session = linkRef.current;
+    if (!key) return "This device holds no key.";
+    const hash = unhex(request, 32);
+    if (!hash) return "That is not a request hash.";
+    try {
+      // The counter comes from the log as it is now: one more than this key's last.
+      const now = await readState();
+      setState(now);
+      const mine = hex(key.publicKey);
+      if (!mayApprove(now, mine)) return "The log grants this device's key nothing to approve with.";
+      const counter = BigInt(now.writers.find((writer) => writer.key === mine)?.counter ?? 0) + 1n;
+      const submission = approvalBytes(key.publicKey, counter, hash, approve);
+      const signature = await key.sign(submissionHash(submission));
+      const id = session?.answer(approve, b64(submission), b64(signature)) ?? null;
+      if (id === null) return "Not attached to the session: nothing was sent.";
+      return await new Promise<string | null>((resolve) => {
+        pending.current.set(id, resolve);
+        setTimeout(() => {
+          if (pending.current.delete(id)) resolve("The server did not say what became of it. Look at the session before trying again.");
+        }, 30000);
+      });
+    } catch (problem) {
+      return problem instanceof Error ? problem.message : String(problem);
+    }
+  }, [key]);
+
   const rename = useCallback((name: string) => {
     const plain = clientName(name);
     try {
@@ -177,8 +280,12 @@ function LiveProvider({ children }: { children: ReactNode }) {
     state,
     head: log.view?.head?.seq ?? null,
     send,
+    device,
+    makeKey,
+    forgetKey,
+    answer,
     settle: () => undefined,
-  }), [events, link, client, rename, log, state, send]);
+  }), [events, link, client, rename, log, state, send, device, makeKey, forgetKey, answer]);
   return <C.Provider value={value}>{children}</C.Provider>;
 }
 
@@ -218,6 +325,10 @@ function SampleProvider({ children }: { children: ReactNode }) {
     log: { view: null, readAt: null, error: null },
     state: sampleState,
     head: nextSeq - 1,
+    device: { state: "unavailable", reason: "The page was started on sample data: it holds no key." },
+    makeKey: async () => "The page was started on sample data.",
+    forgetKey: async () => {},
+    answer: async () => "The page was started on sample data.",
     send, settle,
   };
   return <C.Provider value={value}>{children}</C.Provider>;

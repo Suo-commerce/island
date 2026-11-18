@@ -588,6 +588,59 @@ checks all three.
 To try the page on the laptop without the server: `just face-stack`
 starts a throwaway log, session and scripted agent and prints the address.
 
+## 11. The face over HTTPS, and approving from it
+
+Over plain http the page reads and talks. To approve from it, a browser
+must let the page keep a key, and it does that only on a secure origin:
+https, with a certificate for a name. So the page gets a name that
+points at the tunnel address, and `flare-server` listens a second time,
+with TLS, on port 443 inside the tunnel. The plain listener on 4749
+stays as it is, for the terminals.
+
+1. **The name.** A DNS record for the name, of type A, with the value
+   `10.77.0.1`. It resolves everywhere and leads somewhere only inside
+   the tunnel. (A router that refuses DNS answers with private addresses
+   needs the name as an exception.)
+2. **The certificate**, from Let's Encrypt, proved by a DNS record, since
+   the server has no public web port. Which ACME client and plugin does
+   that depends on where the name's DNS is hosted; this step is written
+   when that is settled. It ends with two files only `root` and the
+   group `island` can read: `/etc/island/tls/fullchain.pem` and
+   `/etc/island/tls/privkey.pem`. `flare-server` reads them again
+   whenever they change, so a renewal needs no restart.
+3. **Tell `flare-server`.** One line in `/etc/island/flare-tls.env`,
+   with the name in place of `NAME`:
+
+   ```sh
+   FLARE_TLS=--tls-listen 10.77.0.1:443 --tls-cert /etc/island/tls/fullchain.pem --tls-key /etc/island/tls/privkey.pem --allow-host NAME
+   ```
+
+4. **Open 443 inside the tunnel.** `deploy/server/island.nft` has it.
+   Check the file before loading it; a firewall that does not load is
+   the one thing that can lock you out:
+
+   ```sh
+   nft -c -f /root/island/deploy/server/island.nft && install -m 644 /root/island/deploy/server/island.nft /etc/nftables.d/island.nft && nft -f /etc/nftables.d/island.nft
+   ```
+
+5. `systemctl restart flare-server`; its journal says
+   `face, https   10.77.0.1:443 with …`. The page is at `https://NAME/`.
+
+**The device's key.** In the page, Island → This device → "Make this
+device's key". The key is made in that browser and cannot be read out
+of it. The screen then shows the command that grants it the one right it
+asks for, to run on the laptop with the root key:
+
+```sh
+island-cli grant --broker http://10.77.0.1:4747 --root-key .island/root.key --holder KEY --scope approvals --rights approval
+```
+
+Copy it from the screen; never type a key. Once the grant is in the
+log, what waits on Now has Approve and Decline, signed on that device.
+Each browser on each device has its own key and its own grant. To take
+one away: `island-cli revoke` its grant (Island → Authority shows the
+grant's id), and "Forget this key" in that browser.
+
 ## Updating the server
 
 `islander.sh update` updates only the laptop. After merging a bundle, the

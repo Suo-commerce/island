@@ -45,10 +45,23 @@ function Meta({ w }: { w: Waiting }) {
 }
 
 function WaitingItem({ w }: { w: Waiting }) {
-  const { settle } = useFlare();
+  const { settle, device, answer } = useFlare();
   const nav = useNavigate();
   const [confirm, setConfirm] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState<"approve" | "decline" | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  // Sign the answer with this device's key and send it; the item leaves
+  // the list when the session says the action is settled.
+  const reply = (request: string, approve: boolean) => {
+    setBusy(approve ? "approve" : "decline");
+    setProblem(null);
+    void answer(request, approve).then((why) => {
+      setBusy(null);
+      setProblem(why);
+    });
+  };
 
   if (w.type === "action")
     return (
@@ -61,10 +74,21 @@ function WaitingItem({ w }: { w: Waiting }) {
           <dt>req</dt><dd className="text-foreground/80">{w.hash}</dd>
           <dt>from</dt><dd className="text-foreground/80">{w.fork}</dd>
         </dl>
-        {w.event !== undefined ? (
+        {w.event !== undefined && w.request !== undefined && device.state === "ready" ? (
+          <>
+            <div className="grid grid-cols-2 gap-2 sm:flex">
+              <Button size="lg" className="sm:h-8 sm:px-4" disabled={busy !== null} onClick={() => setConfirm(true)}><Flame className="size-4" />{busy === "approve" ? "Sending…" : "Approve…"}</Button>
+              <Button size="lg" variant="outline" className="sm:h-8 sm:px-4" disabled={busy !== null} onClick={() => reply(w.request ?? "", false)}><X className="size-4" />{busy === "decline" ? "Sending…" : "Decline"}</Button>
+            </div>
+            <p className="mt-2 font-mono text-[11px] text-muted-foreground">Signed on this device with key {device.key.slice(0, 8)}.</p>
+            {problem && <p role="alert" className="mt-2 rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">It did not go through: {problem}</p>}
+          </>
+        ) : w.event !== undefined ? (
           <p className="rounded-sm border border-border bg-card px-3 py-2 text-[12.5px] text-muted-foreground">
-            This page holds no key yet, so it cannot answer. In the terminal:{" "}
-            <span className="font-mono text-foreground">/approve {w.event}</span> or <span className="font-mono text-foreground">/decline {w.event}</span>.
+            {device.state === "ungranted" ? "This device's key has no grant to approve with yet (Island → This device)."
+              : device.state === "none" ? "This device has no key yet (Island → This device)."
+              : "This page cannot answer here."}{" "}
+            In the terminal: <span className="font-mono text-foreground">/approve {w.event}</span> or <span className="font-mono text-foreground">/decline {w.event}</span>.
             It shows here as soon as it is settled.
           </p>
         ) : (
@@ -74,7 +98,10 @@ function WaitingItem({ w }: { w: Waiting }) {
         </div>
         )}
         <ApproveConfirm open={confirm} onOpenChange={setConfirm} w={w}
-          onApprove={(device) => settle(w.id, "approved", `verse→${w.stream} ${w.hash}`, { device, type: "settled", text: `approved verse→${w.stream} (req ${w.hash})` })} />
+          signer={device.state === "ready" ? `this device's key ${device.key.slice(0, 8)}` : null}
+          onApprove={(from) => (w.request !== undefined && device.state === "ready"
+            ? reply(w.request, true)
+            : settle(w.id, "approved", `verse→${w.stream} ${w.hash}`, { device: from, type: "settled", text: `approved verse→${w.stream} (req ${w.hash})` }))} />
       </li>
     );
 
@@ -122,15 +149,16 @@ function WaitingItem({ w }: { w: Waiting }) {
   );
 }
 
-function ApproveConfirm({ open, onOpenChange, w, onApprove }: { open: boolean; onOpenChange: (o: boolean) => void; w: Extract<Waiting, { type: "action" }>; onApprove: (d: "phone" | "laptop") => void }) {
+/** `signer`: the key that really signs; null in sample data, where the prototype's passkey step is only acted out. */
+function ApproveConfirm({ open, onOpenChange, w, onApprove, signer }: { open: boolean; onOpenChange: (o: boolean) => void; w: Extract<Waiting, { type: "action" }>; onApprove: (d: "phone" | "laptop") => void; signer: string | null }) {
   const mobile = useIsMobile();
   const [step, setStep] = useState<"review" | "passkey">("review");
   const close = (o: boolean) => { onOpenChange(o); if (!o) setStep("review"); };
   const body = (
     <div className="space-y-3 text-[13px]">
-      <p className="text-muted-foreground">This will be sent exactly once, signed as an approval by <span className="font-mono text-foreground">{mobile ? "7b21de04 phone" : "a3f09c1e laptop"}</span>.</p>
+      <p className="text-muted-foreground">This will be sent exactly once, signed as an approval by <span className="font-mono text-foreground">{signer ?? (mobile ? "7b21de04 phone" : "a3f09c1e laptop")}</span>.</p>
       <div className="rounded-sm border border-border bg-muted/40 p-3 font-mono text-[12px] leading-relaxed">
-        <div className="text-muted-foreground">verse → {w.stream} · req {w.hash}</div>
+        <div className="text-muted-foreground">{w.stream ? `verse → ${w.stream}` : w.provider} · req {w.hash}</div>
         <div className="mt-1 font-sans text-[13px] text-foreground">{w.text}</div>
       </div>
     </div>
@@ -149,7 +177,7 @@ function ApproveConfirm({ open, onOpenChange, w, onApprove }: { open: boolean; o
               <>
                 {body}
                 <div className="mt-5 grid gap-2">
-                  <Button size="lg" className="h-12" onClick={() => setStep("passkey")}><Flame className="size-4" />Approve and send once</Button>
+                  <Button size="lg" className="h-12" onClick={() => { if (signer) { onApprove("phone"); close(false); } else setStep("passkey"); }}><Flame className="size-4" />Approve and send once</Button>
                   <Button size="lg" variant="ghost" className="h-12" onClick={() => close(false)}>Not now</Button>
                 </div>
               </>
