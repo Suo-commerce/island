@@ -1075,6 +1075,87 @@ async fn the_face_is_served_from_the_server_and_only_its_page_may_attach() {
     assert_eq!(log["recent"][0]["seq"], entries - 1);
     assert_eq!(log["recent"][0]["writer"].as_str().map(str::len), Some(64));
 
+    // Narrowed: by kind, by stream, and to what is older than an entry.
+    let seqs = |body: &str| {
+        let log: serde_json::Value = serde_json::from_str(body).expect("json");
+        log["recent"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|entry| entry["seq"].as_u64().expect("a seq"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(seqs(&get("/log?kind=grant").await.2), [3]);
+    assert_eq!(seqs(&get("/log?kind=policy").await.2), [2]);
+    assert_eq!(seqs(&get("/log?stream=authority&before=3").await.2), [1, 0]);
+    assert_eq!(seqs(&get("/log?stream=island").await.2), [] as [u64; 0]);
+
+    // What the log amounts to: the streams, every grant with its role,
+    // the policy, and who wrote.
+    let (status, head, body) = get("/log/state").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(head.contains("cache-control: no-store"), "{head}");
+    let state: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(state["entries"], entries);
+    assert_eq!(state["head"]["seq"], entries - 1);
+    assert_eq!(state["problem"], serde_json::Value::Null);
+    assert_eq!(state["state_hash"].as_str().map(str::len), Some(64));
+    assert_eq!(state["kinds"]["grant"], 1);
+    assert_eq!(state["kinds"]["genesis"], 1);
+    let streams: Vec<&str> = state["streams"]
+        .as_array()
+        .expect("streams")
+        .iter()
+        .filter_map(|stream| stream["name"].as_str())
+        .collect();
+    assert!(streams.contains(&"authority"), "{streams:?}");
+    let grants = state["grants"].as_array().expect("grants");
+    let roles: Vec<&str> = grants
+        .iter()
+        .filter_map(|grant| grant["role"].as_str())
+        .collect();
+    assert!(
+        roles.contains(&"root") && roles.contains(&"appender"),
+        "{roles:?}"
+    );
+    let device = grants.last().expect("the device's grant");
+    assert_eq!(
+        (&device["id"], &device["seq"], &device["role"]),
+        (
+            &serde_json::json!("3.0"),
+            &serde_json::json!(3),
+            &serde_json::json!("ordinary")
+        )
+    );
+    assert_eq!(device["scope"], serde_json::json!(["island"]));
+    assert_eq!(device["rights"], serde_json::json!(["verse"]));
+    assert_eq!(device["by"], state["root"]);
+    assert_eq!(device["ended_at"], serde_json::Value::Null);
+    assert_eq!(
+        state["appender"],
+        grants
+            .iter()
+            .find(|grant| grant["role"] == "appender")
+            .expect("the appender's grant")["holder"]
+    );
+    let policy = state["policy"].as_array().expect("policy");
+    assert_eq!(policy.len(), 1);
+    assert_eq!(policy[0]["seq"], 2);
+    assert!(
+        !policy[0]["invariants"]
+            .as_array()
+            .expect("invariants")
+            .is_empty()
+    );
+    assert_eq!(state["writers"][0]["key"], state["root"]);
+    assert_eq!(state["writers"][0]["entries"], entries);
+    assert_eq!(
+        http_get(&running.url, "/log/state", "flare.evil.example")
+            .await
+            .0,
+        403
+    );
+
     // A page of another site may not even ask.
     for (site, status) in [
         ("cross-site", 403),

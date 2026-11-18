@@ -8,11 +8,14 @@
 //!   `DIR`; a path that names no file and has no extension is one of the
 //!   page's own routes and answers with `index.html`;
 //! - `GET /log?entries=N` is the log as the page reads it: the head and
-//!   the newest entries, from the server's verified replica. A `see`
-//!   would do, but a `see` is an event of the shared session, and a page
-//!   that loads is not something every device needs to hear of. What it
-//!   returns is the server's word: the page marks it so until it checks
-//!   signatures itself.
+//!   the newest entries, from the server's verified replica; `stream=`,
+//!   `kind=` and `before=` narrow them. A `see` would do, but a `see` is
+//!   an event of the shared session, and a page that loads is not
+//!   something every device needs to hear of. What it returns is the
+//!   server's word: the page marks it so until it checks signatures
+//!   itself.
+//! - `GET /log/state` is what the log amounts to
+//!   ([`crate::state::LogState`]).
 //!
 //! Both answer only to the host names the server answers to, like
 //! `/session`: a page of another origin cannot read them (no CORS
@@ -84,10 +87,38 @@ pub struct LogView {
     pub recent: Vec<LogLine>,
 }
 
+/// Which entries `/log` answers with.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Only {
+    /// Of this stream only.
+    pub stream: Option<String>,
+    /// Of this kind only, as `see` names it.
+    pub kind: Option<String>,
+    /// Older than this entry only.
+    pub before: Option<u64>,
+}
+
+impl Only {
+    /// Whether an entry is among those asked for.
+    pub fn passes(&self, line: &Line) -> bool {
+        self.stream
+            .as_ref()
+            .is_none_or(|stream| *stream == line.stream)
+            && self
+                .kind
+                .as_ref()
+                .is_none_or(|kind| kind == kind_name(line.kind))
+            && self.before.is_none_or(|before| line.seq < before)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LogQuery {
     entries: Option<usize>,
+    stream: Option<String>,
+    kind: Option<String>,
+    before: Option<u64>,
 }
 
 fn refused() -> Response {
@@ -98,34 +129,57 @@ fn refused() -> Response {
         .into_response()
 }
 
-/// `GET /log?entries=N`.
+/// Why a read of the log is refused, if it is: it came under a name that
+/// is not the server's, or a browser says it comes from another site's
+/// page (which could not read the answer, but could still ask).
+fn not_ours(server: &Server, headers: &HeaderMap) -> Option<Response> {
+    if addressed(server, headers).is_none() {
+        return Some(refused());
+    }
+    let elsewhere = headers
+        .get("sec-fetch-site")
+        .and_then(|site| site.to_str().ok())
+        .is_some_and(|site| site != "same-origin" && site != "none");
+    elsewhere.then(|| {
+        (
+            StatusCode::FORBIDDEN,
+            "the log is read by this server's own page\n",
+        )
+            .into_response()
+    })
+}
+
+fn unstored(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// `GET /log?entries=N&stream=S&kind=K&before=SEQ`.
 pub(crate) async fn log(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
     Query(query): Query<LogQuery>,
 ) -> Response {
-    if addressed(&server, &headers).is_none() {
-        return refused();
-    }
-    // Another site's page cannot read the answer, but it could still ask;
-    // a browser says when a request comes from elsewhere.
-    let elsewhere = headers
-        .get("sec-fetch-site")
-        .and_then(|site| site.to_str().ok())
-        .is_some_and(|site| site != "same-origin" && site != "none");
-    if elsewhere {
-        return (
-            StatusCode::FORBIDDEN,
-            "the log is read by this server's own page\n",
-        )
-            .into_response();
+    if let Some(refusal) = not_ours(&server, &headers) {
+        return refusal;
     }
     let entries = query.entries.unwrap_or(LOG_ENTRIES).min(MAX_LOG_ENTRIES);
-    let mut response = axum::Json(server.log(entries).await).into_response();
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
+    let only = Only {
+        stream: query.stream,
+        kind: query.kind,
+        before: query.before,
+    };
+    unstored(axum::Json(server.log(entries, &only).await).into_response())
+}
+
+/// `GET /log/state`.
+pub(crate) async fn state(State(server): State<Arc<Server>>, headers: HeaderMap) -> Response {
+    if let Some(refusal) = not_ours(&server, &headers) {
+        return refusal;
+    }
+    unstored(axum::Json(server.log_state().await).into_response())
 }
 
 /// The content type of a file of the page, by its extension. A file of

@@ -103,7 +103,8 @@ pub fn kind_name(kind: Kind) -> &'static str {
     }
 }
 
-fn invariant(invariant: &Invariant) -> String {
+/// An invariant, as the policy names it: `VerseTextMax(2000)`.
+pub fn invariant(invariant: &Invariant) -> String {
     match invariant {
         Invariant::VerseNamesEvidence => "VerseNamesEvidence".to_owned(),
         Invariant::VerseTextMax { bytes } => format!("VerseTextMax({bytes})"),
@@ -118,7 +119,8 @@ fn invariants(list: &[Invariant]) -> String {
     list.iter().map(invariant).collect::<Vec<_>>().join(", ")
 }
 
-fn refusal(reason: &Refusal) -> String {
+/// Why the gate refused a submission, in words.
+pub fn refusal(reason: &Refusal) -> String {
     match reason {
         Refusal::Invariant(broken) => format!("it breaks {}", invariant(broken)),
         Refusal::WeakerPolicy => "the policy would be weaker than the one in force".to_owned(),

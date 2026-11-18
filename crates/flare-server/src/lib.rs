@@ -21,6 +21,7 @@
 #![warn(missing_docs)]
 
 pub mod face;
+pub mod state;
 pub mod store;
 
 use std::collections::BTreeMap;
@@ -546,9 +547,25 @@ impl Server {
         }
     }
 
-    /// The log for the face: the head, and the newest `entries` entries,
-    /// newest first, from the replica, pulled first.
-    pub async fn log(&self, entries: usize) -> face::LogView {
+    /// What the log amounts to, for the face: from the replica, pulled
+    /// first.
+    pub async fn log_state(&self) -> state::LogState {
+        let mut replica = self.replica.lock().await;
+        let problem = match pull(&mut replica, &self.plain).await {
+            Ok(_) => None,
+            Err(error) => Some(error.to_string()),
+        };
+        state::LogState::of(
+            replica.records(),
+            replica.chain(),
+            problem,
+            (self.config.clock)(),
+        )
+    }
+
+    /// The log for the face: the head, and the newest `entries` entries
+    /// that pass `only`, newest first, from the replica, pulled first.
+    pub async fn log(&self, entries: usize, only: &face::Only) -> face::LogView {
         let mut replica = self.replica.lock().await;
         let problem = match pull(&mut replica, &self.plain).await {
             Ok(_) => None,
@@ -566,8 +583,10 @@ impl Server {
             recent: records
                 .iter()
                 .rev()
+                .map(flare_core::Line::of)
+                .filter(|line| only.passes(line))
                 .take(entries)
-                .map(|record| face::LogLine::of(&flare_core::Line::of(record)))
+                .map(|line| face::LogLine::of(&line))
                 .collect(),
         }
     }
@@ -789,7 +808,10 @@ enum Work {
 pub fn router(server: Arc<Server>) -> Router {
     let routes = Router::new().route("/session", get(upgrade));
     let routes = if server.config.face.is_some() {
-        routes.route("/log", get(face::log)).fallback(face::file)
+        routes
+            .route("/log", get(face::log))
+            .route("/log/state", get(face::state))
+            .fallback(face::file)
     } else {
         routes
     };

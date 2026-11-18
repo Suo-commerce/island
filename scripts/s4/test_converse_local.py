@@ -175,9 +175,12 @@ class Converse(unittest.TestCase):
         self.addCleanup(model.shutdown)
 
         self.agent_sock = os.path.join(self.tmp, "agent.sock")
-        # FLARE_FACE: serve the built page too (scripts/s4/face_stack.py).
+        # The built page is served too, so what it reads can be checked
+        # here (FLARE_FACE names another one: scripts/s4/face_stack.py).
         self.session_port = int(os.environ.get("FLARE_FACE_PORT") or free_port())
-        face = ["--face", os.environ["FLARE_FACE"]] if os.environ.get("FLARE_FACE") else []
+        built = os.environ.get("FLARE_FACE") or os.path.join(HERE, "..", "..", "face", "dist")
+        face = ["--face", built] if os.path.isfile(os.path.join(built, "index.html")) else []
+        self.face = bool(face)
         uid = str(os.getuid())
         self.spawn("flare-server", [os.path.join(BIN, "flare-server"), "--broker", self.broker,
                                     "--root", self.root, "--data", os.path.join(self.tmp, "flare"),
@@ -350,6 +353,39 @@ class Converse(unittest.TestCase):
         # Approving again lets nothing more out: the action is settled.
         time.sleep(1)
         self.assertEqual(len(self.events("action_settled")), 1)
+
+        # What the page reads of the log says the same: the approval and
+        # the dispatch that used it, and what the Vessel was given.
+        if self.face:
+            def state():
+                conn = http.client.HTTPConnection("127.0.0.1", self.session_port, timeout=30)
+                try:
+                    conn.request("GET", "/log/state")
+                    return json.loads(conn.getresponse().read())
+                finally:
+                    conn.close()
+            log = state()
+            self.assertIsNone(log["problem"])
+            approval, dispatch = log["approvals"][0], log["dispatches"][0]
+            self.assertEqual((approval["verdict"], approval["used_by"]), ("approve", dispatch["seq"]))
+            self.assertEqual((dispatch["approval"], dispatch["request"]), (approval["seq"], approval["request"]))
+            self.assertEqual(dispatch["vessel"], "0123456789abcdef0123456789abcdef")
+            # Access entries are written in batches: wait for the model calls.
+            wait_for("the Vessel's model calls in the log",
+                     lambda: any(v["inference"]["calls"] > 0 for v in state()["vessels"]))
+            vessels = {v["vessel"]: v for v in state()["vessels"]}
+            self.assertEqual(vessels[dispatch["vessel"]]["dispatched"], 1)
+            # (Here the island socket knows the Vessel by the id Taso's
+            # config gives it, the stand-in Warden by another.)
+            called = [v for v in vessels.values() if v["inference"]["calls"] > 0]
+            self.assertEqual(len(called), 1)
+            self.assertEqual(called[0]["inference_today"], called[0]["inference"])
+            self.assertEqual(list(called[0]["providers"]), ["scripted"])
+            self.assertGreater(called[0]["inference"]["bytes_out"], 0)
+            holders = {g["holder"]: g for g in log["grants"] if g["rights"] == ["verse"] and g["scope"] == ["flare"]}
+            self.assertEqual(len(holders), 1, "the Vessel's key holds the one grant to sing on flare")
+            sung = [w for w in log["writers"] if w["key"] in holders]
+            self.assertEqual([w["entries"] for w in sung], [1], "and wrote the one verse")
 
 
     # ── forks (step 6) ──────────────────────────────────────────────
