@@ -281,6 +281,9 @@ install -D -m 755 "$ISLAND/deploy/server/taso-unmount-stale" /usr/local/lib/isla
 systemctl daemon-reload
 systemctl enable -q taso-blkd taso-wardend island-sender island-socket island-stub-model flare-server
 say "units installed and enabled (not started): taso-blkd, taso-wardend, island-sender, island-socket, island-stub-model, flare-server"
+# The face's certificate, where scripts/node/cert.sh has set it up: the
+# renewal's programs and units follow the checkout too.
+if [ -f /etc/island/cert.env ]; then "$ISLAND/scripts/node/cert.sh" units; fi
 
 cat <<END
 

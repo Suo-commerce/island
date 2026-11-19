@@ -1,0 +1,15 @@
+# Once a day, ask whether the face's certificate is due; lego renews it
+# when it is (about a third of its lifetime before it ends, or when
+# Let's Encrypt says so) and otherwise does nothing. Turned on by
+# `scripts/node/cert.sh on`.
+[Unit]
+Description=Daily look at the face's certificate
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=3h
+Persistent=true
+Unit=island-cert@live.service
+
+[Install]
+WantedBy=timers.target

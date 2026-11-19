@@ -245,6 +245,40 @@ print(d["problem"] is None and d["head"]["seq"] >= int(sys.argv[2]) and any(v["v
     check "$when: the face's own page may attach to the session" "$(knock "$FACE")" 101
     check "$when: a page from elsewhere may not" "$(knock https://flare.example)" 403
     check "$when: nor the page under a name that is not the server's" "$(knock http://flare.example flare.example)" 403
+    https "$when"
+}
+
+# The face over https (docs/server.md, section 11), once scripts/node/cert.sh
+# has set it up: the certificate is one a browser accepts and is not about
+# to end, the https page attaches over TLS and the plain one does not, and
+# the renewal is on and has not failed.
+TLS_ENV=/etc/island/flare-tls.env
+TLS_CERT=/etc/island/tls/fullchain.pem
+tls_knock() {   # tls_knock <name> <origin>: the status a WebSocket request over https gets
+    curl -s -o /dev/null -w '%{http_code}' --max-time 3 --http1.1 --resolve "$1:443:10.77.0.1" \
+        -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" \
+        -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: $2" "https://$1/session" || true
+}
+https() {
+    local when=$1 name
+    name=$(sed -n 's/.*--allow-host \([^ ]*\).*/\1/p' "$TLS_ENV" 2>/dev/null | tail -1)
+    if [ -z "$name" ]; then
+        note "$when: the face over https is not set up (scripts/node/cert.sh)"
+        return
+    fi
+    check "$when: the face over https, with a certificate a browser accepts for $name" \
+        "$(curl -s -o /dev/null -w '%{http_code} %{content_type}' --max-time 10 --resolve "$name:443:10.77.0.1" "https://$name/" || true)" \
+        "200 text/html; charset=utf-8"
+    check "$when: the certificate has more than 14 days left" \
+        "$(openssl x509 -in "$TLS_CERT" -noout -checkend 1209600 >/dev/null 2>&1 && echo yes || echo no)" yes
+    note "$when: the certificate ends $(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)"
+    check "$when: the https page may attach to the session over TLS" "$(tls_knock "$name" "https://$name")" 101
+    check "$when: the plain page may not attach over TLS" "$(tls_knock "$name" "http://$name")" 403
+    check "$when: nor the https page over the plain listener" "$(knock "https://$name" "$name")" 403
+    check "$when: the daily renewal is on" \
+        "$(systemctl is-enabled island-cert.timer 2>/dev/null || true) $(systemctl is-active island-cert.timer 2>/dev/null || true)" "enabled active"
+    check "$when: the last renewal run did not fail" \
+        "$(systemctl show island-cert@live.service -p Result --value 2>/dev/null || true)" success
 }
 
 kill_one() {   # kill_one <unit>: SIGKILL it, then the plain checks

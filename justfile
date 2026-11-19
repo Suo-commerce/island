@@ -89,6 +89,11 @@ agent-test:
     cargo build --locked -p island-cli -p island-broker -p island-socket -p island-sender -p flare-server -p flare-agent -p flare-tui
     python3 -m unittest scripts/s4/test_converse_local.py
 
+# The face's certificate on this machine: scripts/node/cert.sh and desec.py against Pebble (Let's Encrypt's test CA) and a stand-in for deSEC. Fetches lego and Pebble once, hash checked, into target/cert-test.
+cert-test:
+    cargo build --locked -p island-cli -p island-broker -p flare-server
+    python3 -W ignore::ResourceWarning -m unittest scripts/s4/test_cert_local.py
+
 # The face: build the page flare-server serves, into face/dist (kept in the repo). Needs Node 22 and npm.
 face:
     cd face && npm ci && npm test && npm run build

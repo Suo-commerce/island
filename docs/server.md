@@ -597,34 +597,88 @@ points at the tunnel address, and `flare-server` listens a second time,
 with TLS, on port 443 inside the tunnel. The plain listener on 4749
 stays as it is, for the terminals.
 
-1. **The name.** A DNS record for the name, of type A, with the value
-   `10.77.0.1`. It resolves everywhere and leads somewhere only inside
-   the tunnel. (A router that refuses DNS answers with private addresses
-   needs the name as an exception.)
-2. **The certificate**, from Let's Encrypt, proved by a DNS record, since
-   the server has no public web port. Which ACME client and plugin does
-   that depends on where the name's DNS is hosted; this step is written
-   when that is settled. It ends with two files only `root` and the
-   group `island` can read: `/etc/island/tls/fullchain.pem` and
-   `/etc/island/tls/privkey.pem`. `flare-server` reads them again
-   whenever they change, so a renewal needs no restart.
-3. **Tell `flare-server`.** One line in `/etc/island/flare-tls.env`,
-   with the name in place of `NAME`:
+The certificate comes from Let's Encrypt and is proved by a DNS record,
+since the server has no public web port. The server must therefore be
+able to write one DNS record at every renewal, and the question is what
+else the key for that could do. A key for the whole domain's DNS, kept on
+the server, would reach every record of the domain (and at some
+providers every domain of the account). So the face's name is made a
+small zone of its own at [deSEC](https://desec.io) (a non-profit DNS
+host with tokens that can be narrowed to single records), and the
+domain's own DNS only points at it:
+
+- where the domain's DNS is, by hand, once: two NS records for the name,
+  `ns1.desec.io` and `ns2.desec.org`. No key for that DNS is on the
+  server, ever;
+- at deSEC: the name's zone, with its address record (`10.77.0.1`: it
+  resolves everywhere and leads somewhere only inside the tunnel) and
+  the proof record Let's Encrypt asks for at each renewal;
+- on the server, `/etc/island/cert.env` (root only): a deSEC token that
+  may write that one proof record, `_acme-challenge.NAME` TXT, and
+  nothing else. Stolen, it can get a certificate for the face's name.
+  It cannot change where the name points, touch another record, or make
+  tokens or domains.
+
+`scripts/node/cert.sh` does the server's part, as root, with the name in
+place of `NAME`:
+
+1. `scripts/node/cert.sh setup NAME`: the ACME client (lego, a pinned
+   release, downloaded and checked by its hash), the user `island-cert`
+   that runs it, `/etc/island/tls`, the units.
+2. **At deSEC**, in the browser: an account; then Token Management, a
+   new token named `island-setup` with "manage tokens" and "create
+   domains" ticked. Its secret is shown once: copy it.
+3. `scripts/node/cert.sh token`: asks for that secret (paste; it is not
+   shown and not kept), makes the zone and its address record, mints the
+   narrow token and writes it to `/etc/island/cert.env`, proves what it
+   can and cannot do (each line `PASS`), and deletes `island-setup` at
+   deSEC. It ends with the two NS records to add.
+4. **Where the domain's DNS is**, by hand: those two NS records.
+5. `scripts/node/cert.sh dns`: is the name delegated and answering? (A
+   router that refuses DNS answers with private addresses needs the name
+   as an exception; the certificate does not depend on it.)
+6. `scripts/node/cert.sh try`: a certificate from Let's Encrypt's
+   staging side. It proves the whole path, counts against no limit, and
+   is put nowhere.
+7. `scripts/node/cert.sh run`: the real one, into
+   `/etc/island/tls/fullchain.pem` and `privkey.pem`, which only
+   `island-cert` and the group `island` can read.
+8. `scripts/node/cert.sh on`: opens 443 inside the tunnel
+   (`deploy/server/island.nft`: checked, loaded, and only then written
+   to `/etc/nftables.d`), writes `/etc/island/flare-tls.env`,
 
    ```sh
    FLARE_TLS=--tls-listen 10.77.0.1:443 --tls-cert /etc/island/tls/fullchain.pem --tls-key /etc/island/tls/privkey.pem --allow-host NAME
    ```
 
-4. **Open 443 inside the tunnel.** `deploy/server/island.nft` has it.
-   Check the file before loading it; a firewall that does not load is
-   the one thing that can lock you out:
+   restarts `flare-server` and asks it for the page over https; if that
+   fails it takes the file away again and restarts `flare-server` as it
+   was. Then it turns the renewal on. The page is at `https://NAME/`.
 
-   ```sh
-   nft -c -f /root/island/deploy/server/island.nft && install -m 644 /root/island/deploy/server/island.nft /etc/nftables.d/island.nft && nft -f /etc/nftables.d/island.nft
-   ```
+**Renewal** is `island-cert@live.service`, started daily by
+`island-cert.timer`. lego renews when the certificate is due (about a
+third of its lifetime before its end, or when Let's Encrypt says so) and
+otherwise does nothing; `flare-server` reads the new files without a
+restart. lego speaks to Let's Encrypt only: the DNS write is
+`scripts/node/desec.py present` and `cleanup`, which lego calls, so
+every use of the kept token is in this checkout, and step 3 has already
+made those same two writes against deSEC before a certificate is asked
+for. `cert.sh` accepts Let's Encrypt's subscriber agreement on your
+behalf and registers the account without an email address. `scripts/node/cert.sh status` says where things stand,
+`journalctl -u island-cert@live` what the runs said, and
+`scripts/node/check.sh` fails when the certificate has under 14 days
+left, when the last run failed, or when the page does not answer over
+https. `scripts/node/cert.sh verify` asks deSEC again to refuse the kept
+token everything but the proof record. `install.sh` keeps the renewal's
+programs and units in step with the checkout.
 
-5. `systemctl restart flare-server`; its journal says
-   `face, https   10.77.0.1:443 with …`. The page is at `https://NAME/`.
+What is public about this: the name (certificates are logged publicly,
+and so is a delegation), and that it points at `10.77.0.1`. Nothing
+behind it is reachable from outside the tunnel.
+
+`just cert-test` runs all of it on a laptop against Pebble, Let's
+Encrypt's test CA, and a stand-in for deSEC's API; only deSEC itself
+and Let's Encrypt are left to step 6.
 
 **The device's key.** In the page, Island → This device → "Make this
 device's key". The key is made in that browser and cannot be read out

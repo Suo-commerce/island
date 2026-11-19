@@ -1,0 +1,40 @@
+# The face's certificate: gets it the first time and renews it when it is
+# due (docs/server.md, "The face over HTTPS"; scripts/node/cert.sh).
+# The instance is `live` (Let's Encrypt, into /etc/island/tls) or
+# `staging` (Let's Encrypt's staging side, kept nowhere).
+#
+# /etc/island/cert.env holds the face's name and a deSEC token that can
+# write the name's one proof record and nothing else. systemd reads the
+# file as root; the program runs as island-cert, which can write its own
+# state and the two certificate files flare-server's group reads.
+[Unit]
+Description=The face's certificate (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=island-cert
+Group=island-cert
+SupplementaryGroups=island
+EnvironmentFile=/etc/island/cert.env
+ExecStart=/usr/local/lib/island/cert.sh issue %i
+StateDirectory=island-cert
+StateDirectoryMode=0700
+TimeoutStartSec=15min
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=/etc/island/tls
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
