@@ -92,6 +92,8 @@ class Desec:
         self.domains = {}           # name -> {(subname, type): {"ttl", "records"}}
         self.writes = []            # (secret's name, method, path, status)
         self.count = 0
+        self.throttle = 0           # every Nth write is told to wait, as deSEC does
+        self.asked = 0
 
     def token(self, name, manage=False, create=False):
         self.count += 1
@@ -202,12 +204,18 @@ class Desec:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length)) if length else None
                 secret = (self.headers.get("Authorization") or "").removeprefix("Token ")
-                status, said = desec.handle(secret, self.command, self.path.removeprefix("/api/v1"), body)
+                desec.asked += self.command != "GET"
+                if desec.throttle and self.command != "GET" and desec.asked % desec.throttle == 0:
+                    status, said = 429, {"detail": "Request was throttled. Expected available in 1 second."}
+                else:
+                    status, said = desec.handle(secret, self.command, self.path.removeprefix("/api/v1"), body)
                 if self.command != "GET":
                     desec.writes.append((desec.tokens.get(secret, {}).get("name"), self.command, self.path, status))
                 raw = b"" if said is None else json.dumps(said).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
+                if status == 429:
+                    self.send_header("Retry-After", "1")
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
@@ -285,6 +293,23 @@ class TheDesecSide(unittest.TestCase):
         self.assertNotIn(kept["DESEC_TOKEN"], desec.tokens)
         self.assertIn(self.kept()["DESEC_TOKEN"], desec.tokens)
         self.assertIn("A 10.77.0.1 is there", done.stdout)
+
+    def test_desec_throttling_is_waited_out_and_a_mint_cut_short_is_finished_by_the_next(self):
+        desec = self.desec()
+        desec.throttle = 2          # every second write: "wait a second"
+        # As the server stood on 2026-11-23: zone and address there, an older
+        # kept token, and a check value left in the proof record.
+        desec.domains[NAME] = {("", "A"): {"ttl": 3600, "records": ["10.77.0.1"]},
+                               ("_acme-challenge", "TXT"): {"ttl": 3600, "records": ['"island-token-check"']}}
+        older = desec.token("island-cert")
+        done = self.run_desec("mint", "--address", "10.77.0.1", setup=desec.token("island-setup", manage=True))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("FAIL", done.stdout)
+        self.assertNotIn("429", done.stdout)
+        self.assertNotIn(older, desec.tokens)
+        self.assertEqual(set(desec.domains[NAME]), {("", "A")})
+        self.assertEqual([t["name"] for t in desec.tokens.values()], ["island-cert"])
+        self.assertTrue(any(status == 429 for _, _, _, status in desec.writes))
 
     def test_a_domain_made_by_hand_with_another_address_is_put_right(self):
         desec = self.desec()

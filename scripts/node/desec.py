@@ -46,6 +46,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -65,24 +66,40 @@ class Api:
         self.secret = secret
 
     def call(self, method: str, path: str, body=None) -> tuple[int, object]:
+        """One request. deSEC throttles (a few writes a second, some tens
+        an hour) and says how long to wait: wait and ask again."""
+        waited = 0.0
+        while True:
+            status, said, wait = self.once(method, path, body)
+            if status != 429 or waited + wait > 180:
+                return status, said
+            time.sleep(wait)
+            waited += wait
+
+    def once(self, method: str, path: str, body) -> tuple[int, object, float]:
         data = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(API + path, data=data, method=method)
         request.add_header("Authorization", "Token " + self.secret)
         request.add_header("Accept", "application/json")
         if data is not None:
             request.add_header("Content-Type", "application/json")
+        wait = 1.0
         try:
             with urllib.request.urlopen(request, timeout=30) as answer:
                 status, raw = answer.status, answer.read()
         except urllib.error.HTTPError as error:
             status, raw = error.code, error.read()
+            try:
+                wait = min(120.0, max(1.0, float(error.headers.get("Retry-After") or 1) + 0.5))
+            except ValueError:
+                pass
         except (urllib.error.URLError, OSError) as error:
             raise Stop(f"deSEC did not answer ({API}): {error}") from error
         try:
             said = json.loads(raw) if raw else None
         except ValueError:
             said = raw.decode(errors="replace")[:200]
-        return status, said
+        return status, said, wait
 
 
 def say(text: str) -> None:
@@ -214,15 +231,15 @@ def verify(name: str, token: str, write: bool) -> bool:
     status, _ = api.call("POST", f"/domains/{name}/rrsets/", record)
     if 200 <= status < 300:
         api.call("DELETE", f"/domains/{name}/rrsets/{elsewhere}/TXT/")
-    finding(status >= 400 and status != 401, f"a write to another record is refused ({status})")
+    finding(status == 403, f"a write to another record is refused ({status})")
 
     status, said = api.call("GET", f"/domains/{name}/rrsets/@/A/")
     if status == 200 and isinstance(said, dict):
         status, _ = api.call("PATCH", f"/domains/{name}/rrsets/@/A/", {"records": said["records"]})
-        finding(status >= 400 and status != 401, f"a write to the name's address is refused ({status})")
+        finding(status == 403, f"a write to the name's address is refused ({status})")
 
     status, _ = api.call("GET", "/auth/tokens/")
-    finding(status >= 400 and status != 401, f"it may not see or make tokens ({status})")
+    finding(status == 403, f"it may not see or make tokens ({status})")
     return good
 
 
