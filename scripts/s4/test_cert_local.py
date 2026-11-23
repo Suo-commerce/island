@@ -443,7 +443,7 @@ class GettingAndRenewing(unittest.TestCase):
                     "CERT_LEGO": self.lego, "CERT_GROUP": str(os.getgid()),
                     "CERT_SERVER": f"https://localhost:{self.acme}/dir",
                     # Pebble's DNS is not deSEC's nameservers: lego is told where to ask.
-                    "CERT_LEGO_EXTRA": f"--dns.resolvers 127.0.0.1:{self.dns} --dns.propagation.disable-ans",
+                    "CERT_LEGO_EXTRA": f"--dns.resolvers 127.0.0.1:{self.dns}", "CERT_SETTLE": "1s",
                     "LEGO_CA_CERTIFICATES": t("ca.pem")}
 
     def spawn(self, argv, env=None):

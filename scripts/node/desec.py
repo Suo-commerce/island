@@ -44,6 +44,8 @@ import argparse
 import getpass
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -197,6 +199,33 @@ def challenge(what: str, fqdn: str, value: str) -> None:
     if fqdn.rstrip(".").lower() != f"{PROOF}.{name}":
         raise Stop(f"asked to write {fqdn}; this writes {PROOF}.{name} and nothing else")
     (present if what == "present" else cleanup)(Api(token), name, value)
+    if what == "present":
+        published(name, value)
+
+
+def published(name: str, value: str) -> None:
+    """Wait until both of deSEC's nameservers answer with the value.
+
+    deSEC takes a minute or two to publish a change, and its servers do
+    not all switch at once: on 2026-11-23 Let's Encrypt was still handed
+    the value of the run before. lego then waits a while longer before it
+    asks Let's Encrypt to look (cert.sh). Not done against a stand-in."""
+    if "DESEC_API" in os.environ or not shutil.which("dig"):
+        return
+    fqdn, end = f"{PROOF}.{name}", time.monotonic() + 420
+    while time.monotonic() < end:
+        answers = []
+        for server in NAMESERVERS:
+            try:
+                answers.append(subprocess.run(["dig", "+short", "+norecurse", "TXT", fqdn, "@" + server],
+                                              capture_output=True, text=True, timeout=20).stdout.split())
+            except (OSError, subprocess.TimeoutExpired):
+                answers.append([])
+        if all(found == [json.dumps(value)] for found in answers):
+            say(f"both nameservers answer with the new value for {fqdn}")
+            return
+        time.sleep(5)
+    say(f"deSEC's nameservers did not both show the new value for {fqdn} in 7 minutes; going on")
 
 
 def verify(name: str, token: str, write: bool) -> bool:

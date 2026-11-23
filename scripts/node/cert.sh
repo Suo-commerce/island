@@ -33,7 +33,8 @@
 # `cert.sh issue live|staging` is what the unit runs.
 #
 # For the tests only: CERT_ENV CERT_STATE CERT_TLS CERT_LEGO CERT_SERVER
-# CERT_LEGO_EXTRA CERT_GROUP name other places and another CA, and
+# CERT_LEGO_EXTRA CERT_SETTLE CERT_GROUP name other places, another CA
+# and a shorter wait, and
 # DESEC_API a stand-in for deSEC.
 
 set -euo pipefail
@@ -183,11 +184,15 @@ issue() {   # what the unit runs, as island-cert: issue live|staging
     # lego's part is ACME; the one DNS write is desec.py's (present,
     # cleanup), so what the kept token is used for is all in this checkout.
     # It waits until deSEC's own servers answer with the record.
-    export CERT_NAME=$n EXEC_PATH=$HERE/desec.py EXEC_PROPAGATION_TIMEOUT=300 EXEC_POLLING_INTERVAL=5
+    # desec.py returns once both of deSEC's nameservers answer with the
+    # new value and only that; lego then waits two minutes more before
+    # Let's Encrypt is asked to look, since deSEC's servers around the
+    # world do not all switch at the same moment.
+    export CERT_NAME=$n EXEC_PATH=$HERE/desec.py
     # shellcheck disable=SC2086
     "$LEGO" --log.format text run --accept-tos --server "${CERT_SERVER:-$server}" --path "$STATE/$mode" \
         --account-id island --domains "$n" --dns exec \
-        --dns.propagation.disable-rns --no-random-sleep ${CERT_LEGO_EXTRA:-}
+        --dns.propagation.wait "${CERT_SETTLE:-120s}" --no-random-sleep ${CERT_LEGO_EXTRA:-}
     if [ "$mode" = live ]; then deploy "$n"; else say "staging: a certificate came; it is not put anywhere"; fi
 }
 
