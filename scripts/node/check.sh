@@ -261,7 +261,9 @@ tls_knock() {   # tls_knock <name> <origin>: the status a WebSocket request over
 }
 https() {
     local when=$1 name
-    name=$(sed -n 's/.*--allow-host \([^ ]*\).*/\1/p' "$TLS_ENV" 2>/dev/null | tail -1)
+    name=
+    # (a missing file must not end the script: sed fails on it, and pipefail is on)
+    if [ -f "$TLS_ENV" ]; then name=$(sed -n 's/.*--allow-host \([^ ]*\).*/\1/p' "$TLS_ENV" | tail -1); fi
     if [ -z "$name" ]; then
         note "$when: the face over https is not set up (scripts/node/cert.sh)"
         return
@@ -271,7 +273,7 @@ https() {
         "200 text/html; charset=utf-8"
     check "$when: the certificate has more than 14 days left" \
         "$(openssl x509 -in "$TLS_CERT" -noout -checkend 1209600 >/dev/null 2>&1 && echo yes || echo no)" yes
-    note "$when: the certificate ends $(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)"
+    note "$when: the certificate ends $(openssl x509 -in "$TLS_CERT" -noout -enddate 2>/dev/null | cut -d= -f2 || true)"
     check "$when: the https page may attach to the session over TLS" "$(tls_knock "$name" "https://$name")" 101
     check "$when: the plain page may not attach over TLS" "$(tls_knock "$name" "http://$name")" 403
     check "$when: nor the https page over the plain listener" "$(knock "https://$name" "$name")" 403

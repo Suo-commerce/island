@@ -145,27 +145,27 @@ token() {
 dns() {
     local n parent at delegated address caa ok=0
     n=$(name); parent=${n#*.}
-    at=$(dig +short NS "$parent" | head -1)
+    at=$(dig +short NS "$parent" | head -1 || true)
     [ -n "$at" ] || die "found no nameserver for $parent"
     # Asked of the parent's own server: no cache in between.
-    delegated=$(dig +norecurse +noall +authority +answer NS "$n" "@$at" | awk '$4 == "NS" { print tolower($5) }' | sort | tr '\n' ' ')
+    delegated=$(dig +norecurse +noall +authority +answer NS "$n" "@$at" | awk '$4 == "NS" { print tolower($5) }' | sort | tr '\n' ' ' || true)
     case $delegated in
         *desec*) echo "PASS	$parent delegates $n to: $delegated" ;;
         *) echo "FAIL	$parent ($at) does not delegate $n to deSEC yet (it answers: ${delegated:-nothing}). Add the two NS records; they show within minutes."; ok=1 ;;
     esac
-    address=$(dig +short A "$n" @ns1.desec.io | tr '\n' ' ')
+    address=$(dig +short A "$n" @ns1.desec.io | tr '\n' ' ' || true)
     if [ "$address" = "$ADDRESS " ]; then
         echo "PASS	deSEC answers $n A $ADDRESS"
     else
         echo "FAIL	deSEC answers $n A: ${address:-nothing} (want $ADDRESS): cert.sh token writes it"; ok=1
     fi
-    address=$(dig +short A "$n" | tr '\n' ' ')
+    address=$(dig +short A "$n" | tr '\n' ' ' || true)
     if [ "$address" = "$ADDRESS " ]; then
         echo "PASS	this server's resolver finds $n A $ADDRESS"
     else
         echo "NOTE	this server's resolver finds $n A: ${address:-nothing yet} (an earlier 'no such name' can stay cached for up to an hour; the certificate does not wait for it)"
     fi
-    caa=$(dig +short CAA "$n"; dig +short CAA "$parent")
+    caa=$(dig +short CAA "$n" || true; dig +short CAA "$parent" || true)
     if [ -n "$caa" ] && ! grep -q letsencrypt.org <<<"$caa"; then
         echo "FAIL	a CAA record keeps Let's Encrypt out: $(tr '\n' ' ' <<<"$caa")"; ok=1
     fi
